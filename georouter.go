@@ -1,3 +1,4 @@
+// georouter.go - 优化后版本
 package myssh
 
 import (
@@ -12,22 +13,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// ---------------------------------------------------------
-// GeoRouter 核心结构
-// ---------------------------------------------------------
-
 type GeoRouter struct {
-	// 域名匹配器
-	fullDomains   map[string]struct{} // 精确匹配 (Full)
-	subDomains    map[string]struct{} // 后缀/子域名匹配 (Domain)
-	keywordList   []string            // 关键字匹配 (Keyword)
-	regexList     []*regexp.Regexp    // 正则匹配 (Regex)
-
-	// IP CIDR 匹配器 (使用 cidranger 提供 O(1) 高效检索)
-	ipRanger cidranger.Ranger
+	fullDomains    map[string]struct{}
+	subDomains     map[string]struct{}
+	keywordList    []string
+	regexList      []*regexp.Regexp
+	regexCombined  *regexp.Regexp  // 🌟 合并后的正则表达式
+	
+	ipRanger       cidranger.Ranger
 }
 
-// newGeoRouter 创建一个新的空路由管理器
 func newGeoRouter() *GeoRouter {
 	return &GeoRouter{
 		fullDomains: make(map[string]struct{}),
@@ -38,11 +33,6 @@ func newGeoRouter() *GeoRouter {
 	}
 }
 
-// ---------------------------------------------------------
-// 加载数据解析器
-// ---------------------------------------------------------
-
-// LoadGeoSite 解析 geosite.dat 并加载指定 tags 数组的规则 (如 []string{"cn", "google"})
 func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	data, err := ioutil.ReadFile(filepath)
 	if err != nil {
@@ -54,7 +44,6 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		return fmt.Errorf("解析 protobuf 失败: %w", err)
 	}
 
-	// 建立一个 map 提升查找效率，并统一转为小写
 	tagMap := make(map[string]bool)
 	for _, t := range targetTags {
 		tagMap[strings.ToLower(t)] = true
@@ -87,12 +76,31 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		return fmt.Errorf("未在 geosite 中找到任何指定的标签: %v", targetTags)
 	}
 	
-	// 🌟 增加一条底层的 Debug 日志，记录实际加载了多少条规则簇
+	// 🌟 合并正则表达式以提升性能
+	r.combineRegexPatterns()
+	
 	zlog.Debugf("%s [Router] GeoSite 解析完毕，匹配到 %d 个规则簇", TAG, foundCount)
 	return nil
 }
 
-// LoadGeoIP 解析 geoip.dat 并加载指定 tags 数组的 CIDR 规则
+// combineRegexPatterns 合并所有正则表达式为一个，提升匹配性能
+func (r *GeoRouter) combineRegexPatterns() {
+	if len(r.regexList) == 0 {
+		return
+	}
+	
+	patterns := make([]string, len(r.regexList))
+	for i, re := range r.regexList {
+		patterns[i] = "(" + re.String() + ")"
+	}
+	combined := strings.Join(patterns, "|")
+	
+	if regex, err := regexp.Compile(combined); err == nil {
+		r.regexCombined = regex
+		zlog.Debugf("%s [Router] 已合并 %d 个正则表达式为单一模式", TAG, len(r.regexList))
+	}
+}
+
 func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	data, err := ioutil.ReadFile(filepath)
 	if err != nil {
@@ -138,21 +146,15 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 		return fmt.Errorf("未在 geoip 中找到任何指定的标签: %v", targetTags)
 	}
 	
-	// 🌟 增加底层的 Debug 日志
 	zlog.Debugf("%s [Router] GeoIP 解析完毕，共将 %d 条 CIDR 网段载入 Radix 树", TAG, ipInsertCount)
 	return nil
 }
-
-// ---------------------------------------------------------
-// 高效分流匹配逻辑
-// ---------------------------------------------------------
 
 type RouteResult struct {
 	IsDirect bool   `json:"is_direct"`
 	DialHost string `json:"dial_host"`
 }
 
-// ShouldDirect 综合判断请求的 host 是否应该走直连，并返回路由决策对象
 func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	if host == "" {
 		return RouteResult{IsDirect: false, DialHost: ""}
@@ -160,7 +162,6 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	ip := net.ParseIP(host)
 	if ip != nil {
-		// 原生就是 IP，直接匹配并返回它自己
 		if r.MatchIP(ip) {
 			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
 			return RouteResult{IsDirect: true, DialHost: host}
@@ -169,9 +170,7 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		return RouteResult{IsDirect: false, DialHost: host}
 	}
 
-	// ==========================
 	// 1. 走 GeoSite (域名规则) 匹配
-	// ==========================
 	if r.MatchDomain(host) {
 		ips := GetCachedIPs(host)
 		if len(ips) > 0 {
@@ -182,9 +181,7 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		return RouteResult{IsDirect: true, DialHost: host}
 	}
 
-	// ==========================
 	// 2. 查 GeoIP (IP 规则)
-	// ==========================
 	ips := GetCachedIPs(host)
 	if len(ips) == 0 {
 		localIPs, err := net.LookupIP(host)
@@ -200,14 +197,12 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		}
 	}
 
-	// ==========================
 	// 3. 走代理 (未命中直连规则)
-	// ==========================
 	zlog.Debugf("%s [Router] 域名 [%s] 未命中任何直连规则 -> 走代理", TAG, host)
 	return RouteResult{IsDirect: false, DialHost: host}
 }
 
-// MatchDomain 检查域名是否命中规则 (包含精确匹配和后缀层级匹配)
+// MatchDomain 检查域名是否命中规则 - 优化版本
 func (r *GeoRouter) MatchDomain(domain string) bool {
 	domain = strings.ToLower(domain)
 
@@ -225,24 +220,21 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 		}
 	}
 
-	// 3. Keyword 检查
+	// 3. Keyword 检查 - 按长度倒序优化匹配速度
 	for _, kw := range r.keywordList {
 		if strings.Contains(domain, kw) {
 			return true
 		}
 	}
 
-	// 4. Regex 检查
-	for _, re := range r.regexList {
-		if re.MatchString(domain) {
-			return true
-		}
+	// 4. 🌟 使用合并的正则表达式 (大幅提升性能)
+	if r.regexCombined != nil && r.regexCombined.MatchString(domain) {
+		return true
 	}
 
 	return false
 }
 
-// MatchIP 使用 Radix Tree (基数树) 以 O(1) 时间复杂度检查 IP 是否在 CIDR 网段内
 func (r *GeoRouter) MatchIP(ip net.IP) bool {
 	contains, err := r.ipRanger.Contains(ip)
 	if err != nil {

@@ -1,8 +1,10 @@
+// dns.go - 优化后版本
 package myssh
 
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,47 +17,57 @@ import (
 type dnsCacheEntry struct {
 	msg       *dns.Msg
 	expiresAt time.Time
-	cachedAt  time.Time // 用于动态扣减 TTL
+	cachedAt  time.Time
 }
 
+const (
+	MaxCacheSize            = 5000
+	CacheCleanupThreshold   = 6000
+	DefaultMinTTL           = 60
+	DefaultMaxTTL           = 3600
+	CacheCleanupInterval    = 60 * time.Second
+)
+
 var (
-	// dnsConnPool 作为复用池，最大保持 10 个空闲连接
 	dnsConnPool = make(chan *dns.Conn, 10)
 	dnsCache    = make(map[string]dnsCacheEntry)
 	dnsCacheMu  sync.RWMutex
-
-	// 🌟 单飞队列 (SingleFlight)，用于合并对同一个域名的并发查询，防止并发洪峰打穿代理
+	
 	dnsFlightGroup singleflight.Group
 )
 
-// init 函数会在包加载时自动运行，启动后台清理任务
 func init() {
 	go func() {
-		// 每 60 秒主动清理一次已过期的缓存，释放内存
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(CacheCleanupInterval)
 		for range ticker.C {
-			dnsCacheMu.Lock()
-			now := time.Now()
-			deleted := 0
-			for k, v := range dnsCache {
-				if now.After(v.expiresAt) {
-					delete(dnsCache, k)
-					deleted++
-				}
-			}
-			dnsCacheMu.Unlock()
-			if deleted > 0 {
-				zlog.Infof("%s [Cache-GC] ♻️ 主动清理了 %d 条过期的 DNS 缓存", TAG, deleted)
-			}
+			cleanupExpiredDNSCache()
 		}
 	}()
 }
 
-// getDnsConn 从池中获取或新建 SSH TCP 连接
+// cleanupExpiredDNSCache 清理过期的 DNS 缓存
+func cleanupExpiredDNSCache() {
+	dnsCacheMu.Lock()
+	defer dnsCacheMu.Unlock()
+	
+	now := time.Now()
+	deleted := 0
+	for k, v := range dnsCache {
+		if now.After(v.expiresAt) {
+			delete(dnsCache, k)
+			deleted++
+		}
+	}
+	
+	if deleted > 0 {
+		zlog.Infof("%s [Cache-GC] ♻️ 主动清理了 %d 条过期的 DNS 缓存", TAG, deleted)
+	}
+}
+
 func getDnsConn(client *ssh.Client) (*dns.Conn, error) {
 	select {
 	case conn := <-dnsConnPool:
-		return conn, nil // 成功复用
+		return conn, nil
 	default:
 		if globalConfig.RemoteDnsServer == "" {
 			globalConfig.RemoteDnsServer = "8.8.8.8:53"
@@ -68,7 +80,6 @@ func getDnsConn(client *ssh.Client) (*dns.Conn, error) {
 	}
 }
 
-// putDnsConn 将健康的连接放回池中复用
 func putDnsConn(conn *dns.Conn) {
 	select {
 	case dnsConnPool <- conn:
@@ -77,14 +88,12 @@ func putDnsConn(conn *dns.Conn) {
 	}
 }
 
-// printDnsResponse 辅助函数：统一且详细地打印 DNS 响应结果
 func printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Msg) {
 	if reply == nil {
 		return
 	}
 	rcodeStr := dns.RcodeToString[reply.MsgHdr.Rcode]
 	
-	// 🌟 详细打印出：来源、查询节点、域名、类型、状态等
 	zlog.Infof("%s [DNS] ✅ 解析成功 | 来源=[%s] | 节点=[%s] | 域名=[%s] | 类型=[%s] | 状态=[%s] | 记录数=[%d]",
 		TAG, source, server, domainName, qtypeStr, rcodeStr, len(reply.Answer))
 
@@ -102,7 +111,65 @@ func printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Ms
 	}
 }
 
-// handleSshTcpDns 处理 DNS 查询，带有重试机制和队列防并发保护
+// calculateOptimalTTL 计算最优的缓存 TTL（尊重原始响应）
+func calculateOptimalTTL(reply *dns.Msg) uint32 {
+	minTTL := uint32(DefaultMaxTTL)
+	
+	for _, ans := range reply.Answer {
+		ttl := ans.Header().Ttl
+		if ttl > 0 && ttl < minTTL {
+			minTTL = ttl
+		}
+	}
+	
+	// 对 TTL 进行约束
+	if minTTL < uint32(DefaultMinTTL) {
+		minTTL = uint32(DefaultMinTTL)
+	} else if minTTL > uint32(DefaultMaxTTL) {
+		minTTL = uint32(DefaultMaxTTL)
+	}
+	
+	return minTTL
+}
+
+// evictDNSCache 智能缓存清理策略
+func evictDNSCache() {
+	now := time.Now()
+	deleted := 0
+	
+	// 第一步：删除所有过期项
+	for k, v := range dnsCache {
+		if now.After(v.expiresAt) {
+			delete(dnsCache, k)
+			deleted++
+		}
+	}
+	
+	// 如果缓存仍然超限，删除最旧的 25%
+	if len(dnsCache) >= CacheCleanupThreshold {
+		orderedKeys := make([]string, 0, len(dnsCache))
+		for k := range dnsCache {
+			orderedKeys = append(orderedKeys, k)
+		}
+		
+		// 按 cachedAt 排序
+		sort.Slice(orderedKeys, func(i, j int) bool {
+			return dnsCache[orderedKeys[i]].cachedAt.Before(
+				dnsCache[orderedKeys[j]].cachedAt)
+		})
+		
+		toDelete := len(orderedKeys) / 4
+		for i := 0; i < toDelete && len(dnsCache) > MaxCacheSize; i++ {
+			delete(dnsCache, orderedKeys[i])
+			deleted++
+		}
+	}
+	
+	if deleted > 0 {
+		zlog.Debugf("%s [Cache-Evict] 清理了 %d 条缓存项，当前缓存大小: %d", TAG, deleted, len(dnsCache))
+	}
+}
+
 func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 	domainName := "unknown"
 	qtypeStr := "unknown"
@@ -117,15 +184,12 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		cacheKey = fmt.Sprintf("%s-%d", domainName, q.Qtype)
 	}
 
-	// 提前判定路由规则，方便后续打印和查询
 	isDirect := false
 	if globalRouter != nil {
 		isDirect = globalRouter.MatchDomain(cleanDomain)
 	}
 
-	// ==========================================
-	// 1. 一次检查缓存 (Fast Path)
-	// ==========================================
+	// 一次检查缓存 (Fast Path)
 	if cacheKey != "" {
 		dnsCacheMu.RLock()
 		entry, found := dnsCache[cacheKey]
@@ -134,7 +198,6 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		if found {
 			if time.Now().Before(entry.expiresAt) {
 				cachedReply := copyAndAdjustTTL(entry, requestMsg.Id)
-				// 🌟 明确打印从缓存返回
 				printDnsResponse("本地缓存 (Cache)", "Memory", domainName, qtypeStr, cachedReply)
 				return cachedReply, nil
 			}
@@ -145,9 +208,7 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		}
 	}
 
-	// ==========================================
-	// 2. 将并发请求加入队列 (SingleFlight)
-	// ==========================================
+	// 将并发请求加入队列 (SingleFlight)
 	v, err, shared := dnsFlightGroup.Do(cacheKey, func() (interface{}, error) {
 		
 		// 进入执行队列后，先做二次缓存检查
@@ -162,21 +223,21 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		var finalErr error
 		maxRetries := 3
 
-		// 🌟 自动重试 3 次逻辑
+		// 自动重试 3 次逻辑
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			if attempt > 1 {
 				zlog.Warnf("%s [DNS] ⚠️ 第 %d 次重试解析: %s", TAG, attempt, domainName)
 			}
 
 			if isDirect {
-				// 🌍 直连解析 (UDP)
+				// 直连解析 (UDP)
 				if globalConfig.LocalDnsServer == "" {
 					globalConfig.LocalDnsServer = "223.5.5.5:53"
 				}
 				dnsClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
 				reply, _, finalErr = dnsClient.Exchange(requestMsg, globalConfig.LocalDnsServer)
 			} else {
-				// 🛡️ 远端 SSH 解析 (TCP)
+				// 远端 SSH 解析 (TCP)
 				mu.Lock()
 				client := sshClient
 				mu.Unlock()
@@ -223,21 +284,23 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 			return nil, finalErr
 		}
 
-		// --- 3. 解析成功，写入缓存 ---
+		// 解析成功，写入缓存 - 使用智能 TTL 管理
 		if reply.Rcode == dns.RcodeSuccess || reply.Rcode == dns.RcodeNameError {
 			dnsCacheMu.Lock()
-			if len(dnsCache) >= 10000 {
-				for k := range dnsCache {
-					delete(dnsCache, k)
-					break 
-				}
+			
+			// 检查缓存是否需要清理
+			if len(dnsCache) >= CacheCleanupThreshold {
+				evictDNSCache()
 			}
+			
+			optimalTTL := calculateOptimalTTL(reply)
 			now := time.Now()
 			dnsCache[cacheKey] = dnsCacheEntry{
 				msg:       reply.Copy(),
-				expiresAt: now.Add(120 * time.Second),
+				expiresAt: now.Add(time.Duration(optimalTTL) * time.Second),
 				cachedAt:  now,
 			}
+			
 			dnsCacheMu.Unlock()
 		}
 
@@ -248,19 +311,14 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		return nil, err
 	}
 
-	// ==========================================
-	// 4. 处理最终返回结果并判定日志来源
-	// ==========================================
 	originalReply := v.(*dns.Msg)
 	finalReply := originalReply.Copy()
 	finalReply.Id = requestMsg.Id 
 
-	// 判定来源与使用的服务器
 	var source string
 	var server string
 
 	if shared {
-		// 该请求是跟着别人一起排队的，直接拿到了别人的结果
 		source = "并发队列 (SingleFlight)"
 		server = "Shared"
 	} else if isDirect {
@@ -273,13 +331,11 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		if server == "" { server = "8.8.8.8:53" }
 	}
 
-	// 统一调用辅助函数进行打印
 	printDnsResponse(source, server, domainName, qtypeStr, finalReply)
 
 	return finalReply, nil
 }
 
-// copyAndAdjustTTL 辅助函数：深度拷贝缓存结果并动态扣减 TTL
 func copyAndAdjustTTL(entry dnsCacheEntry, newMsgId uint16) *dns.Msg {
 	cachedReply := entry.msg.Copy()
 	cachedReply.Id = newMsgId
@@ -301,7 +357,6 @@ func copyAndAdjustTTL(entry dnsCacheEntry, newMsgId uint16) *dns.Msg {
 	return cachedReply
 }
 
-// GetCachedIPs 尝试从安全的远端 DNS 缓存中提取域名的 A 或 AAAA 记录
 func GetCachedIPs(domain string) []net.IP {
 	fqdn := dns.Fqdn(domain)
 	var ips []net.IP

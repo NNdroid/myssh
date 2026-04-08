@@ -1,3 +1,4 @@
+// proxy.go - 优化后版本
 package myssh
 
 import (
@@ -33,7 +34,6 @@ type ProxyConfig struct {
 	TunnelType  string `json:"tunnel_type"`
 	ProxyAddr   string `json:"proxy_addr"`
 	CustomHost  string `json:"custom_host"`
-	// --- 自定义 HTTP Payload ---
 	HttpPayload string `json:"http_payload"`
 }
 
@@ -53,9 +53,14 @@ var (
 	globalConfig GlobalConfig
 	globalRouter *GeoRouter
 	
-	// 🌟 连接池管理
-	udpNatMap    sync.Map // 管理 UDP 转发会话
-	tcpConnMap   sync.Map // 管理 TCP 直连与代理会话
+	// 🌟 连接池管理 - 使用对象池优化缓冲区分配
+	udpNatMap    sync.Map
+	tcpConnMap   sync.Map
+	bufferPool   = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 65535)
+		},
+	}
 	
 	// 🌟 生命周期与日志管理
 	wg sync.WaitGroup
@@ -100,8 +105,6 @@ func InitLogger(logPath string, logLevelStr string) int {
 	zlog.Infof("%s [Logger] 日志系统初始化完成，写入路径: %s，当前级别: %s", TAG, logPath, level.String())
 	return 0
 }
-
-// ==========================================
 
 func LoadGlobalConfigFromJson(configJson string) int {
 	if err := json.Unmarshal([]byte(configJson), &globalConfig); err != nil {
@@ -351,6 +354,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			return err
 		}
 
+		// 🌟 优化版本：等待任意一个出错，立刻关闭连接
 		errc := make(chan error, 2)
 		go func() {
 			_, err := io.Copy(remote, c)
@@ -360,7 +364,14 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			_, err := io.Copy(c, remote)
 			errc <- err
 		}()
+		
+		// 等待任意一个出错
 		<-errc
+		// 主动关闭远程连接，触发另一个 io.Copy 退出
+		remote.Close()
+		// 等待第二个完成
+		<-errc
+		
 		return nil
 	}
 
@@ -381,7 +392,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			return err
 		}
 
-		replyMsg, err := handleSshTcpDns(reqMsg) // 需要在其他文件中存在该外部实现
+		replyMsg, err := handleSshTcpDns(reqMsg)
 		if err != nil || replyMsg == nil {
 			return err
 		}
@@ -450,14 +461,17 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		zlog.Infof("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
 		udpNatMap.Store(sessionKey, uc)
 
-		// 🌟 追踪 UDP 转发 Goroutine 的生命周期
+		// 🌟 使用对象池优化缓冲区分配
 		wg.Add(1)
 		go func(conn *net.UDPConn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
 			defer wg.Done() 
 			defer conn.Close()
-			defer udpNatMap.Delete(key) 
+			defer udpNatMap.Delete(key)
 			
-			buf := make([]byte, 65535) 
+			// 从对象池获取缓冲区
+			buf := bufferPool.Get().([]byte)
+			defer bufferPool.Put(buf)
+			
 			for {
 				conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 				n, _, err := conn.ReadFromUDP(buf)
@@ -480,7 +494,6 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	return nil
 }
 
-// 🌟 WgWait 阻塞当前 goroutine，直到所有的代理服务和连接彻底退出
 func WgWait() {
 	zlog.Infof("%s [Core] 正在等待所有后台任务彻底退出...", TAG)
 	wg.Wait()
@@ -535,7 +548,6 @@ func StartSshTProxy(configJson string) int {
 
 	handler := &SshProxyHandler{}
 
-	// 🌟 追踪 SOCKS5 主服务的生命周期
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -555,7 +567,7 @@ func StopSshTProxy() {
 	zlog.Infof("%s [Core] 正在停止资源...", TAG)
 	
 	if socksServer != nil {
-		socksServer.Shutdown() // 触发 SOCKS5 服务退出
+		socksServer.Shutdown()
 		socksServer = nil
 	}
 	if sshClient != nil {
@@ -563,11 +575,10 @@ func StopSshTProxy() {
 		sshClient = nil
 	}
 
-	// 🌟 清理并强制关闭所有活跃的 TCP 客户端连接
 	tcpSessionCount := 0
 	tcpConnMap.Range(func(key, value interface{}) bool {
 		if conn, ok := value.(net.Conn); ok {
-			conn.Close() // 强行关闭客户端 Socket，立刻解除 io.Copy 的阻塞
+			conn.Close()
 			tcpSessionCount++
 		}
 		tcpConnMap.Delete(key)
@@ -577,11 +588,10 @@ func StopSshTProxy() {
 		zlog.Infof("%s [Core] 已强制断开 %d 个活跃的 TCP 会话", TAG, tcpSessionCount)
 	}
 
-	// 🌟 清理并强制关闭所有活跃的 UDP NAT 会话
 	udpSessionCount := 0
 	udpNatMap.Range(func(key, value interface{}) bool {
 		if conn, ok := value.(*net.UDPConn); ok {
-			conn.Close() // 强行关闭连接，中断 ReadFromUDP
+			conn.Close()
 			udpSessionCount++
 		}
 		udpNatMap.Delete(key)
@@ -594,7 +604,6 @@ func StopSshTProxy() {
 	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
 }
 
-// wsConnAdapter 保持不变
 type wsConnAdapter struct {
 	*websocket.Conn
 	readMu  sync.Mutex

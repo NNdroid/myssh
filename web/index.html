@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GoMySsh 实时日志监控</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="logs">日志加载中...</div>
+    <div class="status" id="status">连接中...</div>
+    <div class="footer">Auto-refreshing every 2 seconds</div>
+    <div class="controls">
+        <button id="clearBtn" onclick="clearLogs()">清空日志</button>
+        <button id="statsBtn" onclick="showStats()">统计信息</button>
+    </div>
+    <script src="/static/script.js"></script>
+</body>
+</html>
