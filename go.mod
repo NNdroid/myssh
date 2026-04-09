@@ -12,6 +12,7 @@ require (
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.49.0
 	golang.org/x/mobile v0.0.0-20260312152759-81488f6aeb60
+	golang.org/x/net v0.52.0
 	golang.org/x/sync v0.20.0
 	google.golang.org/protobuf v1.36.11
 	nhooyr.io/websocket v1.8.17
@@ -50,7 +51,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.22.0 // indirect
 	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect

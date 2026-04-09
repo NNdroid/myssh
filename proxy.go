@@ -1,31 +1,25 @@
 package myssh
 
 import (
-	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
-	"context"
 	"runtime"
 
-	"nhooyr.io/websocket"
 	"github.com/miekg/dns"
 	"github.com/txthinking/socks5"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/crypto/ssh"
-	utls "github.com/refraction-networking/utls"
 )
 
-const TAG = "[GoMySsh]"
+const TAG = "[MySsh]"
 
 type ProxyConfig struct {
 	LocalAddr   string `json:"local_addr"`
@@ -69,11 +63,20 @@ var (
 	zlog *zap.SugaredLogger = zap.NewNop().Sugar()
 )
 
+// ----- 隧道注册表机制 (策略模式) -----
+
+type TunnelHandshaker func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
+
+var tunnelRegistry = make(map[string]TunnelHandshaker)
+
+func RegisterTunnel(protocol string, handler TunnelHandshaker) {
+	tunnelRegistry[strings.ToLower(protocol)] = handler
+}
+
+// ----- 初始化与配置 -----
+
 func init() {
-    // 获取当前设备的逻辑 CPU 核心数
-    numCPU := runtime.NumCPU()
-    // 显式设置最大可用 P（Processor）数量
-    runtime.GOMAXPROCS(numCPU) 
+	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
 // InitLogger 初始化日志并将其重定向到指定文件
@@ -140,10 +143,10 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 		cfg.GeoIPFilePath = "geoip.dat"
 	}
 	if len(cfg.DirectSiteTags) == 0 {
-		cfg.DirectSiteTags = []string{"cn"}
+		cfg.DirectSiteTags = []string{}
 	}
 	if len(cfg.DirectIPTags) == 0 {
-		cfg.DirectIPTags = []string{"cn"}
+		cfg.DirectIPTags = []string{}
 	}
 
 	zlog.Infof("%s [Config] ✅ 已应用全局配置: LocalDNS=[%s], RemoteDNS=[%s], GeoSite=[%s], GeoIP=[%s]", TAG, cfg.LocalDnsServer, cfg.RemoteDnsServer, cfg.GeoSiteFilePath, cfg.GeoIPFilePath)
@@ -190,147 +193,20 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 	}
 	zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
 
-	switch strings.ToLower(cfg.TunnelType) {
-	case "tls":
-		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 Host: %s", TAG, cfg.CustomHost)
-		
-		utlsConfig := &utls.Config{
-			ServerName:         cfg.CustomHost,
-			InsecureSkipVerify: true,
-		}
-
-		// 替换标准 tls 为 utls，这里使用 HelloChrome_Auto 自动伪装最新版 Chrome 浏览器的 TLS 指纹
-		tlsConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
-		if err := tlsConn.Handshake(); err != nil {
-			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ TLS 握手失败: %v", TAG, err)
-			return nil, err
-		}
-		zlog.Infof("%s [Tunnel] ✅ TLS (utls) 握手成功", TAG)
-		return tlsConn, nil
-
-	case "ws", "wss":
-		scheme := "ws"
-		isWSS := false
-		if strings.ToLower(cfg.TunnelType) == "wss" {
-			scheme = "wss"
-			isWSS = true
-		}
-		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 握手, 伪装 Host: %s", TAG, strings.ToUpper(scheme), cfg.CustomHost)
-		
-		if cfg.CustomPath == "" {
-			cfg.CustomPath = "/"
-		}
-
-		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: cfg.CustomPath}
-
-		// 1. 构造常见的真实浏览器 Headers，消除纯机器/协议特征
-		fakeHeaders := http.Header{
-			"Host":                     []string{cfg.CustomHost},
-			"User-Agent":               []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"},
-			"Accept-Language":          []string{"zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"},
-			"Accept-Encoding":          []string{"gzip, deflate, br"},
-			"Cache-Control":            []string{"no-cache"},
-			"Pragma":                   []string{"no-cache"},
-			"Sec-WebSocket-Extensions": []string{"permessage-deflate; client_max_window_bits"},
-			"Sec-Fetch-Dest":           []string{"websocket"},
-			"Sec-Fetch-Mode":           []string{"websocket"},
-			"Sec-Fetch-Site":           []string{"same-origin"},
-		}
-
-		// 2. 自定义底层的 Transport 以支持 uTLS 和强行注入 baseConn
-		transport := &http.Transport{
-			// 强制关闭 HTTP/2 尝试。
-			// 原因：utls.HelloChrome_Auto 的 ALPN 默认包含 h2。如果服务端协商通过了 h2，
-			// 标准库 HTTP/1.1 的 Upgrade 机制会报错导致握手失败，因此必须在传输层禁用 h2。
-			ForceAttemptHTTP2: false, 
-		}
-
-		if isWSS {
-			// WSS 模式：接管 TLS 拨号过程，注入 uTLS 消除指纹
-			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				utlsConfig := &utls.Config{
-					ServerName:         cfg.CustomHost,
-					InsecureSkipVerify: true,
-				}
-				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
-				if err := uConn.HandshakeContext(ctx); err != nil {
-					return nil, err
-				}
-				return uConn, nil
-			}
-		} else {
-			// WS 模式：直接使用明文 baseConn
-			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return baseConn, nil
-			}
-		}
-
-		// 3. 设置 Dialer
-		opts := &websocket.DialOptions{
-			HTTPClient: &http.Client{
-				Transport: transport,
-			},
-			HTTPHeader:   fakeHeaders,
-			// 兼容 Websockify 强制要求的子协议
-			Subprotocols: []string{"binary"},
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// 4. 发起握手
-		wsConn, resp, err := websocket.Dial(ctx, u.String(), opts)
-		if err != nil {
-			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ WebSocket 握手失败: %v", TAG, err)
-			return nil, err
-		}
-
-		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功, 协商协议: %s", TAG, resp.Header.Get("Sec-WebSocket-Protocol"))
-
-		// 5. 神器：直接将 WebSocket 转换为标准的 net.Conn 字节流
-		stream := websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary)
-		
-		return stream, nil
-	case "http":
-		zlog.Infof("%s [Tunnel] 2. 准备发送 HTTP CONNECT 代理请求, 目标 SSH: %s", TAG, cfg.SshAddr)
-		
-		payload := cfg.HttpPayload
-		if payload == "" {
-			payload = "CONNECT [host_and_port] HTTP/1.1[crlf]Host: [host][crlf][crlf]"
-		}
-
-		payload = strings.ReplaceAll(payload, "[host_and_port]", cfg.SshAddr)
-		payload = strings.ReplaceAll(payload, "[host]", cfg.CustomHost)
-		payload = strings.ReplaceAll(payload, "[crlf]", "\r\n")
-
-		zlog.Infof("%s [Tunnel] 发送的 HTTP Payload:\n%s", TAG, payload)
-		_, err := baseConn.Write([]byte(payload))
-		if err != nil {
-			baseConn.Close()
-			return nil, err
-		}
-
-		br := bufio.NewReader(baseConn)
-		line, _ := br.ReadString('\n')
-		if !strings.Contains(line, "200") {
-			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ HTTP 代理拒绝连接: %s", TAG, line)
-			return nil, fmt.Errorf("HTTP Proxy Refused: %s", line)
-		}
-		
-		for {
-			l, _ := br.ReadString('\n')
-			if l == "\r\n" || l == "" {
-				break
-			}
-		}
-		zlog.Infof("%s [Tunnel] ✅ HTTP CONNECT 代理建立成功", TAG)
-		return baseConn, nil
-	default:
-		return baseConn, nil
+	tunnelType := strings.ToLower(cfg.TunnelType)
+	if tunnelType == "" {
+		tunnelType = "base"
 	}
+
+	handshaker, exists := tunnelRegistry[tunnelType]
+	if !exists {
+		baseConn.Close()
+		err := fmt.Errorf("unsupported tunnel type: %s", tunnelType)
+		zlog.Errorf("%s [Tunnel] ❌ %v", TAG, err)
+		return nil, err
+	}
+
+	return handshaker(cfg, baseConn)
 }
 
 type SshProxyHandler struct{}
