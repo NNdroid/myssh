@@ -3,6 +3,7 @@ package myssh
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -13,7 +14,9 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// streamConn 用于将 HTTP/2 的双向流包装成标准的 net.Conn
+// ==========================================
+// 1. HTTP/2 双向流转 net.Conn 适配器
+// ==========================================
 type streamConn struct {
 	net.Conn
 	pw       *io.PipeWriter
@@ -21,24 +24,98 @@ type streamConn struct {
 	cancel   context.CancelFunc
 }
 
-func (s *streamConn) Read(b []byte) (n int, err error) { return s.respBody.Read(b) }
+func (s *streamConn) Read(b []byte) (n int, err error)  { return s.respBody.Read(b) }
 func (s *streamConn) Write(b []byte) (n int, err error) { return s.pw.Write(b) }
 func (s *streamConn) Close() error {
-	if s.cancel != nil { s.cancel() }
-	if s.pw != nil { s.pw.Close() }
-	if s.respBody != nil { s.respBody.Close() }
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.pw != nil {
+		s.pw.Close()
+	}
+	if s.respBody != nil {
+		s.respBody.Close()
+	}
 	return s.Conn.Close()
 }
 
+// ==========================================
+// 2. gRPC 数据帧封装器
+// ==========================================
+type grpcWriter struct {
+	w io.Writer
+}
+
+func (g *grpcWriter) Write(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	buf := make([]byte, 5+len(p))
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(p))) // 1字节0 + 4字节长度
+	copy(buf[5:], p)
+
+	if _, err := g.w.Write(buf); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+type grpcReader struct {
+	r    io.Reader
+	left uint32
+}
+
+func (g *grpcReader) Read(p []byte) (n int, err error) {
+	for g.left == 0 {
+		var header [5]byte
+		if _, err := io.ReadFull(g.r, header[:]); err != nil {
+			return 0, err
+		}
+		g.left = binary.BigEndian.Uint32(header[1:5])
+	}
+
+	toRead := uint32(len(p))
+	if toRead > g.left {
+		toRead = g.left
+	}
+
+	n, err = g.r.Read(p[:toRead])
+	g.left -= uint32(n)
+	return n, err
+}
+
+// grpcConn 组合包装器：将 grpc 的读写器与底层的 net.Conn 绑定
+type grpcConn struct {
+	net.Conn
+	gw *grpcWriter
+	gr *grpcReader
+}
+
+func (g *grpcConn) Read(b []byte) (n int, err error)  { return g.gr.Read(b) }
+func (g *grpcConn) Write(b []byte) (n int, err error) { return g.gw.Write(b) }
+
+// ==========================================
+// 3. 核心握手逻辑与注册
+// ==========================================
 func init() {
-	// 提取 H2 通用握手逻辑
-	h2Handler := func(cfg ProxyConfig, baseConn net.Conn, isH2TLS bool) (net.Conn, error) {
+	// 提取 H2 和 gRPC 通用的握手逻辑
+	// isTLS: 是否使用 TLS (区分 h2/h2c)
+	// isGRPC: 是否套用 gRPC 协议头和封包器
+	h2Handler := func(cfg ProxyConfig, baseConn net.Conn, isTLS bool, isGRPC bool) (net.Conn, error) {
 		scheme := "http"
-		if isH2TLS {
+		protoName := "H2C"
+		if isTLS {
 			scheme = "https"
+			protoName = "H2"
+		}
+		if isGRPC {
+			protoName = "gRPC"
+			if !isTLS {
+				protoName = "gRPC-Cleartext"
+			}
 		}
 
-		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 隧道握手, 伪装 Host: %s", TAG, scheme, cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 隧道握手, 伪装 Host: %s", TAG, protoName, cfg.CustomHost)
 
 		path := cfg.CustomPath
 		if path == "" {
@@ -57,11 +134,17 @@ func init() {
 		}
 
 		req.Header.Set("Host", cfg.CustomHost)
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 		req.Header.Set("X-Target", cfg.SshAddr) // 核心路由信息
 
+		// 🌟 核心差异：注入 gRPC 标准头部
+		if isGRPC {
+			req.Header.Set("Content-Type", "application/grpc")
+			req.Header.Set("TE", "trailers")
+		}
+
 		transport := &http2.Transport{}
-		if isH2TLS {
+		if isTLS {
 			transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
 				utlsConfig := &utls.Config{
 					ServerName:         cfg.CustomHost,
@@ -98,35 +181,57 @@ func init() {
 		case err := <-errChan:
 			baseConn.Close()
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ %s 握手请求失败: %v", TAG, scheme, err)
+			zlog.Errorf("%s [Tunnel] ❌ %s 握手请求失败: %v", TAG, protoName, err)
 			return nil, err
 		case resp := <-respChan:
 			if resp.StatusCode != http.StatusOK {
 				baseConn.Close()
 				cancel()
-				zlog.Errorf("%s [Tunnel] ❌ %s 服务端拒绝, 状态码: %d", TAG, scheme, resp.StatusCode)
-				return nil, fmt.Errorf("HTTP2 status: %d", resp.StatusCode)
+				zlog.Errorf("%s [Tunnel] ❌ %s 服务端拒绝, 状态码: %d", TAG, protoName, resp.StatusCode)
+				return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
 			}
-			zlog.Infof("%s [Tunnel] ✅ %s 隧道握手成功", TAG, scheme)
+			zlog.Infof("%s [Tunnel] ✅ %s 隧道握手成功", TAG, protoName)
 
-			return &streamConn{
+			// 组装底层的 HTTP/2 流连接
+			sConn := &streamConn{
 				Conn:     baseConn,
 				pw:       pw,
 				respBody: resp.Body,
 				cancel:   cancel,
-			}, nil
+			}
+
+			// 🌟 核心差异：如果是 gRPC，给这个连接套上数据帧封包器
+			if isGRPC {
+				return &grpcConn{
+					Conn: sConn,
+					gw:   &grpcWriter{w: sConn},
+					gr:   &grpcReader{r: sConn},
+				}, nil
+			}
+
+			return sConn, nil
+
 		case <-time.After(15 * time.Second):
 			baseConn.Close()
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ %s 握手超时", TAG, scheme)
-			return nil, fmt.Errorf("h2 handshake timeout")
+			zlog.Errorf("%s [Tunnel] ❌ %s 握手超时", TAG, protoName)
+			return nil, fmt.Errorf("%s handshake timeout", protoName)
 		}
 	}
 
+	// 注册 H2 系列
 	RegisterTunnel("h2c", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return h2Handler(cfg, baseConn, false)
+		return h2Handler(cfg, baseConn, false, false)
 	})
 	RegisterTunnel("h2", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return h2Handler(cfg, baseConn, true)
+		return h2Handler(cfg, baseConn, true, false)
+	})
+	
+	// 注册 gRPC 系列
+	RegisterTunnel("grpcc", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return h2Handler(cfg, baseConn, false, true) // Cleartext gRPC
+	})
+	RegisterTunnel("grpc", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return h2Handler(cfg, baseConn, true, true)  // TLS gRPC
 	})
 }
