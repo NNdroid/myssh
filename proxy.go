@@ -36,6 +36,7 @@ type ProxyConfig struct {
 	ProxyAddr   string `json:"proxy_addr"`
 	CustomHost  string `json:"custom_host"`
 	HttpPayload string `json:"http_payload"`
+	CustomPath  string `json:"custom_path"`
 }
 
 type GlobalConfig struct {
@@ -216,8 +217,12 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 			isWSS = true
 		}
 		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 握手, 伪装 Host: %s", TAG, strings.ToUpper(scheme), cfg.CustomHost)
+		
+		if cfg.CustomPath == "" {
+			cfg.CustomPath = "/"
+		}
 
-		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: "/"}
+		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: cfg.CustomPath}
 
 		// 1. 构造常见的真实浏览器 Headers，消除纯机器/协议特征
 		fakeHeaders := http.Header{
