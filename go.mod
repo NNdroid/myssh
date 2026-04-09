@@ -4,7 +4,6 @@ go 1.26.1
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/gorilla/websocket v1.5.3
 	github.com/miekg/dns v1.1.72
 	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e
 	github.com/v2fly/v2ray-core/v5 v5.48.0
@@ -14,6 +13,7 @@ require (
 	golang.org/x/mobile v0.0.0-20260312152759-81488f6aeb60
 	golang.org/x/sync v0.20.0
 	google.golang.org/protobuf v1.36.11
+	nhooyr.io/websocket v1.8.17
 )
 
 require (

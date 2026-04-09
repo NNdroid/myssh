@@ -15,8 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"context"
 
-	"github.com/gorilla/websocket"
+	"nhooyr.io/websocket"
 	"github.com/miekg/dns"
 	"github.com/txthinking/socks5"
 	"go.uber.org/zap"
@@ -195,25 +196,53 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 		}
 		zlog.Infof("%s [Tunnel] ✅ TLS 握手成功", TAG)
 		return tlsConn, nil
-	case "ws", "wss":
+case "ws", "wss":
 		scheme := "ws"
 		if strings.ToLower(cfg.TunnelType) == "wss" {
 			scheme = "wss"
 		}
 		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 握手, 伪装 Host: %s", TAG, strings.ToUpper(scheme), cfg.CustomHost)
+
 		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: "/"}
-		wsDialer := &websocket.Dialer{
-			NetDial:         func(n, a string) (net.Conn, error) { return baseConn, nil },
-			TLSClientConfig: &tls.Config{ServerName: cfg.CustomHost, InsecureSkipVerify: true},
+
+		// 1. 设置 Dialer 并强行注入 baseConn
+		opts := &websocket.DialOptions{
+			HTTPClient: &http.Client{
+				Transport: &http.Transport{
+					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+						return baseConn, nil
+					},
+					TLSClientConfig: &tls.Config{
+						ServerName:         cfg.CustomHost,
+						InsecureSkipVerify: true,
+					},
+				},
+			},
+			HTTPHeader: http.Header{
+				"Host": []string{cfg.CustomHost},
+			},
+			// 兼容 Websockify 强制要求的子协议
+			Subprotocols: []string{"binary"},
 		}
-		ws, _, err := wsDialer.Dial(u.String(), http.Header{"Host": {cfg.CustomHost}})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// 2. 发起握手
+		wsConn, resp, err := websocket.Dial(ctx, u.String(), opts)
 		if err != nil {
 			baseConn.Close()
 			zlog.Errorf("%s [Tunnel] ❌ WebSocket 握手失败: %v", TAG, err)
 			return nil, err
 		}
-		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功", TAG)
-		return &wsConnAdapter{Conn: ws}, nil
+
+		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功, 协商协议: %s", TAG, resp.Header.Get("Sec-WebSocket-Protocol"))
+
+		// 3. 神器：直接将 WebSocket 转换为标准的 net.Conn 字节流！
+		// 内部自动解决拆包、粘包、保活探针等一切导致 frame advance 崩溃的问题
+		stream := websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary)
+		
+		return stream, nil
 	case "http":
 		zlog.Infof("%s [Tunnel] 2. 准备发送 HTTP CONNECT 代理请求, 目标 SSH: %s", TAG, cfg.SshAddr)
 		
@@ -603,47 +632,3 @@ func StopSshTProxy() {
 
 	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
 }
-
-type wsConnAdapter struct {
-	*websocket.Conn
-	readMu  sync.Mutex
-	reader  io.Reader
-	writeMu sync.Mutex
-}
-
-func (c *wsConnAdapter) Read(b []byte) (int, error) {
-	c.readMu.Lock()
-	defer c.readMu.Unlock()
-	for {
-		if c.reader == nil {
-			_, r, err := c.NextReader()
-			if err != nil {
-				return 0, err
-			}
-			c.reader = r
-		}
-		n, err := c.reader.Read(b)
-		if err == io.EOF {
-			c.reader = nil
-			if n > 0 {
-				return n, nil
-			}
-			continue
-		}
-		return n, err
-	}
-}
-
-func (c *wsConnAdapter) Write(b []byte) (int, error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	err := c.WriteMessage(websocket.BinaryMessage, b)
-	if err != nil {
-		return 0, err
-	}
-	return len(b), nil
-}
-
-func (c *wsConnAdapter) SetDeadline(t time.Time) error      { return c.UnderlyingConn().SetDeadline(t) }
-func (c *wsConnAdapter) SetReadDeadline(t time.Time) error  { return c.UnderlyingConn().SetReadDeadline(t) }
-func (c *wsConnAdapter) SetWriteDeadline(t time.Time) error { return c.UnderlyingConn().SetWriteDeadline(t) }
