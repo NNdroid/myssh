@@ -1,9 +1,7 @@
-// proxy.go - 优化后版本
 package myssh
 
 import (
 	"bufio"
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"context"
+	"runtime"
 
 	"nhooyr.io/websocket"
 	"github.com/miekg/dns"
@@ -23,6 +22,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/crypto/ssh"
+	utls "github.com/refraction-networking/utls"
 )
 
 const TAG = "[GoMySsh]"
@@ -67,6 +67,13 @@ var (
 	wg sync.WaitGroup
 	zlog *zap.SugaredLogger = zap.NewNop().Sugar()
 )
+
+func init() {
+    // 获取当前设备的逻辑 CPU 核心数
+    numCPU := runtime.NumCPU()
+    // 显式设置最大可用 P（Processor）数量
+    runtime.GOMAXPROCS(numCPU) 
+}
 
 // InitLogger 初始化日志并将其重定向到指定文件
 func InitLogger(logPath string, logLevelStr string) int {
@@ -184,43 +191,82 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 
 	switch strings.ToLower(cfg.TunnelType) {
 	case "tls":
-		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (SNI Proxy) 握手, 伪装 Host: %s", TAG, cfg.CustomHost)
-		tlsConn := tls.Client(baseConn, &tls.Config{
+		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 Host: %s", TAG, cfg.CustomHost)
+		
+		utlsConfig := &utls.Config{
 			ServerName:         cfg.CustomHost,
 			InsecureSkipVerify: true,
-		})
+		}
+
+		// 替换标准 tls 为 utls，这里使用 HelloChrome_Auto 自动伪装最新版 Chrome 浏览器的 TLS 指纹
+		tlsConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
 		if err := tlsConn.Handshake(); err != nil {
 			baseConn.Close()
 			zlog.Errorf("%s [Tunnel] ❌ TLS 握手失败: %v", TAG, err)
 			return nil, err
 		}
-		zlog.Infof("%s [Tunnel] ✅ TLS 握手成功", TAG)
+		zlog.Infof("%s [Tunnel] ✅ TLS (utls) 握手成功", TAG)
 		return tlsConn, nil
-case "ws", "wss":
+
+	case "ws", "wss":
 		scheme := "ws"
+		isWSS := false
 		if strings.ToLower(cfg.TunnelType) == "wss" {
 			scheme = "wss"
+			isWSS = true
 		}
 		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 握手, 伪装 Host: %s", TAG, strings.ToUpper(scheme), cfg.CustomHost)
 
 		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: "/"}
 
-		// 1. 设置 Dialer 并强行注入 baseConn
+		// 1. 构造常见的真实浏览器 Headers，消除纯机器/协议特征
+		fakeHeaders := http.Header{
+			"Host":                     []string{cfg.CustomHost},
+			"User-Agent":               []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"},
+			"Accept-Language":          []string{"zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"},
+			"Accept-Encoding":          []string{"gzip, deflate, br"},
+			"Cache-Control":            []string{"no-cache"},
+			"Pragma":                   []string{"no-cache"},
+			"Sec-WebSocket-Extensions": []string{"permessage-deflate; client_max_window_bits"},
+			"Sec-Fetch-Dest":           []string{"websocket"},
+			"Sec-Fetch-Mode":           []string{"websocket"},
+			"Sec-Fetch-Site":           []string{"same-origin"},
+		}
+
+		// 2. 自定义底层的 Transport 以支持 uTLS 和强行注入 baseConn
+		transport := &http.Transport{
+			// 强制关闭 HTTP/2 尝试。
+			// 原因：utls.HelloChrome_Auto 的 ALPN 默认包含 h2。如果服务端协商通过了 h2，
+			// 标准库 HTTP/1.1 的 Upgrade 机制会报错导致握手失败，因此必须在传输层禁用 h2。
+			ForceAttemptHTTP2: false, 
+		}
+
+		if isWSS {
+			// WSS 模式：接管 TLS 拨号过程，注入 uTLS 消除指纹
+			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				utlsConfig := &utls.Config{
+					ServerName:         cfg.CustomHost,
+					InsecureSkipVerify: true,
+				}
+				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
+				if err := uConn.HandshakeContext(ctx); err != nil {
+					return nil, err
+				}
+				return uConn, nil
+			}
+		} else {
+			// WS 模式：直接使用明文 baseConn
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return baseConn, nil
+			}
+		}
+
+		// 3. 设置 Dialer
 		opts := &websocket.DialOptions{
 			HTTPClient: &http.Client{
-				Transport: &http.Transport{
-					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-						return baseConn, nil
-					},
-					TLSClientConfig: &tls.Config{
-						ServerName:         cfg.CustomHost,
-						InsecureSkipVerify: true,
-					},
-				},
+				Transport: transport,
 			},
-			HTTPHeader: http.Header{
-				"Host": []string{cfg.CustomHost},
-			},
+			HTTPHeader:   fakeHeaders,
 			// 兼容 Websockify 强制要求的子协议
 			Subprotocols: []string{"binary"},
 		}
@@ -228,7 +274,7 @@ case "ws", "wss":
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// 2. 发起握手
+		// 4. 发起握手
 		wsConn, resp, err := websocket.Dial(ctx, u.String(), opts)
 		if err != nil {
 			baseConn.Close()
@@ -238,8 +284,7 @@ case "ws", "wss":
 
 		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功, 协商协议: %s", TAG, resp.Header.Get("Sec-WebSocket-Protocol"))
 
-		// 3. 神器：直接将 WebSocket 转换为标准的 net.Conn 字节流！
-		// 内部自动解决拆包、粘包、保活探针等一切导致 frame advance 崩溃的问题
+		// 5. 神器：直接将 WebSocket 转换为标准的 net.Conn 字节流
 		stream := websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary)
 		
 		return stream, nil
@@ -527,6 +572,107 @@ func WgWait() {
 	zlog.Infof("%s [Core] 正在等待所有后台任务彻底退出...", TAG)
 	wg.Wait()
 	zlog.Infof("%s [Core] ✅ 所有后台任务已安全清理完毕，程序可安全退出", TAG)
+}
+
+func StartSshTProxy2(configJson string) int {
+	StopSshTProxy()
+
+	var cfg ProxyConfig
+	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
+		zlog.Errorf("%s [Core] ❌ 解析配置 JSON 失败: %v", TAG, err)
+		return -1
+	}
+
+	zlog.Infof("%s [Core] ==================== 启动代理引擎 ====================", TAG)
+
+	var conn net.Conn
+	var err error
+	var scc ssh.Conn
+	var chans <-chan ssh.NewChannel
+	var reqs <-chan *ssh.Request
+
+	// 核心优化 1：引入启动期的内部短重试机制（默认重试 3 次，避免 UI 和 TUN 网卡频繁闪烁）
+	maxRetries := 3
+	for i := 1; i <= maxRetries; i++ {
+		if i > 1 {
+			zlog.Infof("%s [Core] 🔄 等待 2 秒后尝试第 %d/%d 次重新拨号...", TAG, i, maxRetries)
+			time.Sleep(2 * time.Second)
+		}
+
+		conn, err = dialTunnel(cfg)
+		if err != nil {
+			zlog.Errorf("%s [Core] ❌ 隧道建立失败: %v", TAG, err)
+			if i == maxRetries {
+				return -2
+			}
+			continue
+		}
+
+		sshConfig := &ssh.ClientConfig{
+			User:            cfg.User,
+			Auth:            []ssh.AuthMethod{ssh.Password(cfg.Pass)},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			Timeout:         15 * time.Second,
+		}
+
+		zlog.Infof("%s [SSH] 3. 准备与远端建立 SSH 安全认证 (User: %s)", TAG, cfg.User)
+		scc, chans, reqs, err = ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
+		if err != nil {
+			conn.Close()
+			zlog.Errorf("%s [SSH] ❌ SSH 握手或认证失败: %v", TAG, err)
+			if i == maxRetries {
+				return -3
+			}
+			continue
+		}
+		
+		// 走到这里说明连接成功，跳出重试循环
+		break 
+	}
+
+	zlog.Infof("%s [SSH] ✅ SSH 隧道握手并认证成功！", TAG)
+
+	mu.Lock()
+	sshClient = ssh.NewClient(scc, chans, reqs)
+	mu.Unlock()
+
+	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
+	if err != nil {
+		zlog.Errorf("%s [SOCKS5] ❌ 创建 SOCKS5 服务器实例失败: %v", TAG, err)
+		return -4
+	}
+
+	mu.Lock()
+	socksServer = srv
+	mu.Unlock()
+
+	handler := &SshProxyHandler{}
+
+	// SOCKS5 监听协程
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		zlog.Infof("%s [SOCKS5] 🚀 SOCKS5 本地代理服务已启动并监听于: %s", TAG, cfg.LocalAddr)
+		if err := srv.ListenAndServe(handler); err != nil && !strings.Contains(err.Error(), "closed network connection") {
+			zlog.Errorf("%s [SOCKS5] ❌ 服务异常退出: %v", TAG, err)
+		}
+		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 本地代理服务已完全停止", TAG)
+	}()
+
+	// 核心优化 2：运行期的 SSH 连接断开守护协程 (解决僵尸连接问题)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Wait() 方法会一直阻塞，直到由于任何原因（超时、服务端掐断、网络断开）导致 SSH 掉线
+		_ = sshClient.Wait()
+		zlog.Errorf("%s [SSH] ⚠️ 检测到 SSH 底层连接已断开，触发全局关闭...", TAG)
+		
+		// 主动调用销毁函数（这会关闭 socksServer，从而让 ListenAndServe 退出）
+		// 最终 wg.Wait() 会解除阻塞，Kotlin 层的主循环就会接管并执行 UI 级的自动重连！
+		StopSshTProxy()
+	}()
+
+	return 0
 }
 
 func StartSshTProxy(configJson string) int {

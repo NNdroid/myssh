@@ -35,7 +35,7 @@ go mod tidy
 # 3. 执行 gomobile 编译命令
 echo "📦 正在编译并打包至 $OUTPUT_PATH ..."
 # 在 Git Bash 等环境中，相对路径 "../../libs" 能被原生的 gomobile.exe 完美识别
-gomobile bind -v -target=android -androidapi 28 -o "$OUTPUT_PATH" "$GO_SRC_DIR"
+gomobile bind -v -target=android -androidapi 28 -ldflags="-s -w" -trimpath -o "$OUTPUT_PATH" "$GO_SRC_DIR"
 
 # 4. 检查编译结果
 if [ -f "$OUTPUT_PATH" ]; then
