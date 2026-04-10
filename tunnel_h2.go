@@ -134,6 +134,9 @@ func init() {
 		}
 
 		req.Header.Set("Host", cfg.CustomHost)
+		if cfg.CustomHost != "" {
+			req.Host = cfg.CustomHost
+		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 		req.Header.Set("X-Target", cfg.SshAddr) // 核心路由信息
 
