@@ -220,18 +220,18 @@ func init() {
 	}
 
 	// 注册 H2 系列
-	RegisterTunnel("h2c", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("h2c", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return h2Handler(cfg, baseConn, false, false)
 	})
-	RegisterTunnel("h2", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("h2", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return h2Handler(cfg, baseConn, true, false)
 	})
 	
 	// 注册 gRPC 系列
-	RegisterTunnel("grpcc", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("grpcc", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return h2Handler(cfg, baseConn, false, true) // Cleartext gRPC
 	})
-	RegisterTunnel("grpc", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("grpc", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return h2Handler(cfg, baseConn, true, true)  // TLS gRPC
 	})
 }

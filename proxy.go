@@ -65,12 +65,31 @@ var (
 
 // ----- 隧道注册表机制 (策略模式) -----
 
-type TunnelHandshaker func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
+// TunnelHandler 是隧道创建函数的签名
+type TunnelHandler func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
 
-var tunnelRegistry = make(map[string]TunnelHandshaker)
+// TunnelProtocol 描述了一个隧道协议的底层属性
+type TunnelProtocol struct {
+	Network string        // 底层网络类型: "tcp", "udp", 或 "none"
+	Handler TunnelHandler // 对应的处理逻辑
+}
 
-func RegisterTunnel(protocol string, handler TunnelHandshaker) {
-	tunnelRegistry[strings.ToLower(protocol)] = handler
+var tunnelRegistry = make(map[string]TunnelProtocol)
+
+// RegisterTunnel 注册隧道时，强制要求传入底层的 Network 类型
+func RegisterTunnel(name string, network string, handler TunnelHandler) {
+	tunnelRegistry[name] = TunnelProtocol{
+		Network: network,
+		Handler: handler,
+	}
+}
+
+// GetTunnel 获取隧道协议配置
+func GetTunnel(name string) (TunnelProtocol, error) {
+	if proto, ok := tunnelRegistry[name]; ok {
+		return proto, nil
+	}
+	return TunnelProtocol{}, fmt.Errorf("unsupported tunnel type: %s", name)
 }
 
 // ----- 初始化与配置 -----
@@ -179,34 +198,54 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 }
 
 func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
-	target := cfg.ProxyAddr
-	if strings.ToLower(cfg.TunnelType) == "base" || cfg.TunnelType == "" {
-		target = cfg.SshAddr
-	}
-
-	zlog.Infof("%s [Tunnel] 1. 开始建立底层连接，目标地址: %s, 模式: %s", TAG, target, cfg.TunnelType)
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	baseConn, err := dialer.Dial("tcp", target)
-	if err != nil {
-		zlog.Errorf("%s [Tunnel] ❌ 底层 TCP 连接失败: %v", TAG, err)
-		return nil, err
-	}
-	zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
-
 	tunnelType := strings.ToLower(cfg.TunnelType)
 	if tunnelType == "" {
 		tunnelType = "base"
 	}
 
-	handshaker, exists := tunnelRegistry[tunnelType]
+	// 1. 核心反转：先查询注册表，获取协议所需的底层网络类型
+	proto, exists := tunnelRegistry[tunnelType]
 	if !exists {
-		baseConn.Close()
 		err := fmt.Errorf("unsupported tunnel type: %s", tunnelType)
 		zlog.Errorf("%s [Tunnel] ❌ %v", TAG, err)
 		return nil, err
 	}
 
-	return handshaker(cfg, baseConn)
+	// 2. 确定目标地址
+	target := cfg.ProxyAddr
+	if tunnelType == "base" {
+		target = cfg.SshAddr
+	}
+
+	zlog.Infof("%s [Tunnel] 1. 准备建立底层连接，目标: %s, 模式: %s, 网络要求: %s", TAG, target, tunnelType, proto.Network)
+
+	var baseConn net.Conn
+	var err error
+
+	// 3. 根据协议的网络要求，动态决定物理连接行为
+	switch proto.Network {
+	case "tcp":
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		baseConn, err = dialer.Dial("tcp", target)
+		if err != nil {
+			zlog.Errorf("%s [Tunnel] ❌ 底层 TCP 连接失败: %v", TAG, err)
+			return nil, err
+		}
+		zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
+
+	case "udp":
+		// QUIC 或 H3 协议，由 quic-go 内部负责 UDP 拨号和生命周期管理
+		zlog.Infof("%s [Tunnel] ⚡ 检测到 UDP 需求，已跳过常规 TCP 拨号", TAG)
+		baseConn = nil
+
+	default:
+		// 针对未来可能加入的纯逻辑层代理（无需物理 Conn）
+		baseConn = nil
+	}
+
+	// 4. 将底座交由对应协议的 Handler 进行应用层握手
+	// 注意：这里的 proto 假设你已经定义成了包含 .Network 和 .Handler 的结构体
+	return proto.Handler(cfg, baseConn)
 }
 
 type SshProxyHandler struct{}

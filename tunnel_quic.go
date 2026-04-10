@@ -12,8 +12,8 @@ import (
 // quicNetConn 将 quic.Stream (数据流) 和 quic.Connection (底层 UDP 会话) 
 // 包装为标准的 net.Conn，让上层 io.Copy 能够像操作 TCP 一样操作 QUIC
 type quicNetConn struct {
-	quic.Stream
-	conn quic.Connection
+	*quic.Stream
+	conn *quic.Conn
 }
 
 func (q *quicNetConn) LocalAddr() net.Addr  { return q.conn.LocalAddr() }
@@ -26,12 +26,11 @@ func (q *quicNetConn) Close() error {
 }
 
 func init() {
-	RegisterTunnel("quic", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		// ⚠️ 核心处理：QUIC 跑在 UDP 上。
-		// 父级函数 dialTunnel 传进来的 baseConn 是 TCP 的，直接关掉它，避免浪费连接。
-		if baseConn != nil {
-			baseConn.Close()
-		}
+	// 🌟 核心修改 1：显式声明协议的底层网络要求为 "udp"
+	RegisterTunnel("quic", "udp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		
+		// 🌟 核心修改 2：去掉了 baseConn.Close() 的打补丁逻辑，
+		// 因为我们新的 dialTunnel 发现是 "udp" 时，根本就不会去拨号 TCP，传进来的 baseConn 直接就是 nil！
 
 		zlog.Infof("%s [Tunnel] 2. 准备进行 QUIC (UDP) 握手, 目标: %s, 伪装 Host: %s", TAG, cfg.ProxyAddr, cfg.CustomHost)
 

@@ -70,10 +70,10 @@ func init() {
 		return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 	}
 
-	RegisterTunnel("ws", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("ws", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return wsHandler(cfg, baseConn, false)
 	})
-	RegisterTunnel("wss", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("wss", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return wsHandler(cfg, baseConn, true)
 	})
 }

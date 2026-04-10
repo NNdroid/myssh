@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	RegisterTunnel("http", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("http", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		zlog.Infof("%s [Tunnel] 2. 准备发送 HTTP CONNECT 代理请求, 目标: %s", TAG, cfg.SshAddr)
 		
 		payload := cfg.HttpPayload

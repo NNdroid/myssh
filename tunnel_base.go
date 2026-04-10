@@ -8,12 +8,12 @@ import (
 
 func init() {
 	// 1. 基础直连
-	RegisterTunnel("base", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("base", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return baseConn, nil
 	})
 
 	// 2. TLS (利用 uTLS 消除指纹)
-	RegisterTunnel("tls", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("tls", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 Host: %s", TAG, cfg.CustomHost)
 		
 		utlsConfig := &utls.Config{

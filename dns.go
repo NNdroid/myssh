@@ -1,10 +1,9 @@
-// dns.go - 优化后版本
 package myssh
 
 import (
 	"fmt"
 	"net"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,18 +20,18 @@ type dnsCacheEntry struct {
 }
 
 const (
-	MaxCacheSize            = 5000
-	CacheCleanupThreshold   = 6000
-	DefaultMinTTL           = 60
-	DefaultMaxTTL           = 3600
-	CacheCleanupInterval    = 60 * time.Second
+	MaxCacheSize          = 5000
+	CacheCleanupThreshold = 6000
+	DefaultMinTTL         = 60
+	DefaultMaxTTL         = 3600
+	CacheCleanupInterval  = 60 * time.Second
 )
 
 var (
 	dnsConnPool = make(chan *dns.Conn, 10)
 	dnsCache    = make(map[string]dnsCacheEntry)
 	dnsCacheMu  sync.RWMutex
-	
+
 	dnsFlightGroup singleflight.Group
 )
 
@@ -45,22 +44,43 @@ func init() {
 	}()
 }
 
-// cleanupExpiredDNSCache 清理过期的 DNS 缓存
+// cleanupExpiredDNSCache 后台定时清理 (获取写锁后调用核心清理逻辑)
 func cleanupExpiredDNSCache() {
 	dnsCacheMu.Lock()
 	defer dnsCacheMu.Unlock()
-	
+	evictDNSCacheLocked()
+}
+
+// evictDNSCacheLocked 智能缓存清理与驱逐策略 
+// ⚠️ 调用前必须持有 dnsCacheMu.Lock() 互斥锁
+func evictDNSCacheLocked() {
 	now := time.Now()
 	deleted := 0
+
+	// 1. 第一阶段：清理所有自然过期的记录
 	for k, v := range dnsCache {
 		if now.After(v.expiresAt) {
 			delete(dnsCache, k)
 			deleted++
 		}
 	}
-	
+
+	// 2. 第二阶段：如果清理过期后依然超载，则强制驱逐
+	// ⚡ 优化：利用 Go map 天生的随机遍历特性进行 $O(1)$ 驱逐，避免昂贵的 sort.Slice 阻塞全局锁
+	if len(dnsCache) >= CacheCleanupThreshold {
+		toDelete := len(dnsCache) - MaxCacheSize
+		for k := range dnsCache {
+			if toDelete <= 0 {
+				break
+			}
+			delete(dnsCache, k)
+			toDelete--
+			deleted++
+		}
+	}
+
 	if deleted > 0 {
-		zlog.Infof("%s [Cache-GC] ♻️ 主动清理了 %d 条过期的 DNS 缓存", TAG, deleted)
+		zlog.Debugf("%s [Cache-GC] ♻️ 清理/驱逐了 %d 条 DNS 缓存，当前余量: %d", TAG, deleted, len(dnsCache))
 	}
 }
 
@@ -93,7 +113,7 @@ func printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Ms
 		return
 	}
 	rcodeStr := dns.RcodeToString[reply.MsgHdr.Rcode]
-	
+
 	zlog.Infof("%s [DNS] ✅ 解析成功 | 来源=[%s] | 节点=[%s] | 域名=[%s] | 类型=[%s] | 状态=[%s] | 记录数=[%d]",
 		TAG, source, server, domainName, qtypeStr, rcodeStr, len(reply.Answer))
 
@@ -111,63 +131,24 @@ func printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Ms
 	}
 }
 
-// calculateOptimalTTL 计算最优的缓存 TTL（尊重原始响应）
+// calculateOptimalTTL 计算最优的缓存 TTL（尊重原始响应并加入上下限约束）
 func calculateOptimalTTL(reply *dns.Msg) uint32 {
 	minTTL := uint32(DefaultMaxTTL)
-	
+
 	for _, ans := range reply.Answer {
 		ttl := ans.Header().Ttl
 		if ttl > 0 && ttl < minTTL {
 			minTTL = ttl
 		}
 	}
-	
-	// 对 TTL 进行约束
+
 	if minTTL < uint32(DefaultMinTTL) {
 		minTTL = uint32(DefaultMinTTL)
 	} else if minTTL > uint32(DefaultMaxTTL) {
 		minTTL = uint32(DefaultMaxTTL)
 	}
-	
-	return minTTL
-}
 
-// evictDNSCache 智能缓存清理策略
-func evictDNSCache() {
-	now := time.Now()
-	deleted := 0
-	
-	// 第一步：删除所有过期项
-	for k, v := range dnsCache {
-		if now.After(v.expiresAt) {
-			delete(dnsCache, k)
-			deleted++
-		}
-	}
-	
-	// 如果缓存仍然超限，删除最旧的 25%
-	if len(dnsCache) >= CacheCleanupThreshold {
-		orderedKeys := make([]string, 0, len(dnsCache))
-		for k := range dnsCache {
-			orderedKeys = append(orderedKeys, k)
-		}
-		
-		// 按 cachedAt 排序
-		sort.Slice(orderedKeys, func(i, j int) bool {
-			return dnsCache[orderedKeys[i]].cachedAt.Before(
-				dnsCache[orderedKeys[j]].cachedAt)
-		})
-		
-		toDelete := len(orderedKeys) / 4
-		for i := 0; i < toDelete && len(dnsCache) > MaxCacheSize; i++ {
-			delete(dnsCache, orderedKeys[i])
-			deleted++
-		}
-	}
-	
-	if deleted > 0 {
-		zlog.Debugf("%s [Cache-Evict] 清理了 %d 条缓存项，当前缓存大小: %d", TAG, deleted, len(dnsCache))
-	}
+	return minTTL
 }
 
 func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
@@ -181,7 +162,8 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		domainName = q.Name
 		cleanDomain = strings.TrimSuffix(domainName, ".")
 		qtypeStr = dns.TypeToString[q.Qtype]
-		cacheKey = fmt.Sprintf("%s-%d", domainName, q.Qtype)
+		// ⚡ 优化：使用 strconv.Itoa 替代 fmt.Sprintf，避免高频请求下的内存分配
+		cacheKey = domainName + "-" + strconv.Itoa(int(q.Qtype))
 	}
 
 	isDirect := false
@@ -189,7 +171,7 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 		isDirect = globalRouter.MatchDomain(cleanDomain)
 	}
 
-	// 一次检查缓存 (Fast Path)
+	// 1. 一次检查缓存 (Fast Path - 并发读锁)
 	if cacheKey != "" {
 		dnsCacheMu.RLock()
 		entry, found := dnsCache[cacheKey]
@@ -201,17 +183,17 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 				printDnsResponse("本地缓存 (Cache)", "Memory", domainName, qtypeStr, cachedReply)
 				return cachedReply, nil
 			}
-			// 过期则删除
+			// 过期则删除 (升级为写锁)
 			dnsCacheMu.Lock()
 			delete(dnsCache, cacheKey)
 			dnsCacheMu.Unlock()
 		}
 	}
 
-	// 将并发请求加入队列 (SingleFlight)
+	// 2. 将对同一域名的并发请求收束为单一请求 (SingleFlight)
 	v, err, shared := dnsFlightGroup.Do(cacheKey, func() (interface{}, error) {
-		
-		// 进入执行队列后，先做二次缓存检查
+
+		// 穿透前做二次缓存检查 (可能被其他并发协程刚刚填入)
 		dnsCacheMu.RLock()
 		entry, found := dnsCache[cacheKey]
 		dnsCacheMu.RUnlock()
@@ -278,29 +260,27 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 			}
 		}
 
-		// 经过 3 次重试依然失败
+		// 彻底失败直接返回
 		if finalErr != nil || reply == nil {
 			zlog.Errorf("%s [DNS] ❌ 历经 %d 次尝试后彻底失败 (%s): %v", TAG, maxRetries, domainName, finalErr)
 			return nil, finalErr
 		}
 
-		// 解析成功，写入缓存 - 使用智能 TTL 管理
+		// 解析成功，写入缓存
 		if reply.Rcode == dns.RcodeSuccess || reply.Rcode == dns.RcodeNameError {
-			dnsCacheMu.Lock()
-			
-			// 检查缓存是否需要清理
-			if len(dnsCache) >= CacheCleanupThreshold {
-				evictDNSCache()
-			}
-			
 			optimalTTL := calculateOptimalTTL(reply)
 			now := time.Now()
+
+			dnsCacheMu.Lock()
+			// 写入前检查是否需要容量控制
+			if len(dnsCache) >= CacheCleanupThreshold {
+				evictDNSCacheLocked()
+			}
 			dnsCache[cacheKey] = dnsCacheEntry{
 				msg:       reply.Copy(),
 				expiresAt: now.Add(time.Duration(optimalTTL) * time.Second),
 				cachedAt:  now,
 			}
-			
 			dnsCacheMu.Unlock()
 		}
 
@@ -324,11 +304,15 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 	} else if isDirect {
 		source = "直连解析 (Local UDP)"
 		server = globalConfig.LocalDnsServer
-		if server == "" { server = "223.5.5.5:53" }
+		if server == "" {
+			server = "223.5.5.5:53"
+		}
 	} else {
 		source = "远端代理 (Remote TCP)"
 		server = globalConfig.RemoteDnsServer
-		if server == "" { server = "8.8.8.8:53" }
+		if server == "" {
+			server = "8.8.8.8:53"
+		}
 	}
 
 	printDnsResponse(source, server, domainName, qtypeStr, finalReply)
@@ -339,7 +323,7 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 func copyAndAdjustTTL(entry dnsCacheEntry, newMsgId uint16) *dns.Msg {
 	cachedReply := entry.msg.Copy()
 	cachedReply.Id = newMsgId
-	
+
 	elapsed := uint32(time.Since(entry.cachedAt).Seconds())
 	adjust := func(rrs []dns.RR) {
 		for _, rr := range rrs {
@@ -364,7 +348,8 @@ func GetCachedIPs(domain string) []net.IP {
 	dnsCacheMu.RLock()
 	defer dnsCacheMu.RUnlock()
 
-	keyA := fmt.Sprintf("%s-%d", fqdn, dns.TypeA)
+	// ⚡ 同步使用 strconv.Itoa 优化分配
+	keyA := fqdn + "-" + strconv.Itoa(int(dns.TypeA))
 	if entry, found := dnsCache[keyA]; found && time.Now().Before(entry.expiresAt) {
 		for _, ans := range entry.msg.Answer {
 			if record, ok := ans.(*dns.A); ok {
@@ -373,7 +358,7 @@ func GetCachedIPs(domain string) []net.IP {
 		}
 	}
 
-	keyAAAA := fmt.Sprintf("%s-%d", fqdn, dns.TypeAAAA)
+	keyAAAA := fqdn + "-" + strconv.Itoa(int(dns.TypeAAAA))
 	if entry, found := dnsCache[keyAAAA]; found && time.Now().Before(entry.expiresAt) {
 		for _, ans := range entry.msg.Answer {
 			if record, ok := ans.(*dns.AAAA); ok {
