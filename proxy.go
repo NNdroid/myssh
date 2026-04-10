@@ -32,6 +32,7 @@ type ProxyConfig struct {
 	CustomHost  string `json:"custom_host"`
 	HttpPayload string `json:"http_payload"`
 	CustomPath  string `json:"custom_path"`
+	UdpgwAddr   string `json:"udpgw_addr"` // 留空则不开启 UDPGW
 }
 
 type GlobalConfig struct {
@@ -50,13 +51,14 @@ var (
 	globalConfig GlobalConfig
 	globalRouter *GeoRouter
 	
-	// 🌟 生命周期与守护进程管理
+	// 生命周期与守护进程管理
 	engineCtx    context.Context
 	engineCancel context.CancelFunc
 
-	// 🌟 连接池与会话追踪管理
+	// 连接池与会话追踪管理
 	udpNatMap    sync.Map
 	tcpConnMap   sync.Map
+	udpgwMap     sync.Map // 用于存储本地 UDP 客户端 -> 远端 UDPGW 的 TCP 连接
 	bufferPool   = sync.Pool{
 		New: func() interface{} {
 			return make([]byte, 65535)
@@ -230,7 +232,9 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 
 // ----- SOCKS5 代理处理器 -----
 
-type SshProxyHandler struct{}
+type SshProxyHandler struct{
+	UdpgwAddr string
+}
 
 func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
 	if r.Cmd == socks5.CmdUDP {
@@ -260,7 +264,6 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		tcpConnMap.Store(connKey, c)
 		defer tcpConnMap.Delete(connKey)
 
-		// 🌟 获取 SSH 客户端，如果正在重连则直接返回错误，促使客户端重试
 		mu.Lock()
 		client := sshClient
 		mu.Unlock()
@@ -384,63 +387,201 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		isDirect = false
 	}
 
-	if !isDirect {
-		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (SSH不支持UDP)", TAG, targetHost, dstPort)
+	// ==========================================
+	// 命中直连规则，走本地传统 UDP 拨号
+	// ==========================================
+	if isDirect {
+		targetAddrStr := fmt.Sprintf("%s:%d", dialHost, dstPort)
+		sessionKey := addr.String() + "<->" + targetAddrStr
+
+		var uc *net.UDPConn
+
+		if val, ok := udpNatMap.Load(sessionKey); ok {
+			uc = val.(*net.UDPConn)
+		} else {
+			raddr, err := net.ResolveUDPAddr("udp", targetAddrStr)
+			if err != nil {
+				zlog.Errorf("%s [SOCKS5-UDP] ❌ 解析直连 UDP 地址失败: %v", TAG, err)
+				return err
+			}
+
+			uc, err = net.DialUDP("udp", nil, raddr)
+			if err != nil {
+				zlog.Errorf("%s [SOCKS5-UDP] ❌ 建立本地 UDP 连接失败: %v", TAG, err)
+				return err
+			}
+			
+			zlog.Infof("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
+			udpNatMap.Store(sessionKey, uc)
+
+			wg.Add(1)
+			go func(conn *net.UDPConn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
+				defer wg.Done() 
+				defer conn.Close()
+				defer udpNatMap.Delete(key)
+				
+				buf := bufferPool.Get().([]byte)
+				defer bufferPool.Put(buf)
+				
+				for {
+					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+					n, _, err := conn.ReadFromUDP(buf)
+					if err != nil {
+						break 
+					}
+					
+					res := socks5.NewDatagram(dstAtyp, dstAddr, dstPortBytes, buf[:n])
+					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
+				}
+				zlog.Infof("%s [ROUTER] 🔴 UDP 直连会话已释放 -> %s", TAG, targetAddrStr)
+			}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
+		}
+
+		_, err := uc.Write(d.Data)
+		if err != nil {
+			zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入直连 UDP 数据失败: %v", TAG, err)
+		}
 		return nil
 	}
 
-	targetAddrStr := fmt.Sprintf("%s:%d", dialHost, dstPort)
-	sessionKey := addr.String() + "<->" + targetAddrStr
+	// ==========================================
+	// 命中代理规则，判断是否配置了 UDPGW
+	// ==========================================
+	if h.UdpgwAddr == "" {
+		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+		return nil
+	}
 
-	var uc *net.UDPConn
+	sessionKey := addr.String()
+	var udpgwConn net.Conn
 
-	if val, ok := udpNatMap.Load(sessionKey); ok {
-		uc = val.(*net.UDPConn)
+	if val, ok := udpgwMap.Load(sessionKey); ok {
+		udpgwConn = val.(net.Conn)
 	} else {
-		raddr, err := net.ResolveUDPAddr("udp", targetAddrStr)
+		mu.Lock()
+		client := sshClient
+		mu.Unlock()
+
+		if client == nil {
+			zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+			return fmt.Errorf("ssh client not ready")
+		}
+
+		conn, err := client.Dial("tcp", h.UdpgwAddr)
 		if err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] ❌ 解析直连 UDP 地址失败: %v", TAG, err)
+			zlog.Errorf("%s [SOCKS5-UDP] ❌ 建立远端 UDPGW 连接失败 (%s): %v", TAG, h.UdpgwAddr, err)
 			return err
 		}
 
-		uc, err = net.DialUDP("udp", nil, raddr)
-		if err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] ❌ 建立本地 UDP 连接失败: %v", TAG, err)
-			return err
-		}
-		
-		zlog.Infof("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
-		udpNatMap.Store(sessionKey, uc)
+		udpgwConn = conn
+		udpgwMap.Store(sessionKey, udpgwConn)
+		zlog.Infof("%s [UDPGW] 🟢 建立 UDPGW 代理会话 -> 客户端: %s, 远端节点: %s", TAG, sessionKey, h.UdpgwAddr)
 
 		wg.Add(1)
-		go func(conn *net.UDPConn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
-			defer wg.Done() 
-			defer conn.Close()
-			defer udpNatMap.Delete(key)
-			
-			// 🌟 使用对象池优化缓冲区分配
-			buf := bufferPool.Get().([]byte)
-			defer bufferPool.Put(buf)
-			
-			for {
-				conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					break 
+		go func(uConn net.Conn, clientAddr *net.UDPAddr, key string) {
+			defer wg.Done()
+			defer uConn.Close()
+			defer udpgwMap.Delete(key)
+
+			keepaliveCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				ticker := time.NewTicker(15 * time.Second)
+				defer ticker.Stop()
+				keepalivePkt := []byte{0x00, 0x03, 0x01, 0x00, 0x01} 
+				for {
+					select {
+					case <-ticker.C:
+						if _, err := uConn.Write(keepalivePkt); err != nil {
+							return
+						}
+					case <-keepaliveCtx.Done():
+						return
+					}
 				}
+			}()
+
+			lenBuf := make([]byte, 2)
+			for {
+				uConn.SetReadDeadline(time.Now().Add(60 * time.Second))
 				
-				res := socks5.NewDatagram(dstAtyp, dstAddr, dstPortBytes, buf[:n])
-				s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
+				if _, err := io.ReadFull(uConn, lenBuf); err != nil {
+					break
+				}
+				pktLen := binary.BigEndian.Uint16(lenBuf)
+				if pktLen < 3 {
+					io.CopyN(io.Discard, uConn, int64(pktLen))
+					continue
+				}
+
+				pktBuf := make([]byte, pktLen)
+				if _, err := io.ReadFull(uConn, pktBuf); err != nil {
+					break
+				}
+
+				flags := pktBuf[0]
+				if flags&0x02 == 0x02 {
+					offset := 3 
+					if offset >= int(pktLen) { continue }
+					
+					atyp := pktBuf[offset]
+					offset++
+					
+					var dstAddr []byte
+					if atyp == socks5.ATYPIPv4 {
+						if offset+4 > int(pktLen) { continue }
+						dstAddr = pktBuf[offset : offset+4]
+						offset += 4
+					} else if atyp == socks5.ATYPIPv6 {
+						if offset+16 > int(pktLen) { continue }
+						dstAddr = pktBuf[offset : offset+16]
+						offset += 16
+					} else if atyp == socks5.ATYPDomain {
+						if offset >= int(pktLen) { continue }
+						domainLen := int(pktBuf[offset])
+						if offset+1+domainLen > int(pktLen) { continue }
+						dstAddr = pktBuf[offset : offset+1+domainLen]
+						offset += 1 + domainLen
+					} else {
+						continue
+					}
+
+					if offset+2 > int(pktLen) { continue }
+					dstPortBytes := pktBuf[offset : offset+2]
+					offset += 2
+					
+					payload := pktBuf[offset:]
+
+					res := socks5.NewDatagram(atyp, dstAddr, dstPortBytes, payload)
+					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
+				}
 			}
-			zlog.Infof("%s [ROUTER] 🔴 UDP 直连会话已释放 -> %s", TAG, targetAddrStr)
-		}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
+			zlog.Infof("%s [UDPGW] 🔴 UDPGW 代理会话已释放 -> %s", TAG, key)
+		}(udpgwConn, addr, sessionKey)
 	}
 
-	_, err := uc.Write(d.Data)
-	if err != nil {
-		zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入直连 UDP 数据失败: %v", TAG, err)
-	}
+	addrBytes := make([]byte, 0, 1+len(d.DstAddr)+2)
+	addrBytes = append(addrBytes, d.Atyp)
+	addrBytes = append(addrBytes, d.DstAddr...)
+	addrBytes = append(addrBytes, d.DstPort...)
+
+	payloadLen := len(d.Data)
+	totalLen := 3 + len(addrBytes) + payloadLen 
+
+	packet := make([]byte, 2+totalLen)
+	binary.BigEndian.PutUint16(packet[0:2], uint16(totalLen))
+	packet[2] = 0x02 
+	binary.BigEndian.PutUint16(packet[3:5], 1) 
 	
+	copy(packet[5:], addrBytes)
+	copy(packet[5+len(addrBytes):], d.Data)
+
+	if _, err := udpgwConn.Write(packet); err != nil {
+		udpgwConn.Close()
+		udpgwMap.Delete(sessionKey)
+		zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入 UDPGW 数据失败: %v", TAG, err)
+	}
+
 	return nil
 }
 
@@ -452,7 +593,6 @@ func WgWait() {
 	zlog.Infof("%s [Core] ✅ 所有后台任务已安全清理完毕，程序可安全退出", TAG)
 }
 
-// 🌟 关闭失效的代理连接
 func killActiveProxyConnections() {
 	count := 0
 	tcpConnMap.Range(func(key, value interface{}) bool {
@@ -468,7 +608,6 @@ func killActiveProxyConnections() {
 	}
 }
 
-// 🌟 SSH 心跳保活机制
 func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -477,18 +616,16 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 发送 SSH 标准保活探测包
 			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
 			if err != nil {
 				zlog.Warnf("%s [AutoSSH] ⚠️ 心跳发送失败: %v (准备断开重建)", TAG, err)
-				client.Close() // 强制关闭死连接，触发 Wait() 返回
+				client.Close() 
 				return
 			}
 		}
 	}
 }
 
-// StartSshTProxy2 启动代理引擎（带智能自动重连守护进程）
 func StartSshTProxy2(configJson string) int {
 	StopSshTProxy()
 
@@ -498,14 +635,12 @@ func StartSshTProxy2(configJson string) int {
 		return -1
 	}
 
-	// 初始化引擎生命周期 Context
 	var ctx context.Context
 	ctx, engineCancel = context.WithCancel(context.Background())
 	engineCtx = ctx
 
 	zlog.Infof("%s [Core] ==================== 启动代理引擎 (AutoSSH模式) ====================", TAG)
 
-	// 1. 启动 SOCKS5 本地监听 (永远在线，独立于 SSH 生命周期)
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
 	if err != nil {
 		zlog.Errorf("%s [SOCKS5] ❌ 创建 SOCKS5 服务器实例失败: %v", TAG, err)
@@ -516,7 +651,10 @@ func StartSshTProxy2(configJson string) int {
 	socksServer = srv
 	mu.Unlock()
 
-	handler := &SshProxyHandler{}
+	handler := &SshProxyHandler{
+		UdpgwAddr: cfg.UdpgwAddr, // 完全由配置决定，为空则禁用 UDPGW
+	}
+	
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -527,7 +665,6 @@ func StartSshTProxy2(configJson string) int {
 		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 服务已完全停止", TAG)
 	}()
 
-	// 2. 启动 AutoSSH 后台守护协程
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -540,7 +677,6 @@ func StartSshTProxy2(configJson string) int {
 		}
 
 		for {
-			// 检查引擎是否已被用户要求停止
 			select {
 			case <-engineCtx.Done():
 				zlog.Infof("%s [AutoSSH] 接收到全局停止信号，守护进程退出", TAG)
@@ -552,7 +688,7 @@ func StartSshTProxy2(configJson string) int {
 			conn, err := dialTunnel(cfg)
 			if err != nil {
 				zlog.Errorf("%s [AutoSSH] ❌ 隧道建立失败: %v", TAG, err)
-				time.Sleep(3 * time.Second) // 失败退避
+				time.Sleep(3 * time.Second) 
 				continue
 			}
 
@@ -561,34 +697,28 @@ func StartSshTProxy2(configJson string) int {
 			if err != nil {
 				conn.Close()
 				zlog.Errorf("%s [AutoSSH] ❌ SSH 握手失败: %v", TAG, err)
-				time.Sleep(3 * time.Second) // 失败退避
+				time.Sleep(3 * time.Second) 
 				continue
 			}
 
 			client := ssh.NewClient(scc, chans, reqs)
 
-			// 连接成功，挂载到全局
 			mu.Lock()
 			sshClient = client
 			mu.Unlock()
 			zlog.Infof("%s [AutoSSH] ✅ SSH 隧道建立成功，已接管全局流量！", TAG)
 
-			// 启动心跳保活协程
 			go maintainKeepAlive(engineCtx, client)
 
-			// 阻塞等待连接断开
 			err = client.Wait()
 			zlog.Warnf("%s [AutoSSH] ⚠️ 隧道已断开 (%v)，准备自动重连...", TAG, err)
 
-			// 连接断开了，清理现场
 			mu.Lock()
 			sshClient = nil
 			mu.Unlock()
 
-			// 强制切断所有卡在旧连接上的本地应用，促使它们立即重试
 			killActiveProxyConnections()
 
-			// 防抖退避
 			select {
 			case <-engineCtx.Done():
 				return
@@ -601,7 +731,6 @@ func StartSshTProxy2(configJson string) int {
 }
 
 func StopSshTProxy() {
-	// 发送全局停止信号，让 AutoSSH 协程和 KeepAlive 协程安全退出
 	if engineCancel != nil {
 		engineCancel()
 	}
@@ -632,6 +761,19 @@ func StopSshTProxy() {
 	})
 	if udpSessionCount > 0 {
 		zlog.Infof("%s [Core] 已强制断开 %d 个活跃的 UDP 会话", TAG, udpSessionCount)
+	}
+
+	udpgwSessionCount := 0
+	udpgwMap.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(net.Conn); ok {
+			conn.Close()
+			udpgwSessionCount++
+		}
+		udpgwMap.Delete(key)
+		return true
+	})
+	if udpgwSessionCount > 0 {
+		zlog.Infof("%s [Core] 已强制断开 %d 个 UDPGW 代理会话", TAG, udpgwSessionCount)
 	}
 
 	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
