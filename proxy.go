@@ -33,6 +33,7 @@ type ProxyConfig struct {
 	HttpPayload string `json:"http_payload"`
 	CustomPath  string `json:"custom_path"`
 	UdpgwAddr   string `json:"udpgw_addr"` // 留空则不开启 UDPGW
+	DisableStatusCheck bool `json:"disable_status_check"`
 }
 
 type GlobalConfig struct {
