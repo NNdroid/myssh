@@ -609,17 +609,41 @@ func killActiveProxyConnections() {
 }
 
 func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
+	// 每 15 秒发起一次探测
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-			if err != nil {
-				zlog.Warnf("%s [AutoSSH] ⚠️ 心跳发送失败: %v (准备断开重建)", TAG, err)
-				client.Close() 
+			// 🌟 核心优化：将同步阻塞的发送放入子 Goroutine，通过 Channel 接收结果
+			errCh := make(chan error, 1)
+			go func() {
+				// 发送 SSH 标准保活探测包，要求必须回复
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				errCh <- err
+			}()
+
+			// 🌟 核心优化：三重竞速选择（上下文退出 vs 心跳返回 vs 严格超时）
+			select {
+			case <-ctx.Done():
+				return // 收到全局退出信号
+
+			case err := <-errCh:
+				if err != nil {
+					// 真实的网络断开错误（如 EOF, connection reset）
+					zlog.Warnf("%s [AutoSSH] ⚠️ 心跳发送失败: %v (准备断开重建)", TAG, err)
+					client.Close() // 强制关闭死连接，触发 Wait() 返回
+					return
+				}
+				// zlog.Debugf("%s [AutoSSH] 💓 心跳正常", TAG) // 可选：调试用
+
+			case <-time.After(8 * time.Second):
+				// 🌟 杀手锏：如果 8 秒都没收到 SSH 服务器的回复，认定为遭遇“网络黑洞”
+				zlog.Warnf("%s [AutoSSH] ⚠️ 心跳响应严重超时 (疑似网络假死)，强行切断重建", TAG)
+				client.Close() // 强制物理切断，立刻触发外层重连！
 				return
 			}
 		}
