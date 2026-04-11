@@ -71,7 +71,7 @@ func init() {
 				return nil, fmt.Errorf("HTTP Refused: %d", statusCode)
 			}
 		} else {
-			zlog.Errorf("%s [Tunnel] HTTP响应 [Status: %d] [Line: %s]", TAG, statusCode, strings.TrimSpace(line))
+			zlog.Infof("%s [Tunnel] HTTP响应 [Status: %d] [Line: %s]", TAG, statusCode, strings.TrimSpace(line))
 		}
 
 		// 5. 消耗掉 Header 直到空行，完成握手
