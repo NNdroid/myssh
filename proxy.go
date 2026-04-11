@@ -340,6 +340,16 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
 	dstPort := binary.BigEndian.Uint16(d.DstPort)
 
+	// ==========================================
+	// 拦截 UDP 443 (QUIC) 强制客户端降级到 TCP
+	// ==========================================
+	if dstPort == 443 {
+		// 静默丢弃，不给客户端返回任何错误。
+		// 浏览器发送 QUIC 超时后会立刻 fallback 到 HTTPS/TCP 443。
+		// zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
+		return nil
+	}
+
 	if dstPort == 53 {
 		reqMsg := new(dns.Msg)
 		if err := reqMsg.Unpack(d.Data); err != nil {
