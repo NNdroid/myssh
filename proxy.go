@@ -26,7 +26,11 @@ type ProxyConfig struct {
 	LocalAddr   string `json:"local_addr"`
 	SshAddr     string `json:"ssh_addr"`
 	User        string `json:"user"`
+	AuthType    string `json:"auth_type"`
+	PrivateKey  string `json:"private_key"`
 	Pass        string `json:"pass"`
+	VerifyFingerprint bool `json:"verify_finger_print"`
+	ServerFingerprint string `json:"server_finger_print"`
 	TunnelType  string `json:"tunnel_type"`
 	ProxyAddr   string `json:"proxy_addr"`
 	CustomHost  string `json:"custom_host"`
@@ -346,7 +350,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	if dstPort == 443 {
 		// 静默丢弃，不给客户端返回任何错误。
 		// 浏览器发送 QUIC 超时后会立刻 fallback 到 HTTPS/TCP 443。
-		// zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
+		zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
 		return nil
 	}
 
@@ -649,7 +653,7 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 					client.Close() // 强制关闭死连接，触发 Wait() 返回
 					return
 				}
-				// zlog.Debugf("%s [AutoSSH] 💓 心跳正常", TAG) // 可选：调试用
+				zlog.Debugf("%s [AutoSSH] 💓 心跳正常", TAG)
 
 			case <-time.After(8 * time.Second):
 				// 🌟 杀手锏：如果 8 秒都没收到 SSH 服务器的回复，认定为遭遇“网络黑洞”
@@ -703,12 +707,72 @@ func StartSshTProxy2(configJson string) int {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		
+
+		var sshAuthMethod []ssh.AuthMethod
+		if cfg.AuthType == "password" {
+			sshAuthMethod = []ssh.AuthMethod{
+				ssh.Password(cfg.Pass),
+			}
+		} else {
+			signer, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
+			if err != nil {
+				zlog.Fatalf("unable to parse private key: %v", err)
+			}
+			sshAuthMethod = []ssh.AuthMethod{
+				ssh.PublicKeys(signer),
+			}
+		}
+
 		sshConfig := &ssh.ClientConfig{
 			User:            cfg.User,
-			Auth:            []ssh.AuthMethod{ssh.Password(cfg.Pass)},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			Auth:            sshAuthMethod,
+			BannerCallback: func(message string) error {
+				zlog.Warnf("===== SSH Banner START =====\n%s\n===== SSH Banner END =====", message)
+				return nil
+			},
+			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+				// 指纹（推荐用 SHA256）
+				fpSHA256 := ssh.FingerprintSHA256(key)
+				// 旧格式（MD5，不推荐但有时用于兼容）
+				fpMD5 := ssh.FingerprintLegacyMD5(key)
+				// 算法类型（例如 ssh-ed25519）
+				algo := key.Type()
+				// 原始公钥（authorized_keys 格式）
+				pubKey := string(ssh.MarshalAuthorizedKey(key))
+				zlog.Warnf("%s [SSH-Handshake] ==== SSH Host Key Info ====", TAG)
+				zlog.Warnf("%s [SSH-Handshake] Host: %s", TAG, hostname)
+				zlog.Warnf("%s [SSH-Handshake] Remote: %s", TAG, remote.String())
+				zlog.Warnf("%s [SSH-Handshake] Algorithm: %s", TAG, algo)
+				zlog.Warnf("%s [SSH-Handshake] Fingerprint (SHA256): %s", TAG, fpSHA256)
+				zlog.Warnf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
+				zlog.Warnf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
+				zlog.Warnf("%s [SSH-Handshake] ===========================", TAG)
+				if cfg.VerifyFingerprint {
+					if fpMD5 == cfg.ServerFingerprint || fpSHA256 == cfg.ServerFingerprint {
+						return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerFingerprint)
+					}
+				}
+				return nil
+			},
 			Timeout:         15 * time.Second,
+			Config: ssh.Config{
+				KeyExchanges: []string{
+					"curve25519-sha256",
+					"curve25519-sha256@libssh.org",
+				},
+				Ciphers: []string{
+					"chacha20-poly1305@openssh.com",
+					"aes256-gcm@openssh.com",
+					"aes128-gcm@openssh.com",
+				},
+				MACs: []string{
+					"hmac-sha2-512-etm@openssh.com",
+					"hmac-sha2-256-etm@openssh.com",
+				},
+			},
+			HostKeyAlgorithms: []string{
+				"ssh-ed25519",
+			},
 		}
 
 		for {
@@ -735,6 +799,10 @@ func StartSshTProxy2(configJson string) int {
 				time.Sleep(3 * time.Second) 
 				continue
 			}
+			cv := string(scc.ClientVersion())
+			sv := string(scc.ServerVersion())
+			zlog.Warnf("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
+			zlog.Warnf("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
 
 			client := ssh.NewClient(scc, chans, reqs)
 

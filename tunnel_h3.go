@@ -30,7 +30,7 @@ func getH3Client(proxyAddr string, host string) *http.Client {
 	tlsConf := &tls.Config{
 		ServerName:         host,
 		InsecureSkipVerify: true,
-		NextProtos:         []string{"h3", "h3-29"},
+		NextProtos:         []string{"h3"},
 	}
 
 	rt := &http3.Transport{
@@ -39,8 +39,8 @@ func getH3Client(proxyAddr string, host string) *http.Client {
 			EnableDatagrams:                  true,
 			EnableStreamResetPartialDelivery: true,
 			HandshakeIdleTimeout: 10 * time.Second, // 握手超时，防止 UDP 黑洞卡死
-			MaxIdleTimeout:       30 * time.Second,
-			KeepAlivePeriod:      8 * time.Second,  // 🌟 激进心跳：8秒，对抗运营商极端的 UDP NAT 老化策略
+			MaxIdleTimeout:       60 * time.Second,
+			KeepAlivePeriod:      8 * time.Second,
 		},
 	}
 
