@@ -28,6 +28,7 @@ type ProxyConfig struct {
 	User        string `json:"user"`
 	AuthType    string `json:"auth_type"`
 	PrivateKey  string `json:"private_key"`
+	PrivateKeyPassphrase  string `json:"private_key_passphrase"`
 	Pass        string `json:"pass"`
 	VerifyFingerprint bool `json:"verify_finger_print"`
 	ServerFingerprint string `json:"server_finger_print"`
@@ -665,6 +666,16 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	}
 }
 
+func parsePrivateKeySshSigner(privateKey []byte, passphrase []byte) (ssh.Signer, error) {
+    // 尝试直接解析
+    signer, err := ssh.ParsePrivateKey(privateKey)
+    // 如果报错提示需要密码 (Passphrase)
+    if _, ok := err.(*ssh.PassphraseMissingError); ok {
+        return ssh.ParsePrivateKeyWithPassphrase(privateKey, passphrase)
+    }
+    return signer, err
+}
+
 func StartSshTProxy2(configJson string) int {
 	StopSshTProxy()
 
@@ -714,7 +725,7 @@ func StartSshTProxy2(configJson string) int {
 				ssh.Password(cfg.Pass),
 			}
 		} else {
-			signer, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
+			signer, err := parsePrivateKeySshSigner([]byte(cfg.PrivateKey), []byte(cfg.PrivateKeyPassphrase))
 			if err != nil {
 				zlog.Fatalf("unable to parse private key: %v", err)
 			}
