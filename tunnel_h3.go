@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"os"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -19,10 +20,18 @@ import (
 var (
 	h3TransportCache sync.Map
 	h3ClientCache    sync.Map
+	clientMu      sync.Mutex
 )
 
 // getH3Client 获取或初始化复用的 HTTP/3 客户端
 func getH3Client(proxyAddr string, host string) *http.Client {
+	if client, ok := h3ClientCache.Load(proxyAddr); ok {
+		return client.(*http.Client)
+	}
+	
+	clientMu.Lock()
+	defer clientMu.Unlock()
+
 	if client, ok := h3ClientCache.Load(proxyAddr); ok {
 		return client.(*http.Client)
 	}
@@ -41,6 +50,15 @@ func getH3Client(proxyAddr string, host string) *http.Client {
 			HandshakeIdleTimeout: 10 * time.Second, // 握手超时，防止 UDP 黑洞卡死
 			MaxIdleTimeout:       60 * time.Second,
 			KeepAlivePeriod:      8 * time.Second,
+			// 3. 流量控制（手动推高窗口，替代 AllowConnectionWindowIncrease）
+			// 这里的 Initial 决定了握手后的起始吞吐，Max 决定了峰值
+			InitialStreamReceiveWindow:     1024 * 1024 * 5,  // 5MB
+			MaxStreamReceiveWindow:         1024 * 1024 * 15, // 15MB
+			InitialConnectionReceiveWindow: 1024 * 1024 * 10, // 10MB
+			MaxConnectionReceiveWindow:     1024 * 1024 * 20, // 20MB
+			// 4. 并发流限制（适配大规模多路复用）
+			MaxIncomingStreams:    1000,
+			MaxIncomingUniStreams: 1000,
 		},
 	}
 
@@ -96,6 +114,10 @@ func (s *h3Conn) SetReadDeadline(t time.Time) error  { return nil }
 func (s *h3Conn) SetWriteDeadline(t time.Time) error { return nil }
 
 func init() {
+	// 1. 禁用硬件加速（解决 sendmsg 5 错误的核心）
+    os.Setenv("QUIC_GO_DISABLE_GSO", "true")
+    os.Setenv("QUIC_GO_DISABLE_ECN", "true")
+
 	RegisterTunnel("h3", "udp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 
 		zlog.Infof("%s [Tunnel] 2. 准备进行 HTTP/3 (UDP) 隧道握手, 伪装 Host: %s", TAG, cfg.CustomHost)
@@ -121,7 +143,12 @@ func init() {
 			req.Host = cfg.CustomHost
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-		req.Header.Set("X-Target", cfg.SshAddr) 
+		req.Header.Set("X-Target", cfg.SshAddr)
+		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		req.Header.Set("Pragma", "no-cache")
+		req.Header.Set("Accept-Encoding", "identity") // 禁用压缩，防止 Nginx 尝试对 SSH 加密流进行二次压缩消耗 CPU
+		req.Header.Set("X-Content-Type-Options", "nosniff") // 防止 Nginx 猜测内容类型
+		req.Header.Set("X-Accel-Buffering", "no") // 关键：告知 Nginx 立即转发数据，不要缓冲 Body
 
 		// 🌟 调用复用器获取单例 Client
 		client := getH3Client(cfg.ProxyAddr, cfg.CustomHost)
