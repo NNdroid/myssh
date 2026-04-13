@@ -24,7 +24,7 @@ var (
 )
 
 // getH3Client 获取或初始化复用的 HTTP/3 客户端
-func getH3Client(proxyAddr string, host string) *http.Client {
+func getH3Client(proxyAddr string, sni string) *http.Client {
 	if client, ok := h3ClientCache.Load(proxyAddr); ok {
 		return client.(*http.Client)
 	}
@@ -37,7 +37,7 @@ func getH3Client(proxyAddr string, host string) *http.Client {
 	}
 
 	tlsConf := &tls.Config{
-		ServerName:         host,
+		ServerName:         sni,
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"h3"},
 	}
@@ -151,7 +151,7 @@ func init() {
 		req.Header.Set("X-Accel-Buffering", "no") // 关键：告知 Nginx 立即转发数据，不要缓冲 Body
 
 		// 🌟 调用复用器获取单例 Client
-		client := getH3Client(cfg.ProxyAddr, cfg.CustomHost)
+		client := getH3Client(cfg.ProxyAddr, cfg.ServerName)
 
 		respChan := make(chan *http.Response, 1)
 		errChan := make(chan error, 1)

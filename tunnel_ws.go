@@ -37,7 +37,7 @@ func init() {
 
 		if isWSS {
 			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				utlsConfig := &utls.Config{ServerName: cfg.CustomHost, InsecureSkipVerify: true}
+				utlsConfig := &utls.Config{ServerName: cfg.ServerName, InsecureSkipVerify: true}
 				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
 				if err := uConn.HandshakeContext(ctx); err != nil {
 					return nil, err

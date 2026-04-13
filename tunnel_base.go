@@ -14,10 +14,10 @@ func init() {
 
 	// 2. TLS (利用 uTLS 消除指纹)
 	RegisterTunnel("tls", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 Host: %s", TAG, cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 SNI: %s", TAG, cfg.ServerName)
 		
 		utlsConfig := &utls.Config{
-			ServerName:         cfg.CustomHost,
+			ServerName:         cfg.ServerName,
 			InsecureSkipVerify: true,
 		}
 

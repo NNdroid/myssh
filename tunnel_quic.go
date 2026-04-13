@@ -32,12 +32,12 @@ func init() {
 		// 🌟 核心修改 2：去掉了 baseConn.Close() 的打补丁逻辑，
 		// 因为我们新的 dialTunnel 发现是 "udp" 时，根本就不会去拨号 TCP，传进来的 baseConn 直接就是 nil！
 
-		zlog.Infof("%s [Tunnel] 2. 准备进行 QUIC (UDP) 握手, 目标: %s, 伪装 Host: %s", TAG, cfg.ProxyAddr, cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 2. 准备进行 QUIC (UDP) 握手, 目标: %s, 伪装 SNI: %s", TAG, cfg.ProxyAddr, cfg.ServerName)
 
 		// 注意：quic-go 目前无法直接与 utls 深度结合。
 		// 但 QUIC 本身的报文特征与 TCP TLS 完全不同，使用标准库的 tls 伪装成 HTTP/3 即可。
 		tlsConf := &tls.Config{
-			ServerName:         cfg.CustomHost,
+			ServerName:         cfg.ServerName,
 			InsecureSkipVerify: true,
 			NextProtos:         []string{"h3"}, // ALPN 强行伪装为 HTTP/3 流量
 		}

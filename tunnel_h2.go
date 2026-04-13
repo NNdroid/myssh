@@ -150,7 +150,7 @@ func init() {
 		if isTLS {
 			transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
 				utlsConfig := &utls.Config{
-					ServerName:         cfg.CustomHost,
+					ServerName:         cfg.ServerName,
 					InsecureSkipVerify: true,
 					NextProtos:         []string{"h2", "http/1.1"},
 				}

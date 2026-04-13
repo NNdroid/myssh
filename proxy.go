@@ -35,6 +35,7 @@ type ProxyConfig struct {
 	TunnelType  string `json:"tunnel_type"`
 	ProxyAddr   string `json:"proxy_addr"`
 	CustomHost  string `json:"custom_host"`
+	ServerName	string	`json:"server_name"`
 	HttpPayload string `json:"http_payload"`
 	CustomPath  string `json:"custom_path"`
 	UdpgwAddr   string `json:"udpgw_addr"` // 留空则不开启 UDPGW

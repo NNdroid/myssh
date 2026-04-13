@@ -39,7 +39,7 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 	zlog.Infof("%s [Tunnel] ⚡ 正在建立底层 WebTransport 全新会话...", TAG)
 
 	tlsConf := &tls.Config{
-		ServerName:         cfg.CustomHost,
+		ServerName:         cfg.ServerName,
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"h3"},
 	}
