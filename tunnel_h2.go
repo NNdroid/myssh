@@ -30,13 +30,28 @@ func (s *streamConn) Close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	
+	var errs []error
 	if s.pw != nil {
-		s.pw.Close()
+		// 🌟 先关闭写入管道，让服务端收到 EOF
+		if err := s.pw.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if s.respBody != nil {
-		s.respBody.Close()
+		if err := s.respBody.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return s.Conn.Close()
+	if s.Conn != nil {
+		if err := s.Conn.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
 }
 
 // ==========================================
@@ -50,14 +65,15 @@ func (g *grpcWriter) Write(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	buf := make([]byte, 5+len(p))
-	binary.BigEndian.PutUint32(buf[1:5], uint32(len(p))) // 1字节0 + 4字节长度
-	copy(buf[5:], p)
+	// 🌟在栈上分配 5 字节固定头部，避免堆分配
+	var header [5]byte
+	binary.BigEndian.PutUint32(header[1:5], uint32(len(p)))
 
-	if _, err := g.w.Write(buf); err != nil {
+	// 分两次写入，底层 http2.Transport 会自动处理缓冲
+	if _, err := g.w.Write(header[:]); err != nil {
 		return 0, err
 	}
-	return len(p), nil
+	return g.w.Write(p)
 }
 
 type grpcReader struct {
@@ -188,8 +204,9 @@ func init() {
 			return nil, err
 		case resp := <-respChan:
 			if resp.StatusCode != http.StatusOK {
-				baseConn.Close()
+				resp.Body.Close()
 				cancel()
+				baseConn.Close()
 				zlog.Errorf("%s [Tunnel] ❌ %s 服务端拒绝, 状态码: %d", TAG, protoName, resp.StatusCode)
 				return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
 			}
@@ -215,8 +232,8 @@ func init() {
 			return sConn, nil
 
 		case <-time.After(15 * time.Second):
-			baseConn.Close()
 			cancel()
+			baseConn.Close()
 			zlog.Errorf("%s [Tunnel] ❌ %s 握手超时", TAG, protoName)
 			return nil, fmt.Errorf("%s handshake timeout", protoName)
 		}

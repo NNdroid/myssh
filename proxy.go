@@ -76,6 +76,36 @@ var (
 	zlog *zap.SugaredLogger = zap.NewNop().Sugar()
 )
 
+var (
+	// 用于 TCP io.CopyBuffer 的 32KB 缓冲池
+	tcpBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 32*1024)
+			return &buf
+		},
+	}
+	// 用于 UDP 读取的 64KB 缓冲池
+	udpBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 65536)
+			return &buf
+		},
+	}
+)
+
+func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
+	// 1. 从池子里借一块内存
+	bufPtr := tcpBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	
+	// 2. 确保在函数退出时还给池子
+	defer tcpBufPool.Put(bufPtr)
+
+	// 3. 使用 CopyBuffer，并传入我们复用的内存块
+	// 它会一直使用这块内存直到 src 读到 EOF 或出错
+	return io.CopyBuffer(dst, src, buf)
+}
+
 // ----- 隧道注册表机制 (策略模式) -----
 
 type TunnelHandler func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
@@ -323,16 +353,17 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		errc := make(chan error, 2)
 		go func() {
-			_, err := io.Copy(remote, c)
+			_, err := tcpRelay(remote, c)
 			errc <- err
 		}()
 		go func() {
-			_, err := io.Copy(c, remote)
+			_, err := tcpRelay(c, remote)
 			errc <- err
 		}()
 		
 		<-errc
 		remote.Close()
+		c.Close()
 		<-errc
 		
 		return nil
