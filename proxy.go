@@ -15,8 +15,6 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/txthinking/socks5"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -34,6 +32,10 @@ type ProxyConfig struct {
 	ServerFingerprint string `json:"server_finger_print"`
 	TunnelType  string `json:"tunnel_type"`
 	ProxyAddr   string `json:"proxy_addr"`
+	ProxyAuthRequired bool `json:"proxy_auth_required"`
+	ProxyAuthToken string `json:"proxy_auth_token"`
+	ProxyAuthUser string `json:"proxy_auth_user"`
+	ProxyAuthPass string `json:"proxy_auth_pass"`
 	CustomHost  string `json:"custom_host"`
 	ServerName	string	`json:"server_name"`
 	HttpPayload string `json:"http_payload"`
@@ -66,45 +68,9 @@ var (
 	udpNatMap    sync.Map
 	tcpConnMap   sync.Map
 	udpgwMap     sync.Map // 用于存储本地 UDP 客户端 -> 远端 UDPGW 的 TCP 连接
-	bufferPool   = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 65535)
-		},
-	}
 	
 	wg sync.WaitGroup
-	zlog *zap.SugaredLogger = zap.NewNop().Sugar()
 )
-
-var (
-	// 用于 TCP io.CopyBuffer 的 32KB 缓冲池
-	tcpBufPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, 32*1024)
-			return &buf
-		},
-	}
-	// 用于 UDP 读取的 64KB 缓冲池
-	udpBufPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, 65536)
-			return &buf
-		},
-	}
-)
-
-func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
-	// 1. 从池子里借一块内存
-	bufPtr := tcpBufPool.Get().(*[]byte)
-	buf := *bufPtr
-	
-	// 2. 确保在函数退出时还给池子
-	defer tcpBufPool.Put(bufPtr)
-
-	// 3. 使用 CopyBuffer，并传入我们复用的内存块
-	// 它会一直使用这块内存直到 src 读到 EOF 或出错
-	return io.CopyBuffer(dst, src, buf)
-}
 
 // ----- 隧道注册表机制 (策略模式) -----
 
@@ -135,44 +101,6 @@ func GetTunnel(name string) (TunnelProtocol, error) {
 
 func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-}
-
-func InitLogger(logPath string, logLevelStr string) int {
-	var level zapcore.Level
-	
-	switch strings.ToUpper(logLevelStr) {
-	case "DEBUG":
-		level = zapcore.DebugLevel
-	case "INFO":
-		level = zapcore.InfoLevel
-	case "WARN":
-		level = zapcore.WarnLevel
-	case "ERROR":
-		level = zapcore.ErrorLevel
-	default:
-		level = zapcore.InfoLevel 
-	}
-
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
-	if err != nil {
-		return -1
-	}
-
-	encoderConfig := zap.NewProductionEncoderConfig()
-	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder   
-	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder 
-
-	core := zapcore.NewCore(
-		zapcore.NewConsoleEncoder(encoderConfig),
-		zapcore.AddSync(file),
-		level, 
-	)
-
-	logger := zap.New(core)
-	zlog = logger.Sugar()
-
-	zlog.Infof("%s [Logger] 日志系统初始化完成，写入路径: %s，当前级别: %s", TAG, logPath, level.String())
-	return 0
 }
 
 func LoadGlobalConfigFromJson(configJson string) int {
@@ -468,8 +396,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				defer conn.Close()
 				defer udpNatMap.Delete(key)
 				
-				buf := bufferPool.Get().([]byte)
-				defer bufferPool.Put(buf)
+				buf := udpBufPool.Get().([]byte)
+				defer udpBufPool.Put(buf)
 				
 				for {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))

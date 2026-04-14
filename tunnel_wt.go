@@ -63,6 +63,10 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 	}
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	headers.Set("X-Target", cfg.SshAddr) // 路由信息在 Session 握手阶段传给服务器
+	headers.Set("X-Network", "tcp")
+	if cfg.ProxyAuthRequired {
+		headers.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -155,6 +155,10 @@ func init() {
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 		req.Header.Set("X-Target", cfg.SshAddr) // 核心路由信息
+		req.Header.Set("X-Network", "tcp")
+		if cfg.ProxyAuthRequired {
+			req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
+		}
 
 		// 🌟 核心差异：注入 gRPC 标准头部
 		if isGRPC {

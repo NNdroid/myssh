@@ -2,6 +2,7 @@ package myssh
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"strings"
@@ -9,21 +10,41 @@ import (
 
 func init() {
 	RegisterTunnel("http", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		// 1. 严格校验 Payload 不能为空
 		if strings.TrimSpace(cfg.HttpPayload) == "" {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 错误: HttpPayload 为空，无法建立隧道", TAG)
-			return nil, fmt.Errorf("HttpPayload is required but got empty")
+			zlog.Errorf("%s [Tunnel] ❌ 错误: HttpPayload 为空", TAG)
+			return nil, fmt.Errorf("HttpPayload is required")
 		}
 
-		// 2. 构造完整的 Payload
+		// 基础变量替换
 		rawPayload := cfg.HttpPayload
 		rawPayload = strings.ReplaceAll(rawPayload, "[host_and_port]", cfg.SshAddr)
 		rawPayload = strings.ReplaceAll(rawPayload, "[host]", cfg.CustomHost)
 		rawPayload = strings.ReplaceAll(rawPayload, "[crlf]", "\r\n")
 
-		// 3. 从 Payload 中动态提取 Method 供日志使用
-		// 逻辑：去掉首尾空白后，取第一个空格前的字符串
+		// 用户名密码认证逻辑
+		if cfg.ProxyAuthRequired {
+			auth := cfg.ProxyAuthUser + ":" + cfg.ProxyAuthPass
+			// 对 user:pass 进行 Base64 编码
+			encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
+			authHeader := fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", encodedAuth)
+
+			// 逻辑：将认证头插入到第一行之后，或者替换自定义占位符
+			if strings.Contains(rawPayload, "[auth]") {
+				// 如果 Payload 里有 [auth] 占位符，直接替换
+				rawPayload = strings.ReplaceAll(rawPayload, "[auth]", authHeader)
+			} else {
+				// 否则，自动尝试插入到第一个回车符后面（即请求行之后）
+				if firstLineEnd := strings.Index(rawPayload, "\r\n"); firstLineEnd != -1 {
+					rawPayload = rawPayload[:firstLineEnd+2] + authHeader + rawPayload[firstLineEnd+2:]
+				} else if firstLineEnd := strings.Index(rawPayload, "\n"); firstLineEnd != -1 {
+					rawPayload = rawPayload[:firstLineEnd+1] + authHeader + rawPayload[firstLineEnd+1:]
+				}
+			}
+			zlog.Infof("%s [Tunnel] 已注入认证信息 (User: %s)", TAG, cfg.ProxyAuthUser)
+		}
+
+		// 提取 Method 用于日志
 		method := "UNKNOWN"
 		trimmedPayload := strings.TrimSpace(rawPayload)
 		if firstSpace := strings.Index(trimmedPayload, " "); firstSpace != -1 {
@@ -31,7 +52,6 @@ func init() {
 		}
 
 		zlog.Infof("%s [Tunnel] 准备发送请求 (Method: %s)", TAG, method)
-		zlog.Infof("%s [Tunnel] Payload 详情:\n%s", TAG, rawPayload)
 		
 		// 发送请求
 		if _, err := baseConn.Write([]byte(rawPayload)); err != nil {
@@ -39,42 +59,43 @@ func init() {
 			return nil, fmt.Errorf("发送 Payload 失败: %v", err)
 		}
 
-		// 4. 解析响应
+		// 解析响应
 		br := bufio.NewReader(baseConn)
 		line, err := br.ReadString('\n')
 		if err != nil {
 			baseConn.Close()
-			return nil, fmt.Errorf("读取响应行失败: %v", err)
+			return nil, fmt.Errorf("读取响应失败: %v", err)
 		}
 
-		// 校验是否为 HTTP 协议响应
 		if !strings.HasPrefix(line, "HTTP/") {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 非法协议响应: %s", TAG, strings.TrimSpace(line))
 			return nil, fmt.Errorf("Invalid Protocol: %s", line)
 		}
 
-		// 解析状态码
 		var proto string
 		var statusCode int
 		_, err = fmt.Sscanf(line, "%s %d", &proto, &statusCode)
 		if err != nil {
 			baseConn.Close()
-			return nil, fmt.Errorf("状态行格式错误: %v", err)
+			return nil, fmt.Errorf("状态行解析错误: %v", err)
 		}
 
+		// 状态校验
 		if !cfg.DisableStatusCheck {
-			// 判断 2xx 成功范围
+			// 如果收到 401 或 407，说明认证失败
+			if statusCode == 401 || statusCode == 407 {
+				baseConn.Close()
+				zlog.Errorf("%s [Tunnel] ❌ 认证失败 [Status: %d]", TAG, statusCode)
+				return nil, fmt.Errorf("Proxy Auth Failed: %d", statusCode)
+			}
 			if statusCode < 200 || statusCode >= 300 {
 				baseConn.Close()
-				zlog.Errorf("%s [Tunnel] ❌ 代理拒绝 [Status: %d] [Line: %s]", TAG, statusCode, strings.TrimSpace(line))
+				zlog.Errorf("%s [Tunnel] ❌ 代理拒绝 [Status: %d]", TAG, statusCode)
 				return nil, fmt.Errorf("HTTP Refused: %d", statusCode)
 			}
-		} else {
-			zlog.Infof("%s [Tunnel] HTTP响应 [Status: %d] [Line: %s]", TAG, statusCode, strings.TrimSpace(line))
 		}
 
-		// 5. 消耗掉 Header 直到空行，完成握手
+		// 消耗头部直到空行
 		for {
 			l, err := br.ReadString('\n')
 			if err != nil || l == "\r\n" || l == "\n" || l == "" {
@@ -82,7 +103,7 @@ func init() {
 			}
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ HTTP %s 隧道已建立 (Status: %d)", TAG, method, statusCode)
+		zlog.Infof("%s [Tunnel] ✅ HTTP %s 隧道已建立", TAG, method)
 		return baseConn, nil
 	})
 }

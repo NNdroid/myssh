@@ -2,6 +2,7 @@ package myssh
 
 import (
 	"context"
+	"encoding/base64"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,10 +28,21 @@ func init() {
 
 		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: path}
 
+		// 1. 构造基础 Header
 		fakeHeaders := http.Header{
 			"Host":                     []string{cfg.CustomHost},
 			"User-Agent":               []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"},
 			"Sec-WebSocket-Extensions": []string{"permessage-deflate; client_max_window_bits"},
+		}
+
+		// 2. 用户名密码认证逻辑
+		if cfg.ProxyAuthRequired {
+			auth := cfg.ProxyAuthUser + ":" + cfg.ProxyAuthPass
+			encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
+			// 在 WS 握手中，标准通常使用 Proxy-Authorization 或 Authorization
+			// 大多数 CDN 或代理服务器（如 Nginx, Cloudflare）识别这个头
+			fakeHeaders.Set("Proxy-Authorization", "Basic "+encodedAuth)
+			zlog.Infof("%s [Tunnel] WS 握手注入认证信息 (User: %s)", TAG, cfg.ProxyAuthUser)
 		}
 
 		transport := &http.Transport{ForceAttemptHTTP2: false}
@@ -61,11 +73,16 @@ func init() {
 
 		wsConn, resp, err := websocket.Dial(ctx, u.String(), opts)
 		if err != nil {
+			// 3. 🌟 增加认证失败的日志识别
+			if resp != nil && (resp.StatusCode == 401 || resp.StatusCode == 407) {
+				zlog.Errorf("%s [Tunnel] ❌ WebSocket 认证失败, 状态码: %d", TAG, resp.StatusCode)
+			}
 			baseConn.Close()
 			zlog.Errorf("%s [Tunnel] ❌ WebSocket 握手失败: %v", TAG, err)
 			return nil, err
 		}
-		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功, 协商协议: %s", TAG, resp.Header.Get("Sec-WebSocket-Protocol"))
+		
+		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功 (Status: %d), 协商协议: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
 
 		return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 	}

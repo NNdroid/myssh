@@ -144,6 +144,10 @@ func init() {
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 		req.Header.Set("X-Target", cfg.SshAddr)
+		req.Header.Set("X-Network", "tcp")
+		if cfg.ProxyAuthRequired {
+			req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
+		}
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		req.Header.Set("Pragma", "no-cache")
 		req.Header.Set("Accept-Encoding", "identity") // 禁用压缩，防止 Nginx 尝试对 SSH 加密流进行二次压缩消耗 CPU

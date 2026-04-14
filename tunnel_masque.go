@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -20,20 +21,29 @@ func init() {
 
 		zlog.Infof("%s [Tunnel] 2. 准备进行 MASQUE (CONNECT-TCP) 隧道握手, 目标: %s", TAG, cfg.SshAddr)
 
-		// 🌟 核心修复 1：解析 host 和 port 以符合 MASQUE 路径规范
+		// 1. 解析目标地址，处理 IPv6 的方括号问题
+		host, port, err := net.SplitHostPort(cfg.SshAddr)
+		if err != nil {
+			zlog.Warnf("%s [Tunnel] SSH 地址解析失败，尝试默认端口 22: %v", TAG, err)
+			host = cfg.SshAddr
+			port = "22"
+		}
+		// MASQUE 规范中 host 应当是原始 IP 或域名，url.PathEscape 会处理特殊字符
+		// 但如果 host 是 IPv6 (如 [::1])，SplitHostPort 已经去掉了方括号，这是正确的
+
+		// 2. 规范化 CustomPath
 		path := cfg.CustomPath
 		if path == "" {
-			host, port, err := net.SplitHostPort(cfg.SshAddr)
-			if err != nil {
-				zlog.Warnf("%s [Tunnel] SSH 地址缺少端口，默认使用 22: %v", TAG, err)
-				host = cfg.SshAddr
-				port = "22"
-			}
-			// 规范: /.well-known/masque/tcp/{target_host}/{target_port}/
-			path = fmt.Sprintf("/.well-known/masque/tcp/%s/%s/", url.PathEscape(host), url.PathEscape(port))
+			path = "/.well-known/masque/tcp"
 		}
+		
+		// 🌟 修复：去除末尾所有斜杠，确保拼接时路径整洁
+		path = strings.TrimRight(path, "/")
+		
+		// 构造最终符合 RFC 9298 风格的路径
+		fullPath := fmt.Sprintf("%s/%s/%s/", path, url.PathEscape(host), url.PathEscape(port))
 
-		reqUrlStr := fmt.Sprintf("https://%s%s", cfg.ProxyAddr, path)
+		reqUrlStr := fmt.Sprintf("https://%s%s", cfg.ProxyAddr, fullPath)
 		reqUrl, _ := url.Parse(reqUrlStr)
 
 		pr, pw := io.Pipe()
@@ -63,6 +73,9 @@ func init() {
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 		req.Header.Set("X-Target", cfg.SshAddr)
 		req.Header.Set("X-Network", "tcp")
+		if cfg.ProxyAuthRequired {
+			req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
+		}
 		req.Header.Set("Cache-Control", "no-cache")
 		req.Header.Set("X-Accel-Buffering", "no")
 
