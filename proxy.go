@@ -303,6 +303,12 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 }
 
 func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
+	// 🛡️ Panic 捕获兜底，防止单个 UDP 异常包干掉整个代理服务
+	defer func() {
+		if err := recover(); err != nil {
+			zlog.Errorf("%s [SOCKS5-UDP] 💥 发生严重崩溃 (Panic) -> 客户端: %s, 错误: %v", TAG, addr.String(), err)
+		}
+	}()
 	dstPort := binary.BigEndian.Uint16(d.DstPort)
 
 	// ==========================================
@@ -315,6 +321,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		return nil
 	}
 
+	// 劫持UDP53端口的DNS查询
 	if dstPort == 53 {
 		reqMsg := new(dns.Msg)
 		if err := reqMsg.Unpack(d.Data); err != nil {
@@ -396,7 +403,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				defer conn.Close()
 				defer udpNatMap.Delete(key)
 				
-				buf := udpBufPool.Get().([]byte)
+				bufPtr := udpBufPool.Get().(*[]byte)
+				buf := *bufPtr
 				defer udpBufPool.Put(buf)
 				
 				for {
@@ -459,6 +467,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			defer uConn.Close()
 			defer udpgwMap.Delete(key)
 
+			// keepalive
 			keepaliveCtx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go func() {
@@ -479,7 +488,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 			lenBuf := make([]byte, 2)
 			for {
-				uConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+				uConn.SetReadDeadline(time.Now().Add(60 * time.Second))// UDP读取超时60s
 				
 				if _, err := io.ReadFull(uConn, lenBuf); err != nil {
 					break
@@ -490,47 +499,84 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					continue
 				}
 
-				pktBuf := make([]byte, pktLen)
+				// 从内存池获取复用的 byte slice
+				bufPtr := udpBufPool.Get().(*[]byte)
+				buf := *bufPtr
+				
+				// 保护机制：防止异常的超大包导致越界 (虽然 UDP 理论最大 65535)
+				if int(pktLen) > cap(buf) {
+					zlog.Warnf("%s [UDPGW] ⚠️ 异常包大小 %d，超过 Buffer 容量", TAG, pktLen)
+					udpBufPool.Put(bufPtr)
+					break
+				}
+
+				// 复用切片，避免 make 分配
+				pktBuf := buf[:pktLen]
 				if _, err := io.ReadFull(uConn, pktBuf); err != nil {
+					udpBufPool.Put(bufPtr) // 读取失败也要归还
 					break
 				}
 
 				flags := pktBuf[0]
 				if flags&0x02 == 0x02 {
 					offset := 3 
-					if offset >= int(pktLen) { continue }
+					if offset >= int(pktLen) {
+						udpBufPool.Put(bufPtr)
+						continue
+					}
 					
 					atyp := pktBuf[offset]
 					offset++
 					
 					var dstAddr []byte
 					if atyp == socks5.ATYPIPv4 {
-						if offset+4 > int(pktLen) { continue }
+						if offset+4 > int(pktLen) {
+							udpBufPool.Put(bufPtr)
+							continue
+						}
 						dstAddr = pktBuf[offset : offset+4]
 						offset += 4
 					} else if atyp == socks5.ATYPIPv6 {
-						if offset+16 > int(pktLen) { continue }
+						if offset+16 > int(pktLen) {
+							udpBufPool.Put(bufPtr)
+							continue
+						}
 						dstAddr = pktBuf[offset : offset+16]
 						offset += 16
 					} else if atyp == socks5.ATYPDomain {
-						if offset >= int(pktLen) { continue }
+						if offset >= int(pktLen) {
+							udpBufPool.Put(bufPtr)
+							continue
+						}
 						domainLen := int(pktBuf[offset])
-						if offset+1+domainLen > int(pktLen) { continue }
+						if offset+1+domainLen > int(pktLen) {
+							udpBufPool.Put(bufPtr)
+							continue
+						}
 						dstAddr = pktBuf[offset : offset+1+domainLen]
 						offset += 1 + domainLen
 					} else {
+						udpBufPool.Put(bufPtr)
 						continue
 					}
 
-					if offset+2 > int(pktLen) { continue }
+					if offset+2 > int(pktLen) { 
+						udpBufPool.Put(bufPtr)
+						continue 
+					}
 					dstPortBytes := pktBuf[offset : offset+2]
 					offset += 2
 					
 					payload := pktBuf[offset:]
 
 					res := socks5.NewDatagram(atyp, dstAddr, dstPortBytes, payload)
+					// res.Bytes() 底层会产生一次 Copy (新的内存分配)，
+					// 所以这里写入底层 Socket 后，原来的 buf 就可以安全回收了。
 					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
 				}
+
+				// 处理完毕，归还给内存池
+				udpBufPool.Put(bufPtr)
 			}
 			zlog.Infof("%s [UDPGW] 🔴 UDPGW 代理会话已释放 -> %s", TAG, key)
 		}(udpgwConn, addr, sessionKey)
@@ -544,7 +590,20 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	payloadLen := len(d.Data)
 	totalLen := 3 + len(addrBytes) + payloadLen 
 
-	packet := make([]byte, 2+totalLen)
+	// 从内存池获取
+	bufPtr := udpBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	
+	// 🌟 防越界拦截。如果封包过大，放弃复用或直接丢弃
+	if 2+totalLen > cap(buf) {
+		udpBufPool.Put(bufPtr)
+		zlog.Errorf("%s [SOCKS5-UDP] ❌ 封包过大 (需 %d, 只有 %d)，触发防崩溃拦截", TAG, 2+totalLen, cap(buf))
+		return fmt.Errorf("packet too large, exceeds buffer pool capacity")
+	}
+	
+	// 截取所需大小的切片
+	packet := buf[:2+totalLen]
+	
 	binary.BigEndian.PutUint16(packet[0:2], uint16(totalLen))
 	packet[2] = 0x02 
 	binary.BigEndian.PutUint16(packet[3:5], 1) 
@@ -558,6 +617,10 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入 UDPGW 数据失败: %v", TAG, err)
 	}
 
+	// 写入完成后，由于 TCP Write 会阻塞直到数据进入内核缓冲区，
+	// 所以此行执行完后 packet 就不再被需要了，可以安全归还。
+	udpBufPool.Put(bufPtr)
+	
 	return nil
 }
 
