@@ -544,3 +544,86 @@ func GetCachedIPs(domain string) []net.IP {
 
 	return ips
 }
+
+// ==================== 本地 DNS 服务端 (Local DNS Server) ====================
+
+var (
+	localUdpServer *dns.Server
+	localTcpServer *dns.Server
+)
+
+// localDnsHandler 负责接收本地 DNS 请求，并调用核心逻辑
+func localDnsHandler(w dns.ResponseWriter, r *dns.Msg) {
+	// 调用你现有的核心解析入口
+	reply, err := handleSshTcpDns(r)
+	if err != nil || reply == nil {
+		// 如果解析失败，返回标准 Server Failure 响应
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return
+	}
+
+	// 将解析结果写回给客户端 (miekg/dns 会自动处理 TCP 的长度头或 UDP 包)
+	w.WriteMsg(reply)
+}
+
+// StartLocalDNSServer 启动本地 DNS 服务器监听 UDP 和 TCP
+// port: 想要监听的端口，例如 10553
+func StartLocalDNSServer(port int) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// 使用独立的 ServeMux
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", localDnsHandler)
+
+	udpConn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return fmt.Errorf("绑定 UDP 端口失败: %w", err) // 发生错误，立刻同步返回
+	}
+
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		udpConn.Close() // TCP 失败了，记得把前面成功的 UDP 端口释放掉
+		return fmt.Errorf("绑定 TCP 端口失败: %w", err) // 发生错误，立刻同步返回
+	}
+	// ===================================================
+
+	// 将我们成功绑定的连接交给 dns.Server
+	localUdpServer = &dns.Server{PacketConn: udpConn, Net: "udp", Handler: mux}
+	localTcpServer = &dns.Server{Listener: tcpListener, Net: "tcp", Handler: mux}
+
+	// 启动 UDP 监听 (此时由于端口已经绑定成功，ActivateAndServe 极少会报错)
+	go func() {
+		zlog.Infof("%s [DNS-Server] 🚀 正在启动本地 UDP DNS 服务监听: %s", TAG, addr)
+		if err := localUdpServer.ActivateAndServe(); err != nil {
+			zlog.Errorf("%s [DNS-Server] ❌ UDP 服务异常退出: %v", TAG, err)
+		}
+	}()
+
+	// 启动 TCP 监听
+	go func() {
+		zlog.Infof("%s [DNS-Server] 🚀 正在启动本地 TCP DNS 服务监听: %s", TAG, addr)
+		if err := localTcpServer.ActivateAndServe(); err != nil {
+			zlog.Errorf("%s [DNS-Server] ❌ TCP 服务异常退出: %v", TAG, err)
+		}
+	}()
+
+	return nil // 只有双端端口都绑定成功，才会真正在这里返回 nil
+}
+
+// StopLocalDNSServer 优雅停止本地 DNS 服务器
+func StopLocalDNSServer() {
+	if localUdpServer != nil {
+		if err := localUdpServer.Shutdown(); err != nil {
+			zlog.Errorf("%s [DNS-Server] 停止 UDP 服务出错: %v", TAG, err)
+		}
+	}
+	if localTcpServer != nil {
+		if err := localTcpServer.Shutdown(); err != nil {
+			zlog.Errorf("%s [DNS-Server] 停止 TCP 服务出错: %v", TAG, err)
+		}
+	}
+	zlog.Infof("%s [DNS-Server] 🛑 本地 DNS 服务已安全停止", TAG)
+}

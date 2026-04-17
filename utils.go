@@ -12,7 +12,44 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"golang.org/x/crypto/ssh"
+	"go.uber.org/zap"
+	"os"
+	"os/user"
 )
+
+// PrintAndroidUserInfo 打印当前 Go 进程在 Android 上的底层身份信息
+func PrintAndroidUserInfo() {
+	// 1. 获取最底层的真实 Linux UID 和 GID
+	realUid := os.Getuid()
+	realGid := os.Getgid()
+
+	// 2. 逆向推算 Android 的用户空间架构
+	// Android UID 计算公式: UID = (UserID * 100000) + AppBaseID
+	androidUserId := realUid / 100000
+	appBaseId := realUid % 100000
+
+	// 3. 尝试获取标准的系统用户信息
+	var username, homeDir string
+	u, err := user.Current()
+	if err != nil {
+		zlog.Warn("user.Current() failed (Normal on highly customized Android)", zap.Error(err))
+		username = "unknown"
+		homeDir = "unknown"
+	} else {
+		username = u.Username
+		homeDir = u.HomeDir
+	}
+
+	// 4. 使用 zap 打印结构化日志
+	zlog.Info("========== GO PROCESS USER INFO ==========",
+		zap.Int("real_linux_uid", realUid),
+		zap.Int("real_linux_gid", realGid),
+		zap.Int("android_user_id", androidUserId),
+		zap.Int("app_base_id", appBaseId),
+		zap.String("username", username),
+		zap.String("home_dir", homeDir),
+	)
+}
 
 // CheckIfKeyEncrypted 供 Android 调用
 // 返回值: 

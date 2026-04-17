@@ -702,6 +702,8 @@ func parsePrivateKeySshSigner(privateKey []byte, passphrase []byte) (ssh.Signer,
 func StartSshTProxy2(configJson string) int {
 	StopSshTProxy()
 
+	PrintAndroidUserInfo()
+	
 	var cfg ProxyConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		zlog.Errorf("%s [Core] ❌ 解析配置 JSON 失败: %v", TAG, err)
@@ -737,6 +739,12 @@ func StartSshTProxy2(configJson string) int {
 		}
 		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 服务已完全停止", TAG)
 	}()
+	
+	// 启动本地 DNS 服务器监听 10553
+	//err = StartLocalDNSServer(10553)
+	//if err != nil {
+		// 处理错误
+	//}
 
 	wg.Add(1)
 	go func() {
@@ -912,6 +920,8 @@ func StopSshTProxy() {
 	if udpgwSessionCount > 0 {
 		zlog.Infof("%s [Core] 已强制断开 %d 个 UDPGW 代理会话", TAG, udpgwSessionCount)
 	}
+	
+	//StopLocalDNSServer()
 
 	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
 }
