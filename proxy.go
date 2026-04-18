@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,27 +22,27 @@ import (
 const TAG = "[MySsh]"
 
 type ProxyConfig struct {
-	LocalAddr   string `json:"local_addr"`
-	SshAddr     string `json:"ssh_addr"`
-	User        string `json:"user"`
-	AuthType    string `json:"auth_type"`
-	PrivateKey  string `json:"private_key"`
-	PrivateKeyPassphrase  string `json:"private_key_passphrase"`
-	Pass        string `json:"pass"`
-	VerifyFingerprint bool `json:"verify_finger_print"`
-	ServerFingerprint string `json:"server_finger_print"`
-	TunnelType  string `json:"tunnel_type"`
-	ProxyAddr   string `json:"proxy_addr"`
-	ProxyAuthRequired bool `json:"proxy_auth_required"`
-	ProxyAuthToken string `json:"proxy_auth_token"`
-	ProxyAuthUser string `json:"proxy_auth_user"`
-	ProxyAuthPass string `json:"proxy_auth_pass"`
-	CustomHost  string `json:"custom_host"`
-	ServerName	string	`json:"server_name"`
-	HttpPayload string `json:"http_payload"`
-	CustomPath  string `json:"custom_path"`
-	UdpgwAddr   string `json:"udpgw_addr"` // 留空则不开启 UDPGW
-	DisableStatusCheck bool `json:"disable_status_check"`
+	LocalAddr            string `json:"local_addr"`
+	SshAddr              string `json:"ssh_addr"`
+	User                 string `json:"user"`
+	AuthType             string `json:"auth_type"`
+	PrivateKey           string `json:"private_key"`
+	PrivateKeyPassphrase string `json:"private_key_passphrase"`
+	Pass                 string `json:"pass"`
+	VerifyFingerprint    bool   `json:"verify_finger_print"`
+	ServerFingerprint    string `json:"server_finger_print"`
+	TunnelType           string `json:"tunnel_type"`
+	ProxyAddr            string `json:"proxy_addr"`
+	ProxyAuthRequired    bool   `json:"proxy_auth_required"`
+	ProxyAuthToken       string `json:"proxy_auth_token"`
+	ProxyAuthUser        string `json:"proxy_auth_user"`
+	ProxyAuthPass        string `json:"proxy_auth_pass"`
+	CustomHost           string `json:"custom_host"`
+	ServerName           string `json:"server_name"`
+	HttpPayload          string `json:"http_payload"`
+	CustomPath           string `json:"custom_path"`
+	UdpgwAddr            string `json:"udpgw_addr"` // 留空则不开启 UDPGW
+	DisableStatusCheck   bool   `json:"disable_status_check"`
 }
 
 type GlobalConfig struct {
@@ -59,16 +60,16 @@ var (
 	mu           sync.Mutex
 	globalConfig GlobalConfig
 	globalRouter *GeoRouter
-	
+
 	// 生命周期与守护进程管理
 	engineCtx    context.Context
 	engineCancel context.CancelFunc
 
 	// 连接池与会话追踪管理
-	udpNatMap    sync.Map
-	tcpConnMap   sync.Map
-	udpgwMap     sync.Map // 用于存储本地 UDP 客户端 -> 远端 UDPGW 的 TCP 连接
-	
+	udpNatMap  sync.Map
+	tcpConnMap sync.Map
+	udpgwMap   sync.Map // 用于存储本地 UDP 客户端 -> 远端 UDPGW 的 TCP 连接
+
 	wg sync.WaitGroup
 )
 
@@ -197,7 +198,7 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 
 // ----- SOCKS5 代理处理器 -----
 
-type SshProxyHandler struct{
+type SshProxyHandler struct {
 	UdpgwAddr string
 }
 
@@ -212,7 +213,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		}
 		portBytes := make([]byte, 2)
 		binary.BigEndian.PutUint16(portBytes, uint16(localAddr.Port))
-		
+
 		rep := socks5.NewReply(socks5.RepSuccess, atyp, ip, portBytes)
 		if _, err := rep.WriteTo(c); err != nil {
 			return err
@@ -243,7 +244,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		target := r.Address()
 		host, port, err := net.SplitHostPort(target)
 		if err != nil {
-			host = target 
+			host = target
 		}
 
 		var isDirect bool
@@ -272,7 +273,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			_, _ = rep.WriteTo(c)
 			return dialErr
 		}
-		
+
 		defer remote.Close()
 		rep := socks5.NewReply(socks5.RepSuccess, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 		if _, err := rep.WriteTo(c); err != nil {
@@ -288,12 +289,12 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			_, err := tcpRelay(c, remote)
 			errc <- err
 		}()
-		
+
 		<-errc
 		remote.Close()
 		c.Close()
 		<-errc
-		
+
 		return nil
 	}
 
@@ -374,7 +375,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 命中直连规则，走本地传统 UDP 拨号
 	// ==========================================
 	if isDirect {
-		targetAddrStr := fmt.Sprintf("%s:%d", dialHost, dstPort)
+		targetAddrStr := net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
 		sessionKey := addr.String() + "<->" + targetAddrStr
 
 		var uc *net.UDPConn
@@ -393,27 +394,27 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Errorf("%s [SOCKS5-UDP] ❌ 建立本地 UDP 连接失败: %v", TAG, err)
 				return err
 			}
-			
+
 			zlog.Infof("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
 			udpNatMap.Store(sessionKey, uc)
 
 			wg.Add(1)
 			go func(conn *net.UDPConn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
-				defer wg.Done() 
+				defer wg.Done()
 				defer conn.Close()
 				defer udpNatMap.Delete(key)
-				
+
 				bufPtr := udpBufPool.Get().(*[]byte)
 				buf := *bufPtr
 				defer udpBufPool.Put(buf)
-				
+
 				for {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 					n, _, err := conn.ReadFromUDP(buf)
 					if err != nil {
-						break 
+						break
 					}
-					
+
 					res := socks5.NewDatagram(dstAtyp, dstAddr, dstPortBytes, buf[:n])
 					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
 				}
@@ -473,7 +474,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			go func() {
 				ticker := time.NewTicker(15 * time.Second)
 				defer ticker.Stop()
-				keepalivePkt := []byte{0x00, 0x03, 0x01, 0x00, 0x01} 
+				keepalivePkt := []byte{0x00, 0x03, 0x01, 0x00, 0x01}
 				for {
 					select {
 					case <-ticker.C:
@@ -488,8 +489,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 			lenBuf := make([]byte, 2)
 			for {
-				uConn.SetReadDeadline(time.Now().Add(60 * time.Second))// UDP读取超时60s
-				
+				uConn.SetReadDeadline(time.Now().Add(60 * time.Second)) // UDP读取超时60s
+
 				if _, err := io.ReadFull(uConn, lenBuf); err != nil {
 					break
 				}
@@ -502,7 +503,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				// 从内存池获取复用的 byte slice
 				bufPtr := udpBufPool.Get().(*[]byte)
 				buf := *bufPtr
-				
+
 				// 保护机制：防止异常的超大包导致越界 (虽然 UDP 理论最大 65535)
 				if int(pktLen) > cap(buf) {
 					zlog.Warnf("%s [UDPGW] ⚠️ 异常包大小 %d，超过 Buffer 容量", TAG, pktLen)
@@ -519,15 +520,15 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 				flags := pktBuf[0]
 				if flags&0x02 == 0x02 {
-					offset := 3 
+					offset := 3
 					if offset >= int(pktLen) {
 						udpBufPool.Put(bufPtr)
 						continue
 					}
-					
+
 					atyp := pktBuf[offset]
 					offset++
-					
+
 					var dstAddr []byte
 					if atyp == socks5.ATYPIPv4 {
 						if offset+4 > int(pktLen) {
@@ -560,13 +561,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 						continue
 					}
 
-					if offset+2 > int(pktLen) { 
+					if offset+2 > int(pktLen) {
 						udpBufPool.Put(bufPtr)
-						continue 
+						continue
 					}
 					dstPortBytes := pktBuf[offset : offset+2]
 					offset += 2
-					
+
 					payload := pktBuf[offset:]
 
 					res := socks5.NewDatagram(atyp, dstAddr, dstPortBytes, payload)
@@ -588,26 +589,26 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	addrBytes = append(addrBytes, d.DstPort...)
 
 	payloadLen := len(d.Data)
-	totalLen := 3 + len(addrBytes) + payloadLen 
+	totalLen := 3 + len(addrBytes) + payloadLen
 
 	// 从内存池获取
 	bufPtr := udpBufPool.Get().(*[]byte)
 	buf := *bufPtr
-	
+
 	// 🌟 防越界拦截。如果封包过大，放弃复用或直接丢弃
 	if 2+totalLen > cap(buf) {
 		udpBufPool.Put(bufPtr)
 		zlog.Errorf("%s [SOCKS5-UDP] ❌ 封包过大 (需 %d, 只有 %d)，触发防崩溃拦截", TAG, 2+totalLen, cap(buf))
 		return fmt.Errorf("packet too large, exceeds buffer pool capacity")
 	}
-	
+
 	// 截取所需大小的切片
 	packet := buf[:2+totalLen]
-	
+
 	binary.BigEndian.PutUint16(packet[0:2], uint16(totalLen))
-	packet[2] = 0x02 
-	binary.BigEndian.PutUint16(packet[3:5], 1) 
-	
+	packet[2] = 0x02
+	binary.BigEndian.PutUint16(packet[3:5], 1)
+
 	copy(packet[5:], addrBytes)
 	copy(packet[5+len(addrBytes):], d.Data)
 
@@ -620,7 +621,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 写入完成后，由于 TCP Write 会阻塞直到数据进入内核缓冲区，
 	// 所以此行执行完后 packet 就不再被需要了，可以安全归还。
 	udpBufPool.Put(bufPtr)
-	
+
 	return nil
 }
 
@@ -690,20 +691,20 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 }
 
 func parsePrivateKeySshSigner(privateKey []byte, passphrase []byte) (ssh.Signer, error) {
-    // 尝试直接解析
-    signer, err := ssh.ParsePrivateKey(privateKey)
-    // 如果报错提示需要密码 (Passphrase)
-    if _, ok := err.(*ssh.PassphraseMissingError); ok {
-        return ssh.ParsePrivateKeyWithPassphrase(privateKey, passphrase)
-    }
-    return signer, err
+	// 尝试直接解析
+	signer, err := ssh.ParsePrivateKey(privateKey)
+	// 如果报错提示需要密码 (Passphrase)
+	if _, ok := err.(*ssh.PassphraseMissingError); ok {
+		return ssh.ParsePrivateKeyWithPassphrase(privateKey, passphrase)
+	}
+	return signer, err
 }
 
 func StartSshTProxy2(configJson string) int {
 	StopSshTProxy()
 
 	PrintAndroidUserInfo()
-	
+
 	var cfg ProxyConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		zlog.Errorf("%s [Core] ❌ 解析配置 JSON 失败: %v", TAG, err)
@@ -729,7 +730,7 @@ func StartSshTProxy2(configJson string) int {
 	handler := &SshProxyHandler{
 		UdpgwAddr: cfg.UdpgwAddr, // 完全由配置决定，为空则禁用 UDPGW
 	}
-	
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -739,11 +740,11 @@ func StartSshTProxy2(configJson string) int {
 		}
 		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 服务已完全停止", TAG)
 	}()
-	
+
 	// 启动本地 DNS 服务器监听 10553
 	//err = StartLocalDNSServer(10553)
 	//if err != nil {
-		// 处理错误
+	// 处理错误
 	//}
 
 	wg.Add(1)
@@ -766,8 +767,8 @@ func StartSshTProxy2(configJson string) int {
 		}
 
 		sshConfig := &ssh.ClientConfig{
-			User:            cfg.User,
-			Auth:            sshAuthMethod,
+			User: cfg.User,
+			Auth: sshAuthMethod,
 			BannerCallback: func(message string) error {
 				zlog.Warnf("===== SSH Banner START =====\n%s\n===== SSH Banner END =====", message)
 				return nil
@@ -796,7 +797,7 @@ func StartSshTProxy2(configJson string) int {
 				}
 				return nil
 			},
-			Timeout:         15 * time.Second,
+			Timeout: 15 * time.Second,
 			Config: ssh.Config{
 				KeyExchanges: []string{
 					"curve25519-sha256",
@@ -829,7 +830,7 @@ func StartSshTProxy2(configJson string) int {
 			conn, err := dialTunnel(cfg)
 			if err != nil {
 				zlog.Errorf("%s [AutoSSH] ❌ 隧道建立失败: %v", TAG, err)
-				time.Sleep(3 * time.Second) 
+				time.Sleep(3 * time.Second)
 				continue
 			}
 
@@ -838,7 +839,7 @@ func StartSshTProxy2(configJson string) int {
 			if err != nil {
 				conn.Close()
 				zlog.Errorf("%s [AutoSSH] ❌ SSH 握手失败: %v", TAG, err)
-				time.Sleep(3 * time.Second) 
+				time.Sleep(3 * time.Second)
 				continue
 			}
 			cv := string(scc.ClientVersion())
@@ -883,7 +884,7 @@ func StopSshTProxy() {
 	mu.Lock()
 	defer mu.Unlock()
 	zlog.Infof("%s [Core] 正在停止资源...", TAG)
-	
+
 	if socksServer != nil {
 		socksServer.Shutdown()
 		socksServer = nil
@@ -920,7 +921,7 @@ func StopSshTProxy() {
 	if udpgwSessionCount > 0 {
 		zlog.Infof("%s [Core] 已强制断开 %d 个 UDPGW 代理会话", TAG, udpgwSessionCount)
 	}
-	
+
 	//StopLocalDNSServer()
 
 	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
