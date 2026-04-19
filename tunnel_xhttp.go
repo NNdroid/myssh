@@ -414,7 +414,7 @@ func init() {
 
 			for !virtualConn.closed {
 				// 依靠服务端的 Ack 来推进滑动窗口，安全取出需要发送或重传的切片
-				upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(ackedByServer, maxsendBufSize)
+				upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(ackedByServer, 60000)//maxsendBufSize
 
 				req, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(upData))
 				req.ContentLength = int64(len(upData))
