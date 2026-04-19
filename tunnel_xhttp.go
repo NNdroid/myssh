@@ -24,6 +24,7 @@ import (
 var (
 	maxsendBufSize = 900 * 1000
 	maxframeSize = 990 * 1000
+	padPoolLen = 64 * 1024
 )
 
 // ==========================================
@@ -165,6 +166,7 @@ func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 // ==========================================
 // 3. 动态 Padding 与 0xFFFF 信令装甲
 // ==========================================
+var padPool []byte
 
 type xhttpFramedConn struct {
 	r          io.Reader
@@ -219,21 +221,36 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 	}
 
 	frameLen := 6 + padLenInt + chunkSize
-	if frameLen > len(c.frameBuf) {
-		c.frameBuf = make([]byte, frameLen)
+	// 判断底层数组容量(cap)是否足够
+	if frameLen > cap(c.frameBuf) {
+		// 如果不够，采用 2 倍扩容策略，避免频繁 make
+		newCap := cap(c.frameBuf) * 2
+		if newCap < frameLen {
+			newCap = frameLen
+		}
+		c.frameBuf = make([]byte, frameLen, newCap)
+	} else {
+		// 容量足够时，直接拉伸Slice
+		c.frameBuf = c.frameBuf[:frameLen] 
 	}
-	frame := c.frameBuf[:frameLen]
 
-	binary.BigEndian.PutUint32(frame[0:4], uint32(chunkSize))
-	binary.BigEndian.PutUint16(frame[4:6], uint16(padLenInt))
+	// 写入 Header
+	binary.BigEndian.PutUint32(c.frameBuf[0:4], uint32(chunkSize))
+	binary.BigEndian.PutUint16(c.frameBuf[4:6], uint16(padLenInt))
+
+	// 极速 Padding 填充
 	if padLenInt > 0 {
-		io.ReadFull(rand.Reader, frame[6:6+padLenInt])
-	}
-	if chunkSize > 0 {
-		copy(frame[6+padLenInt:], chunk)
+		offset := mrand.Intn(padPoolLen - padLenInt)
+		copy(c.frameBuf[6:6+padLenInt], padPool[offset:offset+padLenInt])
 	}
 
-	_, err := c.w.Write(frame)
+	// 写入 Payload
+	if chunkSize > 0 {
+		copy(c.frameBuf[6+padLenInt:], chunk)
+	}
+
+	// 单次系统调用发出
+	_, err := c.w.Write(c.frameBuf)
 	return err
 }
 
@@ -262,7 +279,7 @@ func (c *xhttpFramedConn) Write(p []byte) (int, error) {
 }
 
 func (c *xhttpFramedConn) Read(p []byte) (int, error) {
-	if len(c.readBuf) > 0 {
+	if len(c.readBuf) > 0 {// 没有len信息，所以readBuf有就直接返回
 		n := copy(p, c.readBuf)
 		c.readBuf = c.readBuf[n:]
 		return n, nil
@@ -274,12 +291,17 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		rawPayloadLen := binary.BigEndian.Uint32(c.hdrBuf[0:4])
 		padLen := int(binary.BigEndian.Uint16(c.hdrBuf[4:6]))
 
+		// 直接复用 c.payloadBuf 当作“垃圾桶”来接收 padding
 		if padLen > 0 {
-			if _, err := io.CopyN(io.Discard, c.r, int64(padLen)); err != nil {
+			if padLen > cap(c.payloadBuf) {
+				c.payloadBuf = make([]byte, padLen)
+			}
+			if _, err := io.ReadFull(c.r, c.payloadBuf[:padLen]); err != nil {
 				return 0, err
 			}
 		}
 
+		// 处理特殊信令和空帧
 		if rawPayloadLen == uint32(0xFFFFFFFF) {
 			return 0, io.EOF // 截获远端 0xFFFFFFFF 信令，立即切断上传通道
 		}
@@ -288,20 +310,37 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		}
 		
 		payloadLen := int(rawPayloadLen)
-
-		if payloadLen > len(c.payloadBuf) {
-			c.payloadBuf = make([]byte, payloadLen)
+		
+		// 计算可以直接读入 buffer `p` 的长度
+		readIntoP := payloadLen
+		if readIntoP > len(p) {
+			readIntoP = len(p) // buffer 容量有限，只能装下这么多了
 		}
-		payload := c.payloadBuf[:payloadLen]
-		if _, err := io.ReadFull(c.r, payload); err != nil {
+
+		// 数据直接从 io.Reader 灌入用户的 p
+		if _, err := io.ReadFull(c.r, p[:readIntoP]); err != nil {
 			return 0, err
 		}
 
-		n := copy(p, payload)
-		if n < payloadLen {
-			c.readBuf = payload[n:]
+		// 如果用户的 p 太小，剩下的 payload 必须读入内部 buffer 暂存
+		leftover := payloadLen - readIntoP
+		if leftover > 0 {
+			// 使用 cap 而不是 len 来判断，最大程度减少 make() 重新分配内存的次数
+			if leftover > cap(c.payloadBuf) {
+				c.payloadBuf = make([]byte, leftover)
+			}
+			leftoverBuf := c.payloadBuf[:leftover]
+			
+			if _, err := io.ReadFull(c.r, leftoverBuf); err != nil {
+				// 如果前面给用户的 p 已经读了 readIntoP 字节，
+				// 这里哪怕断开，也应该把已读到的长度返回给上层
+				return readIntoP, err 
+			}
+			// 保存这部分没被拿走的数据，供下一次 Read 消费
+			c.readBuf = leftoverBuf
 		}
-		return n, nil
+
+		return readIntoP, nil
 	}
 }
 
@@ -335,6 +374,10 @@ func generateRandomHex(n int) string {
 // ==========================================
 
 func init() {
+	// 随机填充池初始化
+	padPool = make([]byte, padPoolLen)
+	io.ReadFull(rand.Reader, padPool)
+
 	xhttpHandler := func(cfg ProxyConfig, baseConn net.Conn, isTLS bool) (net.Conn, error) {
 		scheme := "http"
 		protoName := "XHTTPC"
