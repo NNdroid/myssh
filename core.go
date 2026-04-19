@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"bytes"
 	"io"
 	"sync"
 )
@@ -18,6 +19,12 @@ var (
 		New: func() interface{} {
 			buf := make([]byte, 65536)
 			return &buf
+		},
+	}
+	// 全局复用的 bytes.Buffer 池，接收响应体
+	bytesBufPool = sync.Pool {
+		New: func() interface{} {
+			return new(bytes.Buffer)
 		},
 	}
 )
