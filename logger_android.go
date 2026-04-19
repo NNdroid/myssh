@@ -79,11 +79,16 @@ type stunCore struct {
 }
 
 func (c *stunCore) With(fields []zapcore.Field) zapcore.Core {
-	return &stunCore{
+	clone := &stunCore{
 		LevelEnabler: c.LevelEnabler,
 		encoder:      c.encoder.Clone(),
 		tag:          c.tag,
 	}
+	// 将 With 传入的字段提前写入 encoder，提高 Write 性能
+	for i := range fields {
+		fields[i].AddTo(clone.encoder)
+	}
+	return clone
 }
 
 func (c *stunCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -94,12 +99,23 @@ func (c *stunCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.C
 }
 
 func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
-	buf, err := c.encoder.EncodeEntry(ent, fields)
+	// 1. 注入更多系统级参数
+	additionalFields := []zapcore.Field{
+		zap.Int("pid", os.Getpid()),              // 进程ID，排查多进程冲突
+		zap.Int("uid", os.Getuid()),
+		zap.String("version", Version),
+	}
+	
+	// 合并 fields
+	allFields := append(fields, additionalFields...)
+
+	// 2. 编码条目
+	buf, err := c.encoder.EncodeEntry(ent, allFields)
 	if err != nil {
 		return err
 	}
 
-	// 异步丢入队列
+	// 3. 异步丢入队列
 	select {
 	case logChan <- logItem{
 		level: zapToStunLevel(ent.Level),
@@ -107,12 +123,11 @@ func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		msg:   buf.String(),
 	}:
 	default:
-		// 队列满则静默丢弃，防止卡死业务逻辑
+		// 队列满则静默丢弃
 	}
 	buf.Free()
 	return nil
 }
-
 func (c *stunCore) Sync() error { return nil }
 
 // --- 初始化 ---
@@ -127,22 +142,33 @@ func InitLogger(logPath string, logLevelStr string) int {
 	default:      level = zapcore.InfoLevel
 	}
 
-	encoderConfig := zap.NewProductionEncoderConfig()
-	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
-	consoleEncoder := zapcore.NewConsoleEncoder(encoderConfig)
+	zapEncoderConfig := zapcore.EncoderConfig{
+		TimeKey:        "timestamp",
+		LevelKey:       "severity",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		MessageKey:     "message",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.LowercaseLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+	consoleEncoder := zapcore.NewConsoleEncoder(zapEncoderConfig)
+	jsonEncoder := zapcore.NewJSONEncoder(zapEncoderConfig)
 
 	// 文件输出
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
 	if err != nil {
 		return -1
 	}
-	fileCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(file), level)
+	fileCore := zapcore.NewCore(consoleEncoder.Clone(), zapcore.AddSync(file), level)//使用控制台输出格式
 
 	// 安卓 UI 输出
 	androidCoreInstance := &stunCore{
 		LevelEnabler: level,
-		encoder:      consoleEncoder.Clone(),
+		encoder:      jsonEncoder.Clone(),//使用json格式
 		tag:          "Stun-Go",
 	}
 
