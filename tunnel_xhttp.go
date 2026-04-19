@@ -21,6 +21,11 @@ import (
 	"golang.org/x/net/http2"
 )
 
+var (
+	maxsendBufSize = 900 * 1000
+	maxframeSize = 990 * 1000
+)
+
 // ==========================================
 // 1. 高性能可靠传输缓冲区 (Seq/Ack 机制)
 // ==========================================
@@ -179,7 +184,7 @@ type xhttpFramedConn struct {
 func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, remote net.Addr) *xhttpFramedConn {
 	conn := &xhttpFramedConn{
 		r: r, w: w, closer: closer, local: local, remote: remote,
-		frameBuf: make([]byte, 32768), hdrBuf: make([]byte, 4), payloadBuf: make([]byte, 16384),
+		frameBuf: make([]byte, maxframeSize), hdrBuf: make([]byte, 6), payloadBuf: make([]byte, maxsendBufSize),
 		closeCh: make(chan struct{}),
 	}
 	go conn.heartbeatLoop()
@@ -213,19 +218,19 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 		padLenInt = 16 + mrand.Intn(112)
 	}
 
-	frameLen := 4 + padLenInt + chunkSize
+	frameLen := 6 + padLenInt + chunkSize
 	if frameLen > len(c.frameBuf) {
 		c.frameBuf = make([]byte, frameLen)
 	}
 	frame := c.frameBuf[:frameLen]
 
-	binary.BigEndian.PutUint16(frame[0:2], uint16(chunkSize))
-	binary.BigEndian.PutUint16(frame[2:4], uint16(padLenInt))
+	binary.BigEndian.PutUint32(frame[0:4], uint32(chunkSize))
+	binary.BigEndian.PutUint16(frame[4:6], uint16(padLenInt))
 	if padLenInt > 0 {
-		io.ReadFull(rand.Reader, frame[4:4+padLenInt])
+		io.ReadFull(rand.Reader, frame[6:6+padLenInt])
 	}
 	if chunkSize > 0 {
-		copy(frame[4+padLenInt:], chunk)
+		copy(frame[6+padLenInt:], chunk)
 	}
 
 	_, err := c.w.Write(frame)
@@ -240,7 +245,7 @@ func (c *xhttpFramedConn) Write(p []byte) (int, error) {
 	}
 
 	written := 0
-	maxPayload := 16384
+	maxPayload := maxframeSize
 	for len(p) > 0 {
 		chunkSize := len(p)
 		if chunkSize > maxPayload {
@@ -266,8 +271,8 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		if _, err := io.ReadFull(c.r, c.hdrBuf); err != nil {
 			return 0, err
 		}
-		payloadLen := int(binary.BigEndian.Uint16(c.hdrBuf[0:2]))
-		padLen := int(binary.BigEndian.Uint16(c.hdrBuf[2:4]))
+		rawPayloadLen := binary.BigEndian.Uint32(c.hdrBuf[0:4])
+		padLen := int(binary.BigEndian.Uint16(c.hdrBuf[4:6]))
 
 		if padLen > 0 {
 			if _, err := io.CopyN(io.Discard, c.r, int64(padLen)); err != nil {
@@ -275,12 +280,14 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 			}
 		}
 
-		if payloadLen == 0xFFFF {
-			return 0, io.EOF // 截获远端 0xFFFF 信令，立即切断上传通道
+		if rawPayloadLen == uint32(0xFFFFFFFF) {
+			return 0, io.EOF // 截获远端 0xFFFFFFFF 信令，立即切断上传通道
 		}
-		if payloadLen == 0 {
+		if rawPayloadLen == 0 {
 			continue
 		}
+		
+		payloadLen := int(rawPayloadLen)
 
 		if payloadLen > len(c.payloadBuf) {
 			c.payloadBuf = make([]byte, payloadLen)
@@ -301,7 +308,7 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 func (c *xhttpFramedConn) Close() error {
 	if atomic.CompareAndSwapInt32(&c.closedFlag, 0, 1) {
 		c.mu.Lock()
-		frame := []byte{0xFF, 0xFF, 0x00, 0x00}
+		frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00}
 		c.w.Write(frame) 
 		c.mu.Unlock()
 
@@ -407,7 +414,7 @@ func init() {
 
 			for !virtualConn.closed {
 				// 依靠服务端的 Ack 来推进滑动窗口，安全取出需要发送或重传的切片
-				upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(ackedByServer, 32768)
+				upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(ackedByServer, maxsendBufSize)
 
 				req, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(upData))
 				req.ContentLength = int64(len(upData))
@@ -447,6 +454,31 @@ func init() {
 					}
 
 					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+				
+				// 拦截非 200 OK 的异常状态码！
+				if resp.StatusCode != http.StatusOK {
+					if upBufPtr != nil {
+						tcpBufPool.Put(upBufPtr)
+					}
+					
+					downBuf := bytesBufPool.Get().(*bytes.Buffer)
+					downBuf.Reset()
+					downBuf.ReadFrom(resp.Body)
+					bodyErr := downBuf.Bytes()
+					resp.Body.Close()
+					bytesBufPool.Put(downBuf)
+					
+					zlog.Errorf("%s [Tunnel] ❌ 收到异常 HTTP 状态码: %d, body: %s", TAG, resp.StatusCode, string(bodyErr))
+					
+					consecutiveErrors++
+					if consecutiveErrors > 5 {
+						zlog.Errorf("%s [Tunnel] 连续异常，触发熔断", TAG)
+						break
+					}
+					
+					time.Sleep(2 * time.Second) 
 					continue
 				}
 

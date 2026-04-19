@@ -7,10 +7,10 @@ import (
 )
 
 var (
-	// 用于 TCP io.CopyBuffer 的 32KB 缓冲池
+	// 用于 TCP io.CopyBuffer 的 64KB 缓冲池
 	tcpBufPool = sync.Pool{
 		New: func() interface{} {
-			buf := make([]byte, 32*1024)
+			buf := make([]byte, 64*1024)
 			return &buf
 		},
 	}
