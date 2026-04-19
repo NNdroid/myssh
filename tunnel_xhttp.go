@@ -56,7 +56,15 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, maxLen int) ([]byte, uint64
 	if remoteAck > rb.baseOffset {
 		skip := remoteAck - rb.baseOffset
 		if skip <= uint64(len(rb.data)) {
-			rb.data = rb.data[skip:]
+			remain := uint64(len(rb.data)) - skip
+			if remain == 0 {
+				rb.data = nil // 释放底层数组
+			} else {
+				// 新建一个恰好大小的数组，彻底抛弃原来可能高达几十 MB 的底层旧数组
+				newData := make([]byte, remain)
+				copy(newData, rb.data[skip:])
+				rb.data = newData
+			}
 			rb.baseOffset = remoteAck
 		} else {
 			rb.data = nil
