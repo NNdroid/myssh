@@ -56,16 +56,15 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen 
 	if remoteAck > rb.baseOffset {
 		skip := remoteAck - rb.baseOffset
 		if skip <= uint64(len(rb.data)) {
-			remain := uint64(len(rb.data)) - skip
-			if remain == 0 {
-				rb.data = nil // 释放底层数组
-			} else {
-				// 新建一个恰好大小的数组，彻底抛弃原来可能高达几十 MB 的底层旧数组
-				newData := make([]byte, remain)
-				copy(newData, rb.data[skip:])
+			rb.data = rb.data[skip:]
+			rb.baseOffset = remoteAck
+
+			// 【惰性緊縮】：如果底層陣列膨脹超過 4MB 且空間浪費過半，才真正釋放記憶體
+			if cap(rb.data) > 4*1024*1024 && len(rb.data) < cap(rb.data)/2 {
+				newData := make([]byte, len(rb.data))
+				copy(newData, rb.data)
 				rb.data = newData
 			}
-			rb.baseOffset = remoteAck
 		} else {
 			rb.data = nil
 			rb.baseOffset = remoteAck
@@ -148,8 +147,16 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 }
 
 func (c *meekVirtualConn) Write(p []byte) (int, error) {
-	if c.closed {
-		return 0, io.ErrClosedPipe
+	// 【核心優化】：TCP 背壓限制 (Flow Control)
+	// 防止本地端上傳過快導致記憶體暴漲 100MB+，限制積壓上限為 4MB
+	for {
+		if c.closed {
+			return 0, io.ErrClosedPipe
+		}
+		if c.writeBuf.Len() < 4*1024*1024 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond) // 阻塞，強迫本地 VPN/代理 客戶端減速
 	}
 	return c.writeBuf.Write(p)
 }
@@ -221,6 +228,7 @@ type xhttpFramedConn struct {
 	payloadBuf []byte
 	closeCh    chan struct{}
 	closedFlag int32
+	lastWriteTime int64
 }
 
 func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, remote net.Addr) *xhttpFramedConn {
@@ -228,18 +236,26 @@ func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, re
 		r: r, w: w, closer: closer, local: local, remote: remote,
 		frameBuf: make([]byte, maxframeSize), hdrBuf: make([]byte, 6), payloadBuf: make([]byte, maxsendBufSize),
 		closeCh: make(chan struct{}),
+		lastWriteTime: time.Now().Unix(),
 	}
 	go conn.heartbeatLoop()
 	return conn
 }
 
 func (c *xhttpFramedConn) heartbeatLoop() {
-	ticker := time.NewTicker(20 * time.Second)
+	// 巡逻周期设为 5 秒（不用频繁唤醒），但判断阈值依然是 20 秒
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			c.Write(nil)
+			// 获取上次真实发送数据的时间
+			last := atomic.LoadInt64(&c.lastWriteTime)
+			
+			// 如果距离上次发包已经过去了 20 秒，说明连接处于绝对空闲状态
+			if time.Now().Unix()-last >= 20 {
+				c.Write(nil) // 发送空帧，这会自动触发上面的 StoreInt64 刷新时间
+			}
 		case <-c.closeCh:
 			return
 		}
@@ -295,6 +311,7 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 }
 
 func (c *xhttpFramedConn) Write(p []byte) (int, error) {
+	atomic.StoreInt64(&c.lastWriteTime, time.Now().Unix())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(p) == 0 {
@@ -498,6 +515,8 @@ func init() {
 			var windowMu sync.Mutex
 			var consecutiveErrors int32
 			var triggerRetry int32
+			// 记录当前正在空手去服务端拉取数据的 Worker 数量
+			var emptyPollers int32
 
 			workerCount := 8
 			var wg sync.WaitGroup
@@ -519,11 +538,18 @@ func init() {
 						// GetSlice 实现了核心的滑动窗口
 						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currentAck, dispatchSeq, 60000) //maxsendBufSize 也可以
 
-						// 必须使用返回的 currentSeq 来推进绝对位置！
-						if len(upData) > 0 {
-							dispatchSeq = currentSeq + uint64(len(upData))
+						// 空载限流
+						if len(upData) == 0 {
+							// 如果没有上行数据，只允许最多 2 个 Worker 去服务端进行长轮询
+							if atomic.LoadInt32(&emptyPollers) >= 2 {
+								windowMu.Unlock()
+								time.Sleep(50 * time.Millisecond) // 其他 Worker 本地待命，不发 HTTP 请求
+								continue
+							}
+							atomic.AddInt32(&emptyPollers, 1) // 登记为一个空载探子
+							dispatchSeq = currentSeq          // 对齐游标
 						} else {
-							dispatchSeq = currentSeq // 同步对齐游标，防止漂移
+							dispatchSeq = currentSeq + uint64(len(upData))
 						}
 						windowMu.Unlock()
 
@@ -555,6 +581,11 @@ func init() {
 						}
 
 						resp, err := client.Do(req)
+						
+						// 请求结束，注销空载探子身份
+						if len(upData) == 0 {
+							atomic.AddInt32(&emptyPollers, -1)
+						}
 
 						if err != nil {
 							// 归还pool

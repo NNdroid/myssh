@@ -21,6 +21,13 @@ var (
 			return &buf
 		},
 	}
+	// 用于 XHTTP io.CopyBuffer 的 990KB 缓冲池
+	xhttpBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 990*1024)
+			return &buf
+		},
+	}
 	// 全局复用的 bytes.Buffer 池，接收响应体
 	bytesBufPool = sync.Pool {
 		New: func() interface{} {
