@@ -29,19 +29,18 @@ var (
 		},
 	}
 	// 全局复用的 bytes.Buffer 池，接收响应体
-	bytesBufPool = sync.Pool {
+	bytesBufPool = sync.Pool{
 		New: func() interface{} {
 			return new(bytes.Buffer)
 		},
 	}
 )
 
-
 func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
 	// 1. 从池子里借一块内存
 	bufPtr := tcpBufPool.Get().(*[]byte)
 	buf := *bufPtr
-	
+
 	// 2. 确保在函数退出时还给池子
 	defer tcpBufPool.Put(bufPtr)
 

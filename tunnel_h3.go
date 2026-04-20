@@ -7,20 +7,20 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
-	"os"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
-// 🌟 新增：HTTP/3 传输层全局复用池
+// 🌟 HTTP/3 传输层全局复用池
 // 这将彻底发挥 QUIC 的多路复用优势，所有代理请求共享同一条底层的 UDP/QUIC 物理连接
 var (
 	h3TransportCache sync.Map
 	h3ClientCache    sync.Map
-	clientMu      sync.Mutex
+	clientMu         sync.Mutex
 )
 
 // getH3Client 获取或初始化复用的 HTTP/3 客户端
@@ -28,7 +28,7 @@ func getH3Client(proxyAddr string, sni string) *http.Client {
 	if client, ok := h3ClientCache.Load(proxyAddr); ok {
 		return client.(*http.Client)
 	}
-	
+
 	clientMu.Lock()
 	defer clientMu.Unlock()
 
@@ -47,9 +47,9 @@ func getH3Client(proxyAddr string, sni string) *http.Client {
 		QUICConfig: &quic.Config{
 			EnableDatagrams:                  true,
 			EnableStreamResetPartialDelivery: true,
-			HandshakeIdleTimeout: 10 * time.Second, // 握手超时，防止 UDP 黑洞卡死
-			MaxIdleTimeout:       60 * time.Second,
-			KeepAlivePeriod:      8 * time.Second,
+			HandshakeIdleTimeout:             10 * time.Second, // 握手超时，防止 UDP 黑洞卡死
+			MaxIdleTimeout:                   60 * time.Second,
+			KeepAlivePeriod:                  8 * time.Second,
 			// 3. 流量控制（手动推高窗口，替代 AllowConnectionWindowIncrease）
 			// 这里的 Initial 决定了握手后的起始吞吐，Max 决定了峰值
 			InitialStreamReceiveWindow:     1024 * 1024 * 5,  // 5MB
@@ -60,10 +60,37 @@ func getH3Client(proxyAddr string, sni string) *http.Client {
 			MaxIncomingStreams:    1000,
 			MaxIncomingUniStreams: 1000,
 		},
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			udpAddr, err := net.ResolveUDPAddr("udp", addr)
+			if err != nil {
+				return nil, err
+			}
+
+			var localIP net.IP
+			if udpAddr.IP.To4() != nil {
+				// 目标是 IPv4，本地绑定 0.0.0.0
+				localIP = net.IPv4zero
+			} else {
+				// 目标是 IPv6，本地绑定 :: (IPv6 的 unspecified address)
+				localIP = net.IPv6unspecified
+			}
+
+			pconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localIP, Port: 0})
+			if err != nil {
+				return nil, err
+			}
+
+			// 设置Socket底层参数的需求（如 SO_MARK）
+			// rawConn, _ := pconn.SyscallConn()
+			// rawConn.Control(func(fd uintptr) { ... })
+
+			// 交给QUIC
+			return quic.DialEarly(ctx, pconn, udpAddr, tlsCfg, cfg)
+		},
 	}
 
 	client := &http.Client{Transport: rt}
-	
+
 	// 缓存起来，下次请求直接复用这套连接
 	h3TransportCache.Store(proxyAddr, rt)
 	h3ClientCache.Store(proxyAddr, client)
@@ -71,7 +98,7 @@ func getH3Client(proxyAddr string, sni string) *http.Client {
 	return client
 }
 
-// h3Conn 实现了将 HTTP/3 的请求与响应 Body 包装为标准的 net.Conn
+// h3Conn 将 HTTP/3 的请求与响应 Body 包装为标准的 net.Conn
 type h3Conn struct {
 	remoteAddr string
 	pw         *io.PipeWriter
@@ -91,7 +118,7 @@ func (s *h3Conn) Close() error {
 	if s.respBody != nil {
 		s.respBody.Close()
 	}
-	// 🌟 核心优化：千万不要在这里调用 rt.Close()！
+	// 不要在这里调用 rt.Close()
 	// 让底层的 QUIC 连接一直活着，供下一个代理请求复用（0-RTT 极速连接）
 	return nil
 }
@@ -106,7 +133,7 @@ func (s *h3Conn) RemoteAddr() net.Addr {
 	if err == nil && addr != nil {
 		return addr
 	}
-	return &net.UDPAddr{IP: net.IPv4zero, Port: 443} 
+	return &net.UDPAddr{IP: net.IPv4zero, Port: 443}
 }
 
 func (s *h3Conn) SetDeadline(t time.Time) error      { return nil }
@@ -115,11 +142,11 @@ func (s *h3Conn) SetWriteDeadline(t time.Time) error { return nil }
 
 func init() {
 	// 1. 禁用硬件加速（解决 sendmsg 5 错误的核心）
-    os.Setenv("QUIC_GO_DISABLE_GSO", "true")
-    os.Setenv("QUIC_GO_DISABLE_ECN", "true")
+	os.Setenv("QUIC_GO_DISABLE_GSO", "true")
+	os.Setenv("QUIC_GO_DISABLE_ECN", "true")
 
-	RegisterTunnel("h3", "udp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-
+	RegisterTunnel("h3", "udp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		// 这里的baseConn是nil且没有用
 		zlog.Infof("%s [Tunnel] 2. 准备进行 HTTP/3 (UDP) 隧道握手, 伪装 Host: %s", TAG, cfg.CustomHost)
 
 		path := cfg.CustomPath
@@ -130,8 +157,8 @@ func init() {
 		reqUrl := fmt.Sprintf("https://%s%s", cfg.ProxyAddr, path)
 
 		pr, pw := io.Pipe()
-		// 这个 ctx 控制着单次代理流的生命周期
-		ctx, cancel := context.WithCancel(context.Background())
+
+		ctx, cancel := context.WithCancel(parentCtx)
 		req, err := http.NewRequestWithContext(ctx, "POST", reqUrl, pr)
 		if err != nil {
 			cancel()
@@ -150,11 +177,11 @@ func init() {
 		}
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		req.Header.Set("Pragma", "no-cache")
-		req.Header.Set("Accept-Encoding", "identity") // 禁用压缩，防止 Nginx 尝试对 SSH 加密流进行二次压缩消耗 CPU
+		req.Header.Set("Accept-Encoding", "identity")       // 禁用压缩，防止 Nginx 尝试对 SSH 加密流进行二次压缩消耗 CPU
 		req.Header.Set("X-Content-Type-Options", "nosniff") // 防止 Nginx 猜测内容类型
-		req.Header.Set("X-Accel-Buffering", "no") // 关键：告知 Nginx 立即转发数据，不要缓冲 Body
+		req.Header.Set("X-Accel-Buffering", "no")           // 关键：告知 Nginx 立即转发数据，不要缓冲 Body
 
-		// 🌟 调用复用器获取单例 Client
+		// 调用复用器获取单例 Client
 		client := getH3Client(cfg.ProxyAddr, cfg.ServerName)
 
 		respChan := make(chan *http.Response, 1)

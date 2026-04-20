@@ -16,7 +16,7 @@ type LogReceiver interface {
 
 var (
 	globalReceiver LogReceiver
-	logChan        = make(chan logItem, 1000)
+	logChan                           = make(chan logItem, 1000)
 	zlog           *zap.SugaredLogger = zap.NewNop().Sugar()
 )
 
@@ -101,11 +101,11 @@ func (c *stunCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.C
 func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	// 1. 注入更多系统级参数
 	additionalFields := []zapcore.Field{
-		zap.Int("pid", os.Getpid()),              // 进程ID，排查多进程冲突
+		zap.Int("pid", os.Getpid()), // 进程ID，排查多进程冲突
 		zap.Int("uid", os.Getuid()),
 		zap.String("version", Version),
 	}
-	
+
 	// 合并 fields
 	allFields := append(fields, additionalFields...)
 
@@ -135,11 +135,16 @@ func (c *stunCore) Sync() error { return nil }
 func InitLogger(logPath string, logLevelStr string) int {
 	var level zapcore.Level
 	switch strings.ToUpper(logLevelStr) {
-	case "DEBUG": level = zapcore.DebugLevel
-	case "INFO":  level = zapcore.InfoLevel
-	case "WARN":  level = zapcore.WarnLevel
-	case "ERROR": level = zapcore.ErrorLevel
-	default:      level = zapcore.InfoLevel
+	case "DEBUG":
+		level = zapcore.DebugLevel
+	case "INFO":
+		level = zapcore.InfoLevel
+	case "WARN":
+		level = zapcore.WarnLevel
+	case "ERROR":
+		level = zapcore.ErrorLevel
+	default:
+		level = zapcore.InfoLevel
 	}
 
 	zapEncoderConfig := zapcore.EncoderConfig{
@@ -163,12 +168,12 @@ func InitLogger(logPath string, logLevelStr string) int {
 	if err != nil {
 		return -1
 	}
-	fileCore := zapcore.NewCore(consoleEncoder.Clone(), zapcore.AddSync(file), level)//使用控制台输出格式
+	fileCore := zapcore.NewCore(consoleEncoder.Clone(), zapcore.AddSync(file), level) //使用控制台输出格式
 
 	// 安卓 UI 输出
 	androidCoreInstance := &stunCore{
 		LevelEnabler: level,
-		encoder:      jsonEncoder.Clone(),//使用json格式
+		encoder:      jsonEncoder.Clone(), //使用json格式
 		tag:          "Stun-Go",
 	}
 

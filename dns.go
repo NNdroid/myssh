@@ -41,7 +41,7 @@ const (
 var (
 	// 传统 TCP DNS 连接池
 	dnsConnPool = make(chan pooledDnsConn, 10)
-	
+
 	// 高性能 DoH 连接池 (复用 HTTP/2 传输)
 	dohMu            sync.Mutex
 	directDoHClient  *http.Client
@@ -408,7 +408,9 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 				reply, finalErr = resolveTCP(requestMsg, serverUrl, dialer)
 			} else if strings.HasPrefix(serverUrl, "udp://") {
 				addr := strings.TrimPrefix(serverUrl, "udp://")
-				if !strings.Contains(addr, ":") { addr += ":53" }
+				if !strings.Contains(addr, ":") {
+					addr += ":53"
+				}
 				dnsClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
 				reply, _, finalErr = dnsClient.Exchange(requestMsg, addr)
 			} else {
@@ -472,7 +474,7 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 
 	originalReply := v.(*dns.Msg)
 	finalReply := originalReply.Copy()
-	finalReply.Id = requestMsg.Id 
+	finalReply.Id = requestMsg.Id
 
 	// 判断信息源以输出日志
 	var source string
@@ -585,7 +587,7 @@ func StartLocalDNSServer(port int) error {
 
 	tcpListener, err := net.Listen("tcp", addr)
 	if err != nil {
-		udpConn.Close() // TCP 失败了，记得把前面成功的 UDP 端口释放掉
+		udpConn.Close()                           // TCP 失败了，记得把前面成功的 UDP 端口释放掉
 		return fmt.Errorf("绑定 TCP 端口失败: %w", err) // 发生错误，立刻同步返回
 	}
 	// ===================================================

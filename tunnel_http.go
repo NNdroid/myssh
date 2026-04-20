@@ -2,6 +2,7 @@ package myssh
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -9,7 +10,7 @@ import (
 )
 
 func init() {
-	RegisterTunnel("http", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("http", "tcp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		if strings.TrimSpace(cfg.HttpPayload) == "" {
 			baseConn.Close()
 			zlog.Errorf("%s [Tunnel] ❌ 错误: HttpPayload 为空", TAG)
@@ -53,7 +54,7 @@ func init() {
 		}
 
 		zlog.Infof("%s [Tunnel] 准备发送请求 (Method: %s)", TAG, method)
-		
+
 		// 发送请求
 		if _, err := baseConn.Write([]byte(rawPayload)); err != nil {
 			baseConn.Close()

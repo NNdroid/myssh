@@ -75,7 +75,7 @@ var (
 
 // ----- 隧道注册表机制 (策略模式) -----
 
-type TunnelHandler func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
+type TunnelHandler func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
 
 type TunnelProtocol struct {
 	Network string        // 底层网络类型: "tcp", "udp", 或 "none"
@@ -156,7 +156,7 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	return 0
 }
 
-func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
+func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	tunnelType := strings.ToLower(cfg.TunnelType)
 	if tunnelType == "" {
 		tunnelType = "base"
@@ -180,7 +180,7 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 	switch proto.Network {
 	case "tcp":
 		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		baseConn, err = dialer.Dial("tcp", target)
+		baseConn, err = dialer.DialContext(ctx, "tcp", target)
 		if err != nil {
 			zlog.Errorf("%s [Tunnel] ❌ 底层 TCP 连接失败: %v", TAG, err)
 			return nil, err
@@ -190,10 +190,11 @@ func dialTunnel(cfg ProxyConfig) (net.Conn, error) {
 		zlog.Infof("%s [Tunnel] ⚡ 检测到 UDP 需求，已跳过常规 TCP 拨号", TAG)
 		baseConn = nil
 	default:
+		zlog.Infof("%s [Tunnel] ⚡ 采用自定义拨号", TAG)
 		baseConn = nil
 	}
 
-	return proto.Handler(cfg, baseConn)
+	return proto.Handler(ctx, cfg, baseConn)
 }
 
 // ----- SOCKS5 代理处理器 -----
@@ -658,7 +659,7 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 🌟 核心优化：将同步阻塞的发送放入子 Goroutine，通过 Channel 接收结果
+			// 🌟 将同步阻塞的发送放入子 Goroutine，通过 Channel 接收结果
 			errCh := make(chan error, 1)
 			go func() {
 				// 发送 SSH 标准保活探测包，要求必须回复
@@ -666,7 +667,7 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 				errCh <- err
 			}()
 
-			// 🌟 核心优化：三重竞速选择（上下文退出 vs 心跳返回 vs 严格超时）
+			// 🌟 三重竞速选择（上下文退出 vs 心跳返回 vs 严格超时）
 			select {
 			case <-ctx.Done():
 				return // 收到全局退出信号
@@ -681,7 +682,7 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 				zlog.Debugf("%s [AutoSSH] 💓 心跳正常", TAG)
 
 			case <-time.After(8 * time.Second):
-				// 🌟 杀手锏：如果 8 秒都没收到 SSH 服务器的回复，认定为遭遇“网络黑洞”
+				// 🌟 如果 8 秒都没收到 SSH 服务器的回复，认定为遭遇“网络黑洞”
 				zlog.Warnf("%s [AutoSSH] ⚠️ 心跳响应严重超时 (疑似网络假死)，强行切断重建", TAG)
 				client.Close() // 强制物理切断，立刻触发外层重连！
 				return
@@ -827,7 +828,7 @@ func StartSshTProxy2(configJson string) int {
 			}
 
 			zlog.Infof("%s [AutoSSH] 🔄 正在尝试与远端建立隧道...", TAG)
-			conn, err := dialTunnel(cfg)
+			conn, err := dialTunnel(engineCtx, cfg)
 			if err != nil {
 				zlog.Errorf("%s [AutoSSH] ❌ 隧道建立失败: %v", TAG, err)
 				time.Sleep(3 * time.Second)

@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	mrand "math/rand"
@@ -147,7 +148,7 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 }
 
 func (c *meekVirtualConn) Write(p []byte) (int, error) {
-	// 【核心優化】：TCP 背壓限制 (Flow Control)
+	// TCP 背壓限制 (Flow Control)
 	// 防止本地端上傳過快導致記憶體暴漲 100MB+，限制積壓上限為 4MB
 	for {
 		if c.closed {
@@ -216,18 +217,18 @@ func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 var padPool []byte
 
 type xhttpFramedConn struct {
-	r          io.Reader
-	w          io.Writer
-	closer     func() error
-	local      net.Addr
-	remote     net.Addr
-	mu         sync.Mutex
-	readBuf    []byte
-	frameBuf   []byte
-	hdrBuf     []byte
-	payloadBuf []byte
-	closeCh    chan struct{}
-	closedFlag int32
+	r             io.Reader
+	w             io.Writer
+	closer        func() error
+	local         net.Addr
+	remote        net.Addr
+	mu            sync.Mutex
+	readBuf       []byte
+	frameBuf      []byte
+	hdrBuf        []byte
+	payloadBuf    []byte
+	closeCh       chan struct{}
+	closedFlag    int32
 	lastWriteTime int64
 }
 
@@ -235,7 +236,7 @@ func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, re
 	conn := &xhttpFramedConn{
 		r: r, w: w, closer: closer, local: local, remote: remote,
 		frameBuf: make([]byte, maxframeSize), hdrBuf: make([]byte, 6), payloadBuf: make([]byte, maxsendBufSize),
-		closeCh: make(chan struct{}),
+		closeCh:       make(chan struct{}),
 		lastWriteTime: time.Now().Unix(),
 	}
 	go conn.heartbeatLoop()
@@ -251,7 +252,7 @@ func (c *xhttpFramedConn) heartbeatLoop() {
 		case <-ticker.C:
 			// 获取上次真实发送数据的时间
 			last := atomic.LoadInt64(&c.lastWriteTime)
-			
+
 			// 如果距离上次发包已经过去了 20 秒，说明连接处于绝对空闲状态
 			if time.Now().Unix()-last >= 20 {
 				c.Write(nil) // 发送空帧，这会自动触发上面的 StoreInt64 刷新时间
@@ -435,7 +436,7 @@ func init() {
 	padPool = make([]byte, padPoolLen)
 	io.ReadFull(rand.Reader, padPool)
 
-	xhttpHandler := func(cfg ProxyConfig, baseConn net.Conn, isTLS bool) (net.Conn, error) {
+	xhttpHandler := func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn, isTLS bool) (net.Conn, error) {
 		scheme := "http"
 		protoName := "XHTTPC"
 		if isTLS {
@@ -443,72 +444,174 @@ func init() {
 			protoName = "XHTTP"
 		}
 
-		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 隧道握手, 伪装 Host: %s", TAG, protoName, cfg.CustomHost)
-
-		var activeConn net.Conn = baseConn
-		var negotiatedProtocol = "http/1.1"
-
-		if isTLS {
-			utlsConfig := &utls.Config{
-				ServerName:         cfg.ServerName,
-				InsecureSkipVerify: true,
-				NextProtos:         []string{"h2", "http/1.1"},
-			}
-			uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
-			if err := uConn.Handshake(); err != nil {
-				baseConn.Close()
-				zlog.Errorf("%s [Tunnel] ❌ %s uTLS 握手失败: %v", TAG, protoName, err)
-				return nil, err
-			}
-			activeConn = uConn
-			negotiatedProtocol = uConn.ConnectionState().NegotiatedProtocol
-		}
-
-		zlog.Infof("%s [Tunnel] ✅ %s 底层握手成功 (协议: %s)", TAG, protoName, negotiatedProtocol)
+		zlog.Infof("%s [Tunnel] 准备进行 %s 隧道握手, 伪装 Host: %s", TAG, protoName, cfg.CustomHost)
 
 		path := cfg.CustomPath
 		if path == "" {
 			path = "/stream"
 		}
 		reqURL := fmt.Sprintf("%s://%s%s", scheme, cfg.ProxyAddr, path)
+		zlog.Debugf("%s [Tunnel] URL: %s", TAG, reqURL)
 		sessionID := generateRandomHex(16)
 
-		var connUsed int32
-		dialerFunc := func() (net.Conn, error) {
-			if atomic.SwapInt32(&connUsed, 1) == 0 {
-				return activeConn, nil
-			}
-			return nil, fmt.Errorf("physical connection exhausted")
-		}
+		var client *http.Client
 
-		var rt http.RoundTripper
-		if negotiatedProtocol == "h2" {
-			rt = &http2.Transport{
-				AllowHTTP: true,
-				DialTLSContext: func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
-					return dialerFunc()
-				},
+		if isTLS {
+			// ==========================================
+			// Zero-Waste 预拨号 ALPN 探测
+			// ==========================================
+			var d net.Dialer
+			tcpConn, err := d.DialContext(parentCtx, "tcp", cfg.ProxyAddr)
+			if err != nil {
+				return nil, fmt.Errorf("probe tcp dial failed: %w", err)
 			}
-		} else {
-			// 修改点：允许并发，将 MaxIdleConnsPerHost 设置高一些以支持 8 worker
-			t1 := &http.Transport{ForceAttemptHTTP2: false, MaxIdleConnsPerHost: 100, MaxConnsPerHost: 100, DisableKeepAlives: false}
-			if isTLS {
-				t1.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) { return dialerFunc() }
+
+			utlsConfig := &utls.Config{
+				ServerName:         cfg.ServerName, // SNI 伪装
+				InsecureSkipVerify: true,
+				NextProtos:         []string{"h2", "http/1.1"}, // 声明同时支持 h2 和 http/1.1
+			}
+
+			// 进行探测性 TLS 握手
+			uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
+			if err := uConn.HandshakeContext(parentCtx); err != nil {
+				tcpConn.Close()
+				return nil, fmt.Errorf("probe utls handshake failed: %w", err)
+			}
+
+			// 获取真实的 ALPN 协商结果
+			negotiatedProtocol := uConn.ConnectionState().NegotiatedProtocol
+			zlog.Infof("%s [Tunnel] 探测到服务端 ALPN 协议: %s (伪装 Host: %s)", TAG, negotiatedProtocol, cfg.CustomHost)
+
+			// 缓存“探路连接”
+			cachedConn := net.Conn(uConn)
+			var connOnce sync.Once
+
+			dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var c net.Conn
+				var isReused bool
+				
+				// 第一次拨号时，直接把探路连接交出去
+				connOnce.Do(func() {
+					c = cachedConn
+					isReused = true
+				})
+				if isReused {
+					return c, nil
+				}
+
+				// 后续并发 Worker 需要建立新连接时，执行正常的拨号流程
+				tc, err := d.DialContext(ctx, "tcp", cfg.ProxyAddr)
+				if err != nil {
+					return nil, err
+				}
+				uc := utls.UClient(tc, utlsConfig, utls.HelloChrome_Auto)
+				if err := uc.HandshakeContext(ctx); err != nil {
+					tc.Close()
+					return nil, err
+				}
+				return uc, nil
+			}
+
+			if negotiatedProtocol == "h2" {
+				zlog.Infof("%s [Tunnel] ⚡ 启用 HTTP/2 引擎", TAG)
+				t2 := &http2.Transport{
+					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+						return dialTLS(ctx, network, addr)
+					},
+					AllowHTTP: false,
+				}
+				client = &http.Client{Transport: t2, Timeout: 30 * time.Second}
 			} else {
-				t1.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) { return dialerFunc() }
+				zlog.Infof("%s [Tunnel] 🐢 回退至 HTTP/1.1 引擎", TAG)
+				t1 := &http.Transport{
+					DialTLSContext:        dialTLS,
+					MaxIdleConns:          100,
+					MaxIdleConnsPerHost:   100,
+					MaxConnsPerHost:       100,
+					IdleConnTimeout:       90 * time.Second,
+					TLSHandshakeTimeout:   10 * time.Second,
+					ExpectContinueTimeout: 5 * time.Second,
+				}
+				client = &http.Client{Transport: t1, Timeout: 15 * time.Second}
 			}
-			rt = t1
+
+		} else {
+			// ==========================================
+			// 纯 TCP 模式: 发包探测 h2c vs HTTP/1.1
+			// ==========================================
+			
+			dialTCP := func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "tcp", cfg.ProxyAddr)
+			}
+
+			// 定义 H2C 探测函数
+			probeH2C := func() bool {
+				// 创建一个短暂的临时 Transport 专门用来探路
+				t2Probe := &http2.Transport{
+					AllowHTTP: true,
+					// 重点：Go 的 h2c 必须写在 DialTLSContext 里，即使我们返回的是普通 TCP 连接
+					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+						return dialTCP(ctx, network, addr)
+					},
+				}
+				tmpClient := &http.Client{Transport: t2Probe, Timeout: 3 * time.Second}
+
+				// 构造一个极其轻量级的 OPTIONS 请求去试探
+				probeReq, _ := http.NewRequestWithContext(parentCtx, http.MethodOptions, "http://"+cfg.ProxyAddr+"/", nil)
+				resp, err := tmpClient.Do(probeReq)
+				
+				if err != nil {
+					// 报错（比如连接被服务端强行重置），说明极大概率不支持 h2c
+					return false 
+				}
+				defer resp.Body.Close()
+				
+				// 如果服务端返回了响应，我们检查它的主版本号是不是 2
+				// 如果它是 HTTP/1.1 服务器，它通常会解析失败并返回 HTTP/1.1 400 Bad Request
+				return resp.ProtoMajor == 2
+			}
+
+			// 执行探测并根据结果组装最终的 Client
+			if probeH2C() {
+				zlog.Infof("%s [Tunnel] ⚡ 探测成功，启用 H2C (明文 HTTP/2) 引擎", TAG)
+				
+				t2 := &http2.Transport{
+					AllowHTTP: true,
+					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+						return dialTCP(ctx, network, addr)
+					},
+				}
+				client = &http.Client{Transport: t2, Timeout: 30 * time.Second}
+				
+			} else {
+				zlog.Infof("%s [Tunnel] 🐢 H2C 探测失败，平滑回退至纯 TCP HTTP/1.1 引擎", TAG)
+				
+				t1 := &http.Transport{
+					DialContext:           dialTCP,
+					MaxIdleConns:          100,
+					MaxIdleConnsPerHost:   100,
+					MaxConnsPerHost:       100,
+					IdleConnTimeout:       90 * time.Second,
+					ExpectContinueTimeout: 5 * time.Second,
+				}
+				client = &http.Client{Transport: t1, Timeout: 15 * time.Second}
+			}
 		}
 
-		client := &http.Client{Transport: rt, Timeout: 15 * time.Second}
-		virtualConn := newMeekVirtualConn(sessionID, activeConn.LocalAddr(), activeConn.RemoteAddr())
+		proxyNetAddr, _ := net.ResolveTCPAddr("tcp", cfg.ProxyAddr)
+		localNetAddr := &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+		virtualConn := newMeekVirtualConn(sessionID, localNetAddr, proxyNetAddr)
+
+		ctx, cancel := context.WithCancel(parentCtx)
 
 		// =====================================
 		// 数据泵：带有滑动窗口 ARQ 的 8并发稳态轮询
 		// =====================================
 		go func() {
 			defer virtualConn.Close()
-			defer activeConn.Close()
+			defer cancel()
 
 			var ackedByServer uint64
 			var dispatchSeq uint64
@@ -526,7 +629,10 @@ func init() {
 				go func(id int) {
 					defer wg.Done()
 					for !virtualConn.closed {
-						// 1. 抢占任务：从写缓冲中划走一段数据
+						if ctx.Err() != nil {
+							break
+						}
+						// 抢占任务：从写缓冲中划走一段数据
 						windowMu.Lock()
 						currentAck := atomic.LoadUint64(&ackedByServer)
 
@@ -553,7 +659,7 @@ func init() {
 						}
 						windowMu.Unlock()
 
-						req, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(upData))
+						req, _ := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(upData))
 						req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 						req.ContentLength = int64(len(upData))
 
@@ -582,7 +688,7 @@ func init() {
 						}
 
 						resp, err := client.Do(req)
-						
+
 						// 请求结束，注销空载探子身份
 						if len(upData) == 0 {
 							atomic.AddInt32(&emptyPollers, -1)
@@ -592,6 +698,12 @@ func init() {
 							// 归还pool
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr) // 假设 xhttpBufPool 在全局可用
+							}
+							zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)
+
+							// 若上下文被取消，直接退出
+							if errors.Is(err, context.Canceled) {
+								break
 							}
 
 							// 【并发核心策略】：一旦出错，重置派发游标到已确认点，触发重传
@@ -670,7 +782,7 @@ func init() {
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr)
 							}
-							
+
 							zlog.Warnf("%s [Tunnel] 读取下行 Body 失败，触发安全重传: %v", TAG, errBody)
 
 							windowMu.Lock()
@@ -706,14 +818,15 @@ func init() {
 
 		return newXhttpFramedConn(virtualConn, virtualConn, func() error {
 			virtualConn.Close()
-			return activeConn.Close()
-		}, activeConn.LocalAddr(), activeConn.RemoteAddr()), nil
+			cancel()
+			return nil
+		}, localNetAddr, proxyNetAddr), nil
 	}
 
-	RegisterTunnel("xhttpc", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return xhttpHandler(cfg, baseConn, false)
+	RegisterTunnel("xhttpc", "none", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return xhttpHandler(ctx, cfg, baseConn, false)
 	})
-	RegisterTunnel("xhttp", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return xhttpHandler(cfg, baseConn, true)
+	RegisterTunnel("xhttp", "none", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return xhttpHandler(ctx, cfg, baseConn, true)
 	})
 }

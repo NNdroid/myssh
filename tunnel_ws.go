@@ -14,7 +14,7 @@ import (
 )
 
 func init() {
-	wsHandler := func(cfg ProxyConfig, baseConn net.Conn, isWSS bool) (net.Conn, error) {
+	wsHandler := func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn, isWSS bool) (net.Conn, error) {
 		scheme := "ws"
 		if isWSS {
 			scheme = "wss"
@@ -28,14 +28,14 @@ func init() {
 
 		u := url.URL{Scheme: scheme, Host: cfg.ProxyAddr, Path: path}
 
-		// 1. 构造基础 Header
+		// Header
 		fakeHeaders := http.Header{
 			"Host":                     []string{cfg.CustomHost},
 			"User-Agent":               []string{"Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36"},
 			"Sec-WebSocket-Extensions": []string{"permessage-deflate; client_max_window_bits"},
 		}
 
-		// 2. 用户名密码认证逻辑
+		// 用户认证逻辑
 		if cfg.ProxyAuthRequired {
 			auth := cfg.ProxyAuthUser + ":" + cfg.ProxyAuthPass
 			encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
@@ -66,14 +66,15 @@ func init() {
 			HTTPClient:   &http.Client{Transport: transport},
 			HTTPHeader:   fakeHeaders,
 			Subprotocols: []string{"binary"},
+			Host:         cfg.CustomHost,
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		dialCtx, cancel := context.WithTimeout(parentCtx, 10*time.Second)
 		defer cancel()
 
-		wsConn, resp, err := websocket.Dial(ctx, u.String(), opts)
+		wsConn, resp, err := websocket.Dial(dialCtx, u.String(), opts)
 		if err != nil {
-			// 3. 🌟 增加认证失败的日志识别
+			// 认证失败
 			if resp != nil && (resp.StatusCode == 401 || resp.StatusCode == 407) {
 				zlog.Errorf("%s [Tunnel] ❌ WebSocket 认证失败, 状态码: %d", TAG, resp.StatusCode)
 			}
@@ -81,16 +82,16 @@ func init() {
 			zlog.Errorf("%s [Tunnel] ❌ WebSocket 握手失败: %v", TAG, err)
 			return nil, err
 		}
-		
+
 		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功 (Status: %d), 协商协议: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
 
 		return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 	}
 
-	RegisterTunnel("ws", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return wsHandler(cfg, baseConn, false)
+	RegisterTunnel("ws", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return wsHandler(ctx, cfg, baseConn, false)
 	})
-	RegisterTunnel("wss", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return wsHandler(cfg, baseConn, true)
+	RegisterTunnel("wss", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return wsHandler(ctx, cfg, baseConn, true)
 	})
 }

@@ -13,7 +13,7 @@ import (
 	"github.com/quic-go/webtransport-go"
 )
 
-// 🌟 新增：WebTransport 全局会话池
+// WebTransport 全局会话池
 // 用于完美实现 QUIC 多路复用，避免疯狂发起 UDP 握手触发运营商 QoS 阻断
 var (
 	wtSessionCache sync.Map
@@ -21,13 +21,13 @@ var (
 )
 
 // getWTSession 获取或新建一个复用的 WebTransport 会话
-func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error) {
-	// 1. Fast Path: 直接从缓存中取
+func getWTSession(ctx context.Context, cfg ProxyConfig, reqUrl string) (*webtransport.Session, error) {
+	// 直接从缓存中取
 	if val, ok := wtSessionCache.Load(cfg.ProxyAddr); ok {
 		return val.(*webtransport.Session), nil
 	}
 
-	// 2. 加锁防止并发拨号
+	// 加锁防止并发拨号
 	wtMutex.Lock()
 	defer wtMutex.Unlock()
 
@@ -44,15 +44,15 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 		NextProtos:         []string{"h3"},
 	}
 
-	// 🌟 激进的防断流 QUIC 配置
+	// 防断流 QUIC 配置
 	dialer := &webtransport.Dialer{
 		TLSClientConfig: tlsConf,
 		QUICConfig: &quic.Config{
-		    EnableDatagrams:      true,
+			EnableDatagrams:                  true,
 			EnableStreamResetPartialDelivery: true,
-			HandshakeIdleTimeout: 10 * time.Second, // 防止 UDP 黑洞卡死
-			MaxIdleTimeout:       30 * time.Second,
-			KeepAlivePeriod:      8 * time.Second,  // 8秒超强心跳，强行撑开 NAT 网关
+			HandshakeIdleTimeout:             10 * time.Second, // 防止 UDP 黑洞卡死
+			MaxIdleTimeout:                   30 * time.Second,
+			KeepAlivePeriod:                  8 * time.Second, // 8秒超强心跳，强行撑开 NAT 网关
 		},
 	}
 
@@ -68,16 +68,16 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 		headers.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	_, session, err := dialer.Dial(ctx, reqUrl, headers)
+	_, session, err := dialer.Dial(dialCtx, reqUrl, headers)
 	if err != nil {
 		return nil, err
 	}
 
 	zlog.Infof("%s [Tunnel] ✅ 底层 WebTransport 会话建立成功！", TAG)
-	
+
 	// 存入缓存供后续并发请求复用
 	wtSessionCache.Store(cfg.ProxyAddr, session)
 	return session, nil
@@ -85,8 +85,8 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 
 // wtConn 将 webtransport.Stream 包装为 net.Conn
 type wtConn struct {
-	*webtransport.Stream // ✅ 加上星号，改为指针嵌套
-	remoteAddr           string
+	*webtransport.Stream
+	remoteAddr string
 }
 
 // 手动提供虚拟的本地和远端地址，防止上层获取地址时发生 Panic
@@ -102,7 +102,7 @@ func (w *wtConn) RemoteAddr() net.Addr {
 	return &net.UDPAddr{IP: net.IPv4zero, Port: 443}
 }
 
-// 🌟 核心修改：重写 Close，只关闭当前流，绝不关闭复用的 Session！
+// 只关闭当前流，绝不关闭复用的 Session！
 func (w *wtConn) Close() error {
 	w.Stream.CancelRead(0)
 	w.Stream.CancelWrite(0)
@@ -110,7 +110,7 @@ func (w *wtConn) Close() error {
 }
 
 func init() {
-	RegisterTunnel("wt", "udp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("wt", "udp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 
 		path := cfg.CustomPath
 		if path == "" {
@@ -118,23 +118,23 @@ func init() {
 		}
 		reqUrl := fmt.Sprintf("https://%s%s", cfg.ProxyAddr, path)
 
-		// 🌟 1. 获取复用的 WebTransport 会话 (Session)
-		session, err := getWTSession(cfg, reqUrl)
+		// 获取复用的 WebTransport 会话 (Session)
+		session, err := getWTSession(ctx, cfg, reqUrl)
 		if err != nil {
 			zlog.Errorf("%s [Tunnel] ❌ WebTransport 会话获取失败: %v", TAG, err)
 			return nil, err
 		}
 
-		// 🌟 2. 在复用会话上开启极速双向数据流 (Stream)
+		// 在复用会话上开启极速双向数据流 (Stream)
 		// 这里的 Background() 不能传超时 ctx，因为这个 ctx 会跟随 stream 的整个生命周期
-		stream, err := session.OpenStreamSync(context.Background())
+		stream, err := session.OpenStreamSync(ctx)
 		if err != nil {
 			// 如果流打开失败，说明底层的 Session 已经因为网络波动死掉了
 			// 我们需要从缓存中把它踢除，并关闭死掉的会话
 			zlog.Warnf("%s [Tunnel] ⚠️ 发现 WebTransport 僵尸会话，正在清理并重试...", TAG)
 			wtSessionCache.Delete(cfg.ProxyAddr)
 			session.CloseWithError(1, "stream open failed due to dead session")
-			
+
 			// 抛出错误，外层的 autoSSH 重连机制会自动触发下一轮全新的拨号
 			return nil, fmt.Errorf("open stream failed: %w", err)
 		}

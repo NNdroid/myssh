@@ -30,7 +30,7 @@ func (s *streamConn) Close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	
+
 	var errs []error
 	if s.pw != nil {
 		// 🌟 先关闭写入管道，让服务端收到 EOF
@@ -117,7 +117,7 @@ func init() {
 	// 提取 H2 和 gRPC 通用的握手逻辑
 	// isTLS: 是否使用 TLS (区分 h2/h2c)
 	// isGRPC: 是否套用 gRPC 协议头和封包器
-	h2Handler := func(cfg ProxyConfig, baseConn net.Conn, isTLS bool, isGRPC bool) (net.Conn, error) {
+	h2Handler := func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn, isTLS bool, isGRPC bool) (net.Conn, error) {
 		scheme := "http"
 		protoName := "H2C"
 		if isTLS {
@@ -141,7 +141,7 @@ func init() {
 		reqUrl := fmt.Sprintf("%s://%s%s", scheme, cfg.ProxyAddr, path)
 
 		pr, pw := io.Pipe()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(parentCtx)
 		req, err := http.NewRequestWithContext(ctx, "POST", reqUrl, pr)
 		if err != nil {
 			baseConn.Close()
@@ -160,7 +160,7 @@ func init() {
 			req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
 		}
 
-		// 🌟 核心差异：注入 gRPC 标准头部
+		// 🌟 注入 gRPC 标准头部
 		if isGRPC {
 			req.Header.Set("Content-Type", "application/grpc")
 			req.Header.Set("TE", "trailers")
@@ -168,6 +168,7 @@ func init() {
 
 		transport := &http2.Transport{}
 		if isTLS {
+			// 这里的 ctx 是由 http2.Transport 在拨号时传入的，它已经自动继承了上面的 reqCtx
 			transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
 				utlsConfig := &utls.Config{
 					ServerName:         cfg.ServerName,
@@ -224,7 +225,7 @@ func init() {
 				cancel:   cancel,
 			}
 
-			// 🌟 核心差异：如果是 gRPC，给这个连接套上数据帧封包器
+			// 🌟 如果是 gRPC，给这个连接套上数据帧封包器
 			if isGRPC {
 				return &grpcConn{
 					Conn: sConn,
@@ -244,18 +245,18 @@ func init() {
 	}
 
 	// 注册 H2 系列
-	RegisterTunnel("h2c", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return h2Handler(cfg, baseConn, false, false)
+	RegisterTunnel("h2c", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return h2Handler(ctx, cfg, baseConn, false, false)
 	})
-	RegisterTunnel("h2", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return h2Handler(cfg, baseConn, true, false)
+	RegisterTunnel("h2", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return h2Handler(ctx, cfg, baseConn, true, false)
 	})
-	
+
 	// 注册 gRPC 系列
-	RegisterTunnel("grpcc", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return h2Handler(cfg, baseConn, false, true) // Cleartext gRPC
+	RegisterTunnel("grpcc", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return h2Handler(ctx, cfg, baseConn, false, true) // Cleartext gRPC
 	})
-	RegisterTunnel("grpc", "tcp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return h2Handler(cfg, baseConn, true, true)  // TLS gRPC
+	RegisterTunnel("grpc", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return h2Handler(ctx, cfg, baseConn, true, true) // TLS gRPC
 	})
 }

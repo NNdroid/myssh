@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"golang.org/x/crypto/ssh"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/ssh"
 	"os"
 	"os/user"
 )
@@ -52,24 +52,24 @@ func PrintAndroidUserInfo() {
 }
 
 // CheckIfKeyEncrypted 供 Android 调用
-// 返回值: 
+// 返回值:
 // 0 - 不需要密码
 // 1 - 需要密码
 // 2 - 格式错误
 func CheckIfKeyEncrypted(key string) int {
 	keyBytes := []byte(key)
 	_, err := ssh.ParsePrivateKey(keyBytes)
-	
+
 	if err == nil {
-		return 0 
+		return 0
 	}
 
 	var passphraseMissingError *ssh.PassphraseMissingError
 	if errors.As(err, &passphraseMissingError) {
-		return 1 
+		return 1
 	}
 
-	return 2 
+	return 2
 }
 
 // ValidatePassphrase 示例：带密码解析并测试是否通过
@@ -81,7 +81,7 @@ func ValidatePassphrase(key string, pass string) bool {
 type CertInfo struct {
 	Subject    string `json:"subject"`
 	Issuer     string `json:"issuer"`
-	NotBefore  int64  `json:"not_before"` 
+	NotBefore  int64  `json:"not_before"`
 	NotAfter   int64  `json:"not_after"`
 	SANs       string `json:"sans"`
 	Raw        []byte `json:"raw_der"`
@@ -108,7 +108,7 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 
 	tlsConfig := &tls.Config{
 		ServerName:         host,
-		InsecureSkipVerify: true, 
+		InsecureSkipVerify: true,
 		NextProtos:         []string{"h3", "http/1.1"},
 	}
 
@@ -141,9 +141,9 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 	return &CertInfo{
 		Subject:    cert.Subject.CommonName,
 		Issuer:     cert.Issuer.CommonName,
-		NotBefore:  cert.NotBefore.Unix(), 
+		NotBefore:  cert.NotBefore.Unix(),
 		NotAfter:   cert.NotAfter.Unix(),
-		SANs:       strings.Join(cert.DNSNames, ","), 
+		SANs:       strings.Join(cert.DNSNames, ","),
 		Raw:        cert.Raw,
 		Protocol:   protocol,
 		IsVerified: verifyErr == nil,

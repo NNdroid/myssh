@@ -17,11 +17,11 @@ func init() {
 	os.Setenv("QUIC_GO_DISABLE_GSO", "true")
 	os.Setenv("QUIC_GO_DISABLE_ECN", "true")
 
-	RegisterTunnel("masque", "udp", func(cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	RegisterTunnel("masque", "udp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 
 		zlog.Infof("%s [Tunnel] 2. 准备进行 MASQUE (CONNECT-TCP) 隧道握手, 目标: %s", TAG, cfg.SshAddr)
 
-		// 1. 解析目标地址，处理 IPv6 的方括号问题
+		// 解析目标地址，处理 IPv6 的方括号问题
 		host, port, err := net.SplitHostPort(cfg.SshAddr)
 		if err != nil {
 			zlog.Warnf("%s [Tunnel] SSH 地址解析失败，尝试默认端口 22: %v", TAG, err)
@@ -31,15 +31,14 @@ func init() {
 		// MASQUE 规范中 host 应当是原始 IP 或域名，url.PathEscape 会处理特殊字符
 		// 但如果 host 是 IPv6 (如 [::1])，SplitHostPort 已经去掉了方括号，这是正确的
 
-		// 2. 规范化 CustomPath
 		path := cfg.CustomPath
 		if path == "" {
 			path = "/.well-known/masque/tcp"
 		}
-		
-		// 🌟 修复：去除末尾所有斜杠，确保拼接时路径整洁
+
+		// 去除末尾所有斜杠，确保拼接时路径整洁
 		path = strings.TrimRight(path, "/")
-		
+
 		// 构造最终符合 RFC 9298 风格的路径
 		fullPath := fmt.Sprintf("%s/%s/%s/", path, url.PathEscape(host), url.PathEscape(port))
 
@@ -47,8 +46,8 @@ func init() {
 		reqUrl, _ := url.Parse(reqUrlStr)
 
 		pr, pw := io.Pipe()
-		ctx, cancel := context.WithCancel(context.Background())
-		
+		ctx, cancel := context.WithCancel(parentCtx)
+
 		// 发起 CONNECT 请求
 		req, err := http.NewRequestWithContext(ctx, http.MethodConnect, reqUrl.String(), pr)
 		if err != nil {
@@ -56,7 +55,7 @@ func init() {
 			return nil, err
 		}
 
-		// 🌟 核心修复 2：强制设定 HTTP/3 协议，防止退化为 H1 代理语义
+		// 强制设定 HTTP/3 协议，防止退化为 H1 代理语义
 		req.Proto = "HTTP/3"
 		req.ProtoMajor = 3
 		req.ProtoMinor = 0
@@ -66,7 +65,7 @@ func init() {
 		}
 
 		// 触发伪头部 :protocol
-		req.Header.Set("Protocol", "connect-tcp") 
+		req.Header.Set("Protocol", "connect-tcp")
 		req.Header.Set("Capsule-Protocol", "?1")
 
 		// 其他伪装 Header
@@ -80,16 +79,16 @@ func init() {
 		req.Header.Set("X-Accel-Buffering", "no")
 
 		// 获取复用客户端
-		client := getH3Client(cfg.ProxyAddr, cfg.CustomHost)
+		client := getH3Client(cfg.ProxyAddr, cfg.ServerName)
 
 		respChan := make(chan *http.Response, 1)
 		errChan := make(chan error, 1)
 
 		go func() {
-			// 🌟 核心修复 3：绕过 http.Client 限制，直接使用底层 Transport
+			// 绕过 http.Client 限制，直接使用底层 Transport
 			var resp *http.Response
 			var rtErr error
-			
+
 			if rt, ok := client.Transport.(http.RoundTripper); ok {
 				resp, rtErr = rt.RoundTrip(req)
 			} else {
@@ -120,10 +119,10 @@ func init() {
 				remoteAddr: cfg.ProxyAddr,
 				pw:         pw,
 				respBody:   resp.Body,
-				cancel:     cancel, 
+				cancel:     cancel,
 			}, nil
 		case <-time.After(15 * time.Second):
-			cancel() 
+			cancel()
 			zlog.Errorf("%s [Tunnel] ❌ MASQUE 握手超时", TAG)
 			return nil, fmt.Errorf("masque handshake timeout")
 		}

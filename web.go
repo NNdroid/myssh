@@ -8,14 +8,15 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 // 🌟 使用 embed 嵌入 web 资源
+//
 //go:embed web/*
 var webFS embed.FS
 

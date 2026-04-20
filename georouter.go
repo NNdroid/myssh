@@ -14,13 +14,13 @@ import (
 )
 
 type GeoRouter struct {
-	fullDomains    map[string]struct{}
-	subDomains     map[string]struct{}
-	keywordList    []string
-	regexList      []*regexp.Regexp
-	regexCombined  *regexp.Regexp  // 🌟 合并后的正则表达式
-	
-	ipRanger       cidranger.Ranger
+	fullDomains   map[string]struct{}
+	subDomains    map[string]struct{}
+	keywordList   []string
+	regexList     []*regexp.Regexp
+	regexCombined *regexp.Regexp // 🌟 合并后的正则表达式
+
+	ipRanger cidranger.Ranger
 }
 
 func newGeoRouter() *GeoRouter {
@@ -75,10 +75,10 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	if foundCount == 0 && len(targetTags) > 0 {
 		return fmt.Errorf("未在 geosite 中找到任何指定的标签: %v", targetTags)
 	}
-	
+
 	// 🌟 合并正则表达式以提升性能
 	r.combineRegexPatterns()
-	
+
 	zlog.Debugf("%s [Router] GeoSite 解析完毕，匹配到 %d 个规则簇", TAG, foundCount)
 	return nil
 }
@@ -88,13 +88,13 @@ func (r *GeoRouter) combineRegexPatterns() {
 	if len(r.regexList) == 0 {
 		return
 	}
-	
+
 	patterns := make([]string, len(r.regexList))
 	for i, re := range r.regexList {
 		patterns[i] = "(" + re.String() + ")"
 	}
 	combined := strings.Join(patterns, "|")
-	
+
 	if regex, err := regexp.Compile(combined); err == nil {
 		r.regexCombined = regex
 		zlog.Debugf("%s [Router] 已合并 %d 个正则表达式为单一模式", TAG, len(r.regexList))
@@ -133,7 +133,7 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 				} else if len(ip) == 16 { // IPv6
 					ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(int(prefix), 128)}
 				} else {
-					continue 
+					continue
 				}
 
 				_ = r.ipRanger.Insert(cidranger.NewBasicRangerEntry(*ipNet))
@@ -145,7 +145,7 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	if foundCount == 0 && len(targetTags) > 0 {
 		return fmt.Errorf("未在 geoip 中找到任何指定的标签: %v", targetTags)
 	}
-	
+
 	zlog.Debugf("%s [Router] GeoIP 解析完毕，共将 %d 条 CIDR 网段载入 Radix 树", TAG, ipInsertCount)
 	return nil
 }
