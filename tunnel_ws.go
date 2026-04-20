@@ -31,7 +31,7 @@ func init() {
 		// 1. 构造基础 Header
 		fakeHeaders := http.Header{
 			"Host":                     []string{cfg.CustomHost},
-			"User-Agent":               []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"},
+			"User-Agent":               []string{"Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36"},
 			"Sec-WebSocket-Extensions": []string{"permessage-deflate; client_max_window_bits"},
 		}
 

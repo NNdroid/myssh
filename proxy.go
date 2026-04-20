@@ -650,7 +650,7 @@ func killActiveProxyConnections() {
 
 func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	// 每 15 秒发起一次探测
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(18 * time.Second)
 	defer ticker.Stop()
 
 	for {

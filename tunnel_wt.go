@@ -61,7 +61,7 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 	if cfg.CustomHost != "" {
 		headers.Set("Host", cfg.CustomHost)
 	}
-	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	headers.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 	headers.Set("X-Target", cfg.SshAddr) // 路由信息在 Session 握手阶段传给服务器
 	headers.Set("X-Network", "tcp")
 	if cfg.ProxyAuthRequired {

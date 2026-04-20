@@ -20,6 +20,7 @@ func init() {
 		rawPayload := cfg.HttpPayload
 		rawPayload = strings.ReplaceAll(rawPayload, "[host_and_port]", cfg.SshAddr)
 		rawPayload = strings.ReplaceAll(rawPayload, "[host]", cfg.CustomHost)
+		rawPayload = strings.ReplaceAll(rawPayload, "[user_agent]", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 		rawPayload = strings.ReplaceAll(rawPayload, "[crlf]", "\r\n")
 
 		// 用户名密码认证逻辑

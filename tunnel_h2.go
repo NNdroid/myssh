@@ -153,7 +153,7 @@ func init() {
 		if cfg.CustomHost != "" {
 			req.Host = cfg.CustomHost
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 		req.Header.Set("X-Target", cfg.SshAddr) // 核心路由信息
 		req.Header.Set("X-Network", "tcp")
 		if cfg.ProxyAuthRequired {

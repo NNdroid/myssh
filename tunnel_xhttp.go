@@ -500,7 +500,7 @@ func init() {
 			rt = t1
 		}
 
-		client := &http.Client{Transport: rt, Timeout: 30 * time.Second}
+		client := &http.Client{Transport: rt, Timeout: 15 * time.Second}
 		virtualConn := newMeekVirtualConn(sessionID, activeConn.LocalAddr(), activeConn.RemoteAddr())
 
 		// =====================================
@@ -554,6 +554,7 @@ func init() {
 						windowMu.Unlock()
 
 						req, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(upData))
+						req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 						req.ContentLength = int64(len(upData))
 
 						req.Host = cfg.CustomHost
