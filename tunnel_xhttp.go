@@ -22,9 +22,9 @@ import (
 )
 
 var (
-	maxsendBufSize = 256 * 1024 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
-	maxframeSize   = 256 * 1024
-	padPoolLen     = 64 * 1024
+	maxsendBufSize = 900 * 1000 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
+	maxframeSize   = 990 * 1000
+	padPoolLen     = 64 * 1000
 )
 
 // ==========================================
@@ -536,7 +536,7 @@ func init() {
 						}
 
 						// GetSlice 实现了核心的滑动窗口
-						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currentAck, dispatchSeq, 60000) //maxsendBufSize 也可以
+						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currentAck, dispatchSeq, maxsendBufSize)
 
 						// 空载限流
 						if len(upData) == 0 {
