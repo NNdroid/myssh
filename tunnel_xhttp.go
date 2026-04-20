@@ -22,9 +22,9 @@ import (
 )
 
 var (
-	maxsendBufSize = 900 * 1000
-	maxframeSize = 990 * 1000
-	padPoolLen = 64 * 1024
+	maxsendBufSize = 256 * 1024 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
+	maxframeSize   = 256 * 1024
+	padPoolLen     = 64 * 1024
 )
 
 // ==========================================
@@ -48,7 +48,7 @@ func (rb *reliableBuffer) Write(p []byte) (int, error) {
 }
 
 // GetSlice 获取从指定偏移量开始的数据，并清理掉已被对端确认 (Ack) 的旧数据
-func (rb *reliableBuffer) GetSlice(remoteAck uint64, maxLen int) ([]byte, uint64, *[]byte) {
+func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen int) ([]byte, uint64, *[]byte) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
@@ -72,22 +72,31 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, maxLen int) ([]byte, uint64
 		}
 	}
 
-	// 2. 如果没新数据发，返回空
-	if len(rb.data) == 0 {
-		return nil, rb.baseOffset, nil
+	// 修正派发起点：如果派发指针落后于已确认位置（说明发生了重传重置），则从当前最老的数据开始
+	if dispatchSeq < rb.baseOffset {
+		dispatchSeq = rb.baseOffset
 	}
 
-	// 3. 截取分片
-	length := len(rb.data)
+	// 计算相对于当前缓冲区头部的偏移量
+	offsetInBuf := dispatchSeq - rb.baseOffset
+	if offsetInBuf >= uint64(len(rb.data)) {
+		return nil, dispatchSeq, nil // 没有新数据可以派发
+	}
+
+	// 截取分片
+	availLen := uint64(len(rb.data)) - offsetInBuf
+	length := int(availLen)
 	if length > maxLen {
 		length = maxLen
 	}
 
-	// 高性能拷贝：防止重传时底层 Transport 竞态修改切片
-	bufPtr := tcpBufPool.Get().(*[]byte)
+	// 使用内存池进行拷贝
+	bufPtr := xhttpBufPool.Get().(*[]byte) // 确保 xhttpBufPool 已定义并能提供足够容量的切片
 	res := (*bufPtr)[:length]
-	copy(res, rb.data[:length])
-	return res, rb.baseOffset, bufPtr
+	copy(res, rb.data[offsetInBuf:offsetInBuf+uint64(length)])
+
+	// 返回：数据切片, 本次实际使用的Seq, 内存池指针
+	return res, dispatchSeq, bufPtr
 }
 
 func (rb *reliableBuffer) Len() int {
@@ -101,17 +110,18 @@ func (rb *reliableBuffer) Len() int {
 // ==========================================
 
 type meekVirtualConn struct {
-	sessionID   string
-	local       net.Addr
-	remote      net.Addr
-	
+	sessionID string
+	local     net.Addr
+	remote    net.Addr
+
 	readCond    *sync.Cond
 	readBuf     bytes.Buffer
-	nextReadSeq uint64 // 我方期待收到的下一个 Seq
-	
-	writeBuf    *reliableBuffer // 替换原有的 bytes.Buffer 和 mutex
-	
-	closed      bool
+	nextReadSeq uint64            // 我方期待收到的下一个 Seq
+	oooBuf      map[uint64][]byte // 乱序缓存
+
+	writeBuf *reliableBuffer // 替换原有的 bytes.Buffer 和 mutex
+
+	closed bool
 }
 
 func newMeekVirtualConn(sessionID string, local, remote net.Addr) *meekVirtualConn {
@@ -121,6 +131,7 @@ func newMeekVirtualConn(sessionID string, local, remote net.Addr) *meekVirtualCo
 		remote:    remote,
 		readCond:  sync.NewCond(&sync.Mutex{}),
 		writeBuf:  &reliableBuffer{},
+		oooBuf:    make(map[uint64][]byte),
 	}
 }
 
@@ -143,16 +154,37 @@ func (c *meekVirtualConn) Write(p []byte) (int, error) {
 	return c.writeBuf.Write(p)
 }
 
-// PutReadData 带有 Seq 校验的写入逻辑 (防止重传导致的数据重复)
+// PutReadData 乱序重组
 func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 	c.readCond.L.Lock()
 	defer c.readCond.L.Unlock()
 
-	// 严格按序接收：丢弃重传产生的重复包
-	if seq == c.nextReadSeq && len(data) > 0 {
-		c.readBuf.Write(data)
-		c.nextReadSeq += uint64(len(data))
-		c.readCond.Broadcast()
+	if len(data) > 0 {
+		if seq == c.nextReadSeq {
+			// 1. 序號正好匹配，寫入緩衝區
+			c.readBuf.Write(data)
+			c.nextReadSeq += uint64(len(data))
+
+			// 2. 檢查暫存區有沒有「未來的包」現在可以接上了
+			for {
+				if nextData, ok := c.oooBuf[c.nextReadSeq]; ok {
+					c.readBuf.Write(nextData)
+					delete(c.oooBuf, c.nextReadSeq)
+					c.nextReadSeq += uint64(len(nextData))
+				} else {
+					break
+				}
+			}
+			c.readCond.Broadcast()
+		} else if seq > c.nextReadSeq {
+			// 3. 序號太新了，先存進 map
+			if len(c.oooBuf) < 1024 { // 防止惡意內存撐爆
+				// 因为外层使用了 bytesBufPool，这里必须分配独立内存拷贝！
+				dataCopy := make([]byte, len(data))
+				copy(dataCopy, data)
+				c.oooBuf[seq] = dataCopy
+			}
+		}
 	}
 	return c.nextReadSeq
 }
@@ -239,7 +271,7 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 		c.frameBuf = make([]byte, frameLen, newCap)
 	} else {
 		// 容量足够时，直接拉伸Slice
-		c.frameBuf = c.frameBuf[:frameLen] 
+		c.frameBuf = c.frameBuf[:frameLen]
 	}
 
 	// 写入 Header
@@ -287,7 +319,7 @@ func (c *xhttpFramedConn) Write(p []byte) (int, error) {
 }
 
 func (c *xhttpFramedConn) Read(p []byte) (int, error) {
-	if len(c.readBuf) > 0 {// 没有len信息，所以readBuf有就直接返回
+	if len(c.readBuf) > 0 { // 没有len信息，所以readBuf有就直接返回
 		n := copy(p, c.readBuf)
 		c.readBuf = c.readBuf[n:]
 		return n, nil
@@ -316,9 +348,9 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		if rawPayloadLen == 0 {
 			continue
 		}
-		
+
 		payloadLen := int(rawPayloadLen)
-		
+
 		// 计算可以直接读入 buffer `p` 的长度
 		readIntoP := payloadLen
 		if readIntoP > len(p) {
@@ -338,11 +370,11 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 				c.payloadBuf = make([]byte, leftover)
 			}
 			leftoverBuf := c.payloadBuf[:leftover]
-			
+
 			if _, err := io.ReadFull(c.r, leftoverBuf); err != nil {
 				// 如果前面给用户的 p 已经读了 readIntoP 字节，
 				// 这里哪怕断开，也应该把已读到的长度返回给上层
-				return readIntoP, err 
+				return readIntoP, err
 			}
 			// 保存这部分没被拿走的数据，供下一次 Read 消费
 			c.readBuf = leftoverBuf
@@ -356,7 +388,7 @@ func (c *xhttpFramedConn) Close() error {
 	if atomic.CompareAndSwapInt32(&c.closedFlag, 0, 1) {
 		c.mu.Lock()
 		frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00}
-		c.w.Write(frame) 
+		c.w.Write(frame)
 		c.mu.Unlock()
 
 		close(c.closeCh)
@@ -441,7 +473,8 @@ func init() {
 				},
 			}
 		} else {
-			t1 := &http.Transport{ForceAttemptHTTP2: false, MaxIdleConnsPerHost: 1, DisableKeepAlives: false}
+			// 修改点：允许并发，将 MaxIdleConnsPerHost 设置高一些以支持 8 worker
+			t1 := &http.Transport{ForceAttemptHTTP2: false, MaxIdleConnsPerHost: 100, MaxConnsPerHost: 100, DisableKeepAlives: false}
 			if isTLS {
 				t1.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) { return dialerFunc() }
 			} else {
@@ -454,121 +487,189 @@ func init() {
 		virtualConn := newMeekVirtualConn(sessionID, activeConn.LocalAddr(), activeConn.RemoteAddr())
 
 		// =====================================
-		// 数据泵：带有滑动窗口 ARQ 的稳态轮询
+		// 数据泵：带有滑动窗口 ARQ 的 8并发稳态轮询
 		// =====================================
 		go func() {
 			defer virtualConn.Close()
-			defer activeConn.Close() 
+			defer activeConn.Close()
 
 			var ackedByServer uint64
-			consecutiveErrors := 0
+			var dispatchSeq uint64
+			var windowMu sync.Mutex
+			var consecutiveErrors int32
+			var triggerRetry int32
 
-			for !virtualConn.closed {
-				// 依靠服务端的 Ack 来推进滑动窗口，安全取出需要发送或重传的切片
-				upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(ackedByServer, 60000)//maxsendBufSize
+			workerCount := 8
+			var wg sync.WaitGroup
 
-				req, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(upData))
-				req.ContentLength = int64(len(upData))
+			for i := 0; i < workerCount; i++ {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+					for !virtualConn.closed {
+						// 1. 抢占任务：从写缓冲中划走一段数据
+						windowMu.Lock()
+						currentAck := atomic.LoadUint64(&ackedByServer)
 
-				req.Host = cfg.CustomHost
-				req.Header.Set("Host", cfg.CustomHost)
-				req.Header.Set("X-Target", cfg.SshAddr)
-				req.Header.Set("X-Network", "tcp")
-				req.Header.Set("X-Session-ID", sessionID)
-				
-				// 注入 Seq 和 Ack 校验头
-				req.Header.Set("X-Seq", strconv.FormatUint(currentSeq, 10))
-				virtualConn.readCond.L.Lock()
-				myAck := virtualConn.nextReadSeq
-				virtualConn.readCond.L.Unlock()
-				req.Header.Set("X-Ack", strconv.FormatUint(myAck, 10))
-				
-				req.Header.Set("Content-Type", "application/octet-stream")
-				if cfg.ProxyAuthRequired {
-					req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
-				}
+						// 如果派发游标落后（重传重置），强制对齐
+						if dispatchSeq < currentAck {
+							dispatchSeq = currentAck
+						}
 
-				resp, err := client.Do(req)
+						// GetSlice 实现了核心的滑动窗口
+						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currentAck, dispatchSeq, 60000) //maxsendBufSize 也可以
 
-				if err != nil {
-					// 归还pool
-					if upBufPtr != nil {
-						tcpBufPool.Put(upBufPtr)
+						// 必须使用返回的 currentSeq 来推进绝对位置！
+						if len(upData) > 0 {
+							dispatchSeq = currentSeq + uint64(len(upData))
+						} else {
+							dispatchSeq = currentSeq // 同步对齐游标，防止漂移
+						}
+						windowMu.Unlock()
+
+						req, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(upData))
+						req.ContentLength = int64(len(upData))
+
+						req.Host = cfg.CustomHost
+						req.Header.Set("Host", cfg.CustomHost)
+						req.Header.Set("X-Target", cfg.SshAddr)
+						req.Header.Set("X-Network", "tcp")
+						req.Header.Set("X-Session-ID", sessionID)
+
+						virtualConn.readCond.L.Lock()
+						myAck := virtualConn.nextReadSeq
+						virtualConn.readCond.L.Unlock()
+
+						// 注入 Seq 和 Ack 校验头
+						req.Header.Set("X-Seq", strconv.FormatUint(currentSeq, 10))
+						req.Header.Set("X-Ack", strconv.FormatUint(myAck, 10))
+						req.Header.Set("Content-Type", "application/octet-stream")
+
+						if cfg.ProxyAuthRequired {
+							req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
+						}
+
+						// 消费并清除重传信号
+						if atomic.CompareAndSwapInt32(&triggerRetry, 1, 0) {
+							req.Header.Set("X-Retry", "1")
+						}
+
+						resp, err := client.Do(req)
+
+						if err != nil {
+							// 归还pool
+							if upBufPtr != nil {
+								xhttpBufPool.Put(upBufPtr) // 假设 xhttpBufPool 在全局可用
+							}
+
+							// 【并发核心策略】：一旦出错，重置派发游标到已确认点，触发重传
+							windowMu.Lock()
+							dispatchSeq = atomic.LoadUint64(&ackedByServer)
+							windowMu.Unlock()
+
+							// 激活重传求救信号，通知服务端也回退下行游标
+							atomic.StoreInt32(&triggerRetry, 1)
+
+							if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
+								zlog.Errorf("%s [Tunnel] 连续网络通信失败，触发熔断，销毁隧道: %s", TAG, cfg.SshAddr)
+								break
+							}
+
+							time.Sleep(300 * time.Millisecond)
+							continue
+						}
+
+						// 2. 处理响应头的 Ack，推进清理线
+						if sAckStr := resp.Header.Get("X-Ack"); sAckStr != "" {
+							sAck, _ := strconv.ParseUint(sAckStr, 10, 64)
+							for {
+								old := atomic.LoadUint64(&ackedByServer)
+								if sAck <= old || atomic.CompareAndSwapUint64(&ackedByServer, old, sAck) {
+									break
+								}
+							}
+						}
+
+						// 拦截非 200 OK 的异常状态码！
+						if resp.StatusCode != http.StatusOK {
+							if upBufPtr != nil {
+								xhttpBufPool.Put(upBufPtr)
+							}
+
+							downBuf := bytesBufPool.Get().(*bytes.Buffer) // 假设 bytesBufPool 全局可用
+							downBuf.Reset()
+							downBuf.ReadFrom(resp.Body)
+							bodyErr := downBuf.Bytes()
+							resp.Body.Close()
+							bytesBufPool.Put(downBuf)
+
+							zlog.Errorf("%s [Tunnel] ❌ 收到异常 HTTP 状态码: %d, body: %s", TAG, resp.StatusCode, string(bodyErr))
+
+							// 同样触发重传
+							windowMu.Lock()
+							dispatchSeq = atomic.LoadUint64(&ackedByServer)
+							windowMu.Unlock()
+							atomic.StoreInt32(&triggerRetry, 1)
+
+							if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
+								zlog.Errorf("%s [Tunnel] 连续异常，触发熔断", TAG)
+								break
+							}
+
+							time.Sleep(1 * time.Second)
+							continue
+						}
+
+						atomic.StoreInt32(&consecutiveErrors, 0)
+
+						// 3. 处理 Body (下行数据)
+						sSeqStr := resp.Header.Get("X-Seq")
+						sSeq, _ := strconv.ParseUint(sSeqStr, 10, 64)
+
+						downBuf := bytesBufPool.Get().(*bytes.Buffer)
+						downBuf.Reset()
+						_, errBody := downBuf.ReadFrom(resp.Body) // 严格检查 body 错误
+						downData := downBuf.Bytes()
+						resp.Body.Close()
+
+						// 严格校验下行数据的完整性
+						if errBody != nil {
+							bytesBufPool.Put(downBuf)
+							if upBufPtr != nil {
+								xhttpBufPool.Put(upBufPtr)
+							}
+							
+							zlog.Warnf("%s [Tunnel] 读取下行 Body 失败，触发安全重传: %v", TAG, errBody)
+
+							windowMu.Lock()
+							dispatchSeq = atomic.LoadUint64(&ackedByServer)
+							windowMu.Unlock()
+							atomic.StoreInt32(&triggerRetry, 1)
+							time.Sleep(300 * time.Millisecond)
+							continue
+						}
+
+						// 将校验通过的数据注入读缓冲 (PutReadData 支持乱序)
+						if len(downData) > 0 || sSeqStr != "" {
+							virtualConn.PutReadData(sSeq, downData)
+						}
+
+						// 归还 pool
+						bytesBufPool.Put(downBuf)
+						if upBufPtr != nil {
+							xhttpBufPool.Put(upBufPtr)
+						}
+
+						// 智能退避：如果双向都没有数据流动，才进行休眠
+						if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
+							time.Sleep(50 * time.Millisecond) // 可以稍微设短一点
+						}
 					}
-					// 不需要再手动执行 putWriteBufFront！
-					// 由于 ackedByServer 没有推进，下一轮 GetSlice 会自动切割出原数据进行无缝重传。
-					
-					consecutiveErrors++
-					if consecutiveErrors > 5 {
-						zlog.Errorf("%s [Tunnel] 连续 5 次网络通信失败，触发熔断，销毁隧道: %s", TAG, cfg.SshAddr)
-						break
-					}
-
-					time.Sleep(500 * time.Millisecond)
-					continue
-				}
-				
-				// 拦截非 200 OK 的异常状态码！
-				if resp.StatusCode != http.StatusOK {
-					if upBufPtr != nil {
-						tcpBufPool.Put(upBufPtr)
-					}
-					
-					downBuf := bytesBufPool.Get().(*bytes.Buffer)
-					downBuf.Reset()
-					downBuf.ReadFrom(resp.Body)
-					bodyErr := downBuf.Bytes()
-					resp.Body.Close()
-					bytesBufPool.Put(downBuf)
-					
-					zlog.Errorf("%s [Tunnel] ❌ 收到异常 HTTP 状态码: %d, body: %s", TAG, resp.StatusCode, string(bodyErr))
-					
-					consecutiveErrors++
-					if consecutiveErrors > 5 {
-						zlog.Errorf("%s [Tunnel] 连续异常，触发熔断", TAG)
-						break
-					}
-					
-					time.Sleep(2 * time.Second) 
-					continue
-				}
-
-				consecutiveErrors = 0
-
-				// 解析服务端发来的 Ack，推进我们的发送窗口
-				if sAckStr := resp.Header.Get("X-Ack"); sAckStr != "" {
-					sAck, _ := strconv.ParseUint(sAckStr, 10, 64)
-					if sAck > ackedByServer {
-						ackedByServer = sAck
-					}
-				}
-
-				// 解析服务端的数据 Seq
-				sSeqStr := resp.Header.Get("X-Seq")
-				sSeq, _ := strconv.ParseUint(sSeqStr, 10, 64)
-
-				downBuf := bytesBufPool.Get().(*bytes.Buffer)
-				downBuf.Reset()
-				downBuf.ReadFrom(resp.Body)
-				downData := downBuf.Bytes()
-				resp.Body.Close()
-
-				// 将校验通过的数据注入读缓冲
-				if len(downData) > 0 || sSeqStr != "" {
-					virtualConn.PutReadData(sSeq, downData)
-				}
-				
-				// 归还 pool
-				bytesBufPool.Put(downBuf)
-				if upBufPtr != nil {
-					tcpBufPool.Put(upBufPtr)
-				}
-
-				// 智能退避：如果双向都没有数据流动，才进行休眠
-				if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
-					time.Sleep(10 * time.Millisecond)
-				}
+				}(i)
 			}
+
+			// 必须在这里等待所有 Worker 结束
+			wg.Wait()
 		}()
 
 		return newXhttpFramedConn(virtualConn, virtualConn, func() error {
