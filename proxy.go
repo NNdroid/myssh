@@ -43,6 +43,7 @@ type ProxyConfig struct {
 	CustomPath           string `json:"custom_path"`
 	UdpgwAddr            string `json:"udpgw_addr"` // 留空则不开启 UDPGW
 	DisableStatusCheck   bool   `json:"disable_status_check"`
+	Alpn                 string `json:"alpn"`
 }
 
 type GlobalConfig struct {
@@ -742,12 +743,6 @@ func StartSshTProxy2(configJson string) int {
 		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 服务已完全停止", TAG)
 	}()
 
-	// 启动本地 DNS 服务器监听 10553
-	//err = StartLocalDNSServer(10553)
-	//if err != nil {
-	// 处理错误
-	//}
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -922,8 +917,6 @@ func StopSshTProxy() {
 	if udpgwSessionCount > 0 {
 		zlog.Infof("%s [Core] 已强制断开 %d 个 UDPGW 代理会话", TAG, udpgwSessionCount)
 	}
-
-	//StopLocalDNSServer()
 
 	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
 }

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -503,6 +504,20 @@ func init() {
 				}
 
 				uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
+
+				// 提前构建握手状态
+				if err := uConn.BuildHandshakeState(); err != nil {
+					tcpConn.Close()
+					return nil, fmt.Errorf("utls build handshake state failed: %w", err)
+				}
+				// 找到 ALPN 扩展并强行修改为你的 tcpAlpns
+				for _, ext := range uConn.Extensions {
+					if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
+						alpnExt.AlpnProtocols = tcpAlpns // 例如 ["http/1.1"]
+						break
+					}
+				}
+
 				if err := uConn.HandshakeContext(parentCtx); err != nil {
 					tcpConn.Close()
 					return nil, fmt.Errorf("utls handshake failed: %w", err)
@@ -513,23 +528,42 @@ func init() {
 
 				// 缓存探路连接 (Zero-Waste)
 				cachedConn := net.Conn(uConn)
-				var connOnce sync.Once
+				var connConsumed atomic.Bool
 				dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
-					var c net.Conn
-					var isReused bool
-					connOnce.Do(func() { c = cachedConn; isReused = true })
-					if isReused {
-						return c, nil
+					if connConsumed.CompareAndSwap(false, true) {
+						return cachedConn, nil
 					}
+
 					tc, err := d.DialContext(ctx, "tcp", cfg.ProxyAddr)
 					if err != nil {
-						return nil, err
+						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
+
 					uc := utls.UClient(tc, utlsConfig, utls.HelloChrome_Auto)
-					return uc, uc.HandshakeContext(ctx)
+
+					// 构建握手状态
+					if err := uc.BuildHandshakeState(); err != nil {
+						tc.Close() // 必须显式关闭底层连接，防止泄露
+						return nil, fmt.Errorf("utls build handshake state failed: %w", err)
+					}
+
+					// 找到 ALPN 扩展并强行修改为 tcpAlpns
+					for _, ext := range uc.Extensions {
+						if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
+							alpnExt.AlpnProtocols = tcpAlpns
+							break
+						}
+					}
+
+					if err := uc.HandshakeContext(ctx); err != nil {
+						tc.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
+						return nil, fmt.Errorf("utls handshake failed: %w", err)
+					}
+
+					return uc, nil
 				}
 
-				if negotiatedProtocol == "h2" {
+				if negotiatedProtocol == "h2" && slices.Contains(alpnList, "h2") {
 					client = &http.Client{
 						Transport: &http2.Transport{
 							DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
@@ -556,7 +590,7 @@ func init() {
 				var d net.Dialer
 				return d.DialContext(ctx, "tcp", cfg.ProxyAddr)
 			}
-			if probeH2C(parentCtx, cfg.ProxyAddr) {
+			if probeH2C(parentCtx, cfg.ProxyAddr) && slices.Contains(alpnList, "h2") {
 				zlog.Infof("%s [Tunnel] ⚡ 探测成功，启用 H2C (明文 HTTP/2) 引擎", TAG)
 				t2 := &http2.Transport{
 					AllowHTTP: true,
@@ -794,10 +828,12 @@ func init() {
 
 	// 注册 Tunnel
 	RegisterTunnel("xhttpc", "none", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
-		return xhttpHandler(ctx, cfg, base, false, nil)
+		alpnList := strings.Split(cfg.Alpn, ",")
+		return xhttpHandler(ctx, cfg, base, false, alpnList)
 	})
 	RegisterTunnel("xhttp", "none", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
-		return xhttpHandler(ctx, cfg, base, true, nil)
+		alpnList := strings.Split(cfg.Alpn, ",")
+		return xhttpHandler(ctx, cfg, base, true, alpnList)
 	})
 }
 
