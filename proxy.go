@@ -236,7 +236,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		mu.Unlock()
 
 		if client == nil {
-			zlog.Warnf("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
+			zlog.Debug("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
 			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 			rep.WriteTo(c)
 			return fmt.Errorf("ssh client is currently reconnecting")

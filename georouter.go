@@ -1,11 +1,13 @@
-// georouter.go - 优化后版本
 package myssh
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
+	"os"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/v2fly/v2ray-core/v5/app/router/routercommon"
@@ -18,7 +20,7 @@ type GeoRouter struct {
 	subDomains    map[string]struct{}
 	keywordList   []string
 	regexList     []*regexp.Regexp
-	regexCombined *regexp.Regexp // 🌟 合并后的正则表达式
+	regexCombined *regexp.Regexp // 合并后的正则表达式
 
 	ipRanger cidranger.Ranger
 }
@@ -34,7 +36,14 @@ func newGeoRouter() *GeoRouter {
 }
 
 func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
-	data, err := ioutil.ReadFile(filepath)
+	f, err := os.Open(filepath)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close() // 确保句柄及时关闭，断开系统级的映射关系
+
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return fmt.Errorf("读取 geosite.dat 失败: %w", err)
 	}
@@ -76,8 +85,16 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		return fmt.Errorf("未在 geosite 中找到任何指定的标签: %v", targetTags)
 	}
 
-	// 🌟 合并正则表达式以提升性能
+	// 合并正则表达式以提升性能
 	r.combineRegexPatterns()
+
+	// 清理动作
+	data = nil                               // 释放原始字节流引用
+	geoSiteList = routercommon.GeoSiteList{} // 释放解析后的临时大结构体引用
+
+	// 强制触发 GC 并尝试将物理内存还给 Android 系统
+	runtime.GC()
+	debug.FreeOSMemory()
 
 	zlog.Debugf("%s [Router] GeoSite 解析完毕，匹配到 %d 个规则簇", TAG, foundCount)
 	return nil
@@ -102,7 +119,14 @@ func (r *GeoRouter) combineRegexPatterns() {
 }
 
 func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
-	data, err := ioutil.ReadFile(filepath)
+	f, err := os.Open(filepath)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close() // 确保句柄及时关闭，断开系统级的映射关系
+
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return fmt.Errorf("读取 geoip.dat 失败: %w", err)
 	}
@@ -145,6 +169,14 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	if foundCount == 0 && len(targetTags) > 0 {
 		return fmt.Errorf("未在 geoip 中找到任何指定的标签: %v", targetTags)
 	}
+
+	// 清理动作
+	data = nil                           // 释放原始字节流引用
+	geoIPList = routercommon.GeoIPList{} // 释放解析后的临时大结构体引用
+
+	// 强制触发 GC 并尝试将物理内存还给 Android 系统
+	runtime.GC()
+	debug.FreeOSMemory()
 
 	zlog.Debugf("%s [Router] GeoIP 解析完毕，共将 %d 条 CIDR 网段载入 Radix 树", TAG, ipInsertCount)
 	return nil

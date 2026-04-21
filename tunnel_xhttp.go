@@ -13,11 +13,14 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 )
@@ -25,7 +28,6 @@ import (
 var (
 	maxsendBufSize = 900 * 1000 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
 	maxframeSize   = 990 * 1000
-	padPoolLen     = 64 * 1000
 )
 
 // ==========================================
@@ -214,7 +216,6 @@ func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 // ==========================================
 // 3. 动态 Padding 与 0xFFFF 信令装甲
 // ==========================================
-var padPool []byte
 
 type xhttpFramedConn struct {
 	r             io.Reader
@@ -430,164 +431,142 @@ func generateRandomHex(n int) string {
 // ==========================================
 // 4. Android 核心握手逻辑与注册
 // ==========================================
-
 func init() {
-	// 随机填充池初始化
-	padPool = make([]byte, padPoolLen)
-	io.ReadFull(rand.Reader, padPool)
 
-	xhttpHandler := func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn, isTLS bool) (net.Conn, error) {
-		scheme := "http"
-		protoName := "XHTTPC"
+	xhttpHandler := func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn, isTLS bool, alpnList []string) (net.Conn, error) {
+		if len(alpnList) == 0 {
+			alpnList = []string{"h3", "h2", "http/1.1"}
+		}
+		scheme, protoName := "http", "XHTTPC"
 		if isTLS {
-			scheme = "https"
-			protoName = "XHTTP"
+			scheme, protoName = "https", "XHTTP"
 		}
 
-		zlog.Infof("%s [Tunnel] 准备进行 %s 隧道握手, 伪装 Host: %s", TAG, protoName, cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 准备握手%s, 伪装 Host: %s, 允许协议: %v", TAG, protoName, cfg.CustomHost, alpnList)
 
 		path := cfg.CustomPath
 		if path == "" {
 			path = "/stream"
 		}
 		reqURL := fmt.Sprintf("%s://%s%s", scheme, cfg.ProxyAddr, path)
-		zlog.Debugf("%s [Tunnel] URL: %s", TAG, reqURL)
 		sessionID := generateRandomHex(16)
 
 		var client *http.Client
+		var negotiatedProtocol string
+		baseTlsConf := &tls.Config{
+			ServerName:         cfg.ServerName,
+			InsecureSkipVerify: true,
+		}
 
 		if isTLS {
 			// ==========================================
-			// Zero-Waste 预拨号 ALPN 探测
+			// 1. 优先探测 HTTP/3 (QUIC)
 			// ==========================================
-			var d net.Dialer
-			tcpConn, err := d.DialContext(parentCtx, "tcp", cfg.ProxyAddr)
-			if err != nil {
-				return nil, fmt.Errorf("probe tcp dial failed: %w", err)
-			}
+			if slices.Contains(alpnList, "h3") {
+				h3Ctx, h3Cancel := context.WithTimeout(parentCtx, 2*time.Second)
+				qconf := &quic.Config{MaxIdleTimeout: 10 * time.Second}
+				h3TlsConf := baseTlsConf.Clone()
+				h3TlsConf.NextProtos = []string{"h3"}
 
-			utlsConfig := &utls.Config{
-				ServerName:         cfg.ServerName, // SNI 伪装
-				InsecureSkipVerify: true,
-				NextProtos:         []string{"h2", "http/1.1"}, // 声明同时支持 h2 和 http/1.1
-			}
+				_, err := quic.DialAddr(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf)
+				h3Cancel()
 
-			// 进行探测性 TLS 握手
-			uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
-			if err := uConn.HandshakeContext(parentCtx); err != nil {
-				tcpConn.Close()
-				return nil, fmt.Errorf("probe utls handshake failed: %w", err)
-			}
-
-			// 获取真实的 ALPN 协商结果
-			negotiatedProtocol := uConn.ConnectionState().NegotiatedProtocol
-			zlog.Infof("%s [Tunnel] 探测到服务端 ALPN 协议: %s (伪装 Host: %s)", TAG, negotiatedProtocol, cfg.CustomHost)
-
-			// 缓存“探路连接”
-			cachedConn := net.Conn(uConn)
-			var connOnce sync.Once
-
-			dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
-				var c net.Conn
-				var isReused bool
-				
-				// 第一次拨号时，直接把探路连接交出去
-				connOnce.Do(func() {
-					c = cachedConn
-					isReused = true
-				})
-				if isReused {
-					return c, nil
+				if err == nil {
+					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)", TAG)
+					negotiatedProtocol = "h3"
+					client = &http.Client{
+						// 🌟 必须注入 TLSClientConfig，否则会报 IP SANs 校验错误
+						Transport: &http3.Transport{
+							TLSClientConfig: h3TlsConf,
+						},
+						Timeout: 90 * time.Second,
+					}
 				}
+			}
 
-				// 后续并发 Worker 需要建立新连接时，执行正常的拨号流程
-				tc, err := d.DialContext(ctx, "tcp", cfg.ProxyAddr)
+			// ==========================================
+			// 2. TCP ALPN 探测 (h2 / http/1.1)
+			// ==========================================
+			if client == nil {
+				var d net.Dialer
+				tcpConn, err := d.DialContext(parentCtx, "tcp", cfg.ProxyAddr)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("probe tcp failed: %w", err)
 				}
-				uc := utls.UClient(tc, utlsConfig, utls.HelloChrome_Auto)
-				if err := uc.HandshakeContext(ctx); err != nil {
-					tc.Close()
-					return nil, err
-				}
-				return uc, nil
-			}
 
-			if negotiatedProtocol == "h2" {
-				zlog.Infof("%s [Tunnel] ⚡ 启用 HTTP/2 引擎", TAG)
-				t2 := &http2.Transport{
-					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-						return dialTLS(ctx, network, addr)
-					},
-					AllowHTTP: false,
+				// 剔除 h3，准备 uTLS 握手
+				tcpAlpns := slices.DeleteFunc(slices.Clone(alpnList), func(s string) bool { return s == "h3" })
+				utlsConfig := &utls.Config{
+					ServerName:         cfg.ServerName,
+					InsecureSkipVerify: true,
+					NextProtos:         tcpAlpns,
 				}
-				client = &http.Client{Transport: t2, Timeout: 30 * time.Second}
-			} else {
-				zlog.Infof("%s [Tunnel] 🐢 回退至 HTTP/1.1 引擎", TAG)
-				t1 := &http.Transport{
-					DialTLSContext:        dialTLS,
-					MaxIdleConns:          100,
-					MaxIdleConnsPerHost:   100,
-					MaxConnsPerHost:       100,
-					IdleConnTimeout:       90 * time.Second,
-					TLSHandshakeTimeout:   10 * time.Second,
-					ExpectContinueTimeout: 5 * time.Second,
-				}
-				client = &http.Client{Transport: t1, Timeout: 15 * time.Second}
-			}
 
+				uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
+				if err := uConn.HandshakeContext(parentCtx); err != nil {
+					tcpConn.Close()
+					return nil, fmt.Errorf("utls handshake failed: %w", err)
+				}
+
+				negotiatedProtocol = uConn.ConnectionState().NegotiatedProtocol
+				zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, negotiatedProtocol)
+
+				// 缓存探路连接 (Zero-Waste)
+				cachedConn := net.Conn(uConn)
+				var connOnce sync.Once
+				dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+					var c net.Conn
+					var isReused bool
+					connOnce.Do(func() { c = cachedConn; isReused = true })
+					if isReused {
+						return c, nil
+					}
+					tc, err := d.DialContext(ctx, "tcp", cfg.ProxyAddr)
+					if err != nil {
+						return nil, err
+					}
+					uc := utls.UClient(tc, utlsConfig, utls.HelloChrome_Auto)
+					return uc, uc.HandshakeContext(ctx)
+				}
+
+				if negotiatedProtocol == "h2" {
+					client = &http.Client{
+						Transport: &http2.Transport{
+							DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+								return dialTLS(ctx, network, addr)
+							},
+						},
+						Timeout: 90 * time.Second,
+					}
+				} else {
+					client = &http.Client{
+						Transport: &http.Transport{
+							DialTLSContext:  dialTLS,
+							TLSClientConfig: baseTlsConf,
+						},
+						Timeout: 90 * time.Second,
+					}
+				}
+			}
 		} else {
 			// ==========================================
-			// 纯 TCP 模式: 发包探测 h2c vs HTTP/1.1
+			// 3. 纯 TCP 模式 (h2c 探测)
 			// ==========================================
-			
 			dialTCP := func(ctx context.Context, network, addr string) (net.Conn, error) {
 				var d net.Dialer
 				return d.DialContext(ctx, "tcp", cfg.ProxyAddr)
 			}
-
-			// 定义 H2C 探测函数
-			probeH2C := func() bool {
-				// 创建一个短暂的临时 Transport 专门用来探路
-				t2Probe := &http2.Transport{
-					AllowHTTP: true,
-					// 重点：Go 的 h2c 必须写在 DialTLSContext 里，即使我们返回的是普通 TCP 连接
-					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-						return dialTCP(ctx, network, addr)
-					},
-				}
-				tmpClient := &http.Client{Transport: t2Probe, Timeout: 3 * time.Second}
-
-				// 构造一个极其轻量级的 OPTIONS 请求去试探
-				probeReq, _ := http.NewRequestWithContext(parentCtx, http.MethodOptions, "http://"+cfg.ProxyAddr+"/", nil)
-				resp, err := tmpClient.Do(probeReq)
-				
-				if err != nil {
-					// 报错（比如连接被服务端强行重置），说明极大概率不支持 h2c
-					return false 
-				}
-				defer resp.Body.Close()
-				
-				// 如果服务端返回了响应，我们检查它的主版本号是不是 2
-				// 如果它是 HTTP/1.1 服务器，它通常会解析失败并返回 HTTP/1.1 400 Bad Request
-				return resp.ProtoMajor == 2
-			}
-
-			// 执行探测并根据结果组装最终的 Client
-			if probeH2C() {
+			if probeH2C(parentCtx, cfg.ProxyAddr) {
 				zlog.Infof("%s [Tunnel] ⚡ 探测成功，启用 H2C (明文 HTTP/2) 引擎", TAG)
-				
 				t2 := &http2.Transport{
 					AllowHTTP: true,
 					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 						return dialTCP(ctx, network, addr)
 					},
 				}
-				client = &http.Client{Transport: t2, Timeout: 30 * time.Second}
-				
+				client = &http.Client{Transport: t2, Timeout: 90 * time.Second}
 			} else {
 				zlog.Infof("%s [Tunnel] 🐢 H2C 探测失败，平滑回退至纯 TCP HTTP/1.1 引擎", TAG)
-				
 				t1 := &http.Transport{
 					DialContext:           dialTCP,
 					MaxIdleConns:          100,
@@ -596,60 +575,56 @@ func init() {
 					IdleConnTimeout:       90 * time.Second,
 					ExpectContinueTimeout: 5 * time.Second,
 				}
-				client = &http.Client{Transport: t1, Timeout: 15 * time.Second}
+				client = &http.Client{Transport: t1, Timeout: 90 * time.Second}
 			}
 		}
 
+		// 虚拟连接与数据泵初始化
 		proxyNetAddr, _ := net.ResolveTCPAddr("tcp", cfg.ProxyAddr)
-		localNetAddr := &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+		var localNetAddr net.Addr
+		if proxyNetAddr.IP.To4() != nil {
+			// 远程是 IPv4
+			localNetAddr = &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+		} else {
+			// 远程是 IPv6
+			localNetAddr = &net.TCPAddr{IP: net.IPv6zero, Port: 0}
+		}
 		virtualConn := newMeekVirtualConn(sessionID, localNetAddr, proxyNetAddr)
-
 		ctx, cancel := context.WithCancel(parentCtx)
 
-		// =====================================
-		// 数据泵：带有滑动窗口 ARQ 的 8并发稳态轮询
-		// =====================================
+		// 数据泵核心逻辑
 		go func() {
 			defer virtualConn.Close()
 			defer cancel()
 
-			var ackedByServer uint64
-			var dispatchSeq uint64
+			var ackedByServer, dispatchSeq uint64
 			var windowMu sync.Mutex
-			var consecutiveErrors int32
-			var triggerRetry int32
-			// 记录当前正在空手去服务端拉取数据的 Worker 数量
-			var emptyPollers int32
-
+			var consecutiveErrors, triggerRetry, emptyPollers int32
 			workerCount := 8
 			var wg sync.WaitGroup
 
 			for i := 0; i < workerCount; i++ {
 				wg.Add(1)
-				go func(id int) {
+				go func() {
 					defer wg.Done()
-					for !virtualConn.closed {
-						if ctx.Err() != nil {
-							break
-						}
+					for !virtualConn.closed && ctx.Err() == nil {
 						// 抢占任务：从写缓冲中划走一段数据
 						windowMu.Lock()
-						currentAck := atomic.LoadUint64(&ackedByServer)
-
+						currAck := atomic.LoadUint64(&ackedByServer)
 						// 如果派发游标落后（重传重置），强制对齐
-						if dispatchSeq < currentAck {
-							dispatchSeq = currentAck
+						if dispatchSeq < currAck {
+							dispatchSeq = currAck
 						}
 
 						// GetSlice 实现了核心的滑动窗口
-						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currentAck, dispatchSeq, maxsendBufSize)
+						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currAck, dispatchSeq, maxsendBufSize)
 
-						// 空载限流
+						// 空载限流策略：最多 2 个 Worker 保持长轮询
 						if len(upData) == 0 {
 							// 如果没有上行数据，只允许最多 2 个 Worker 去服务端进行长轮询
 							if atomic.LoadInt32(&emptyPollers) >= 2 {
 								windowMu.Unlock()
-								time.Sleep(50 * time.Millisecond) // 其他 Worker 本地待命，不发 HTTP 请求
+								time.Sleep(100 * time.Millisecond) // 其他 Worker 本地待命，不发 HTTP 请求
 								continue
 							}
 							atomic.AddInt32(&emptyPollers, 1) // 登记为一个空载探子
@@ -659,23 +634,20 @@ func init() {
 						}
 						windowMu.Unlock()
 
+						// 构造请求
 						req, _ := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(upData))
 						req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 						req.ContentLength = int64(len(upData))
-
 						req.Host = cfg.CustomHost
+
+						// 注入控制头
 						req.Header.Set("Host", cfg.CustomHost)
 						req.Header.Set("X-Target", cfg.SshAddr)
 						req.Header.Set("X-Network", "tcp")
 						req.Header.Set("X-Session-ID", sessionID)
-
-						virtualConn.readCond.L.Lock()
-						myAck := virtualConn.nextReadSeq
-						virtualConn.readCond.L.Unlock()
-
 						// 注入 Seq 和 Ack 校验头
 						req.Header.Set("X-Seq", strconv.FormatUint(currentSeq, 10))
-						req.Header.Set("X-Ack", strconv.FormatUint(myAck, 10))
+						req.Header.Set("X-Ack", strconv.FormatUint(atomic.LoadUint64(&virtualConn.nextReadSeq), 10))
 						req.Header.Set("Content-Type", "application/octet-stream")
 
 						if cfg.ProxyAuthRequired {
@@ -809,24 +781,54 @@ func init() {
 							time.Sleep(50 * time.Millisecond) // 可以稍微设短一点
 						}
 					}
-				}(i)
+				}()
 			}
-
-			// 必须在这里等待所有 Worker 结束
 			wg.Wait()
 		}()
 
 		return newXhttpFramedConn(virtualConn, virtualConn, func() error {
-			virtualConn.Close()
 			cancel()
-			return nil
+			return virtualConn.Close()
 		}, localNetAddr, proxyNetAddr), nil
 	}
 
-	RegisterTunnel("xhttpc", "none", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return xhttpHandler(ctx, cfg, baseConn, false)
+	// 注册 Tunnel
+	RegisterTunnel("xhttpc", "none", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
+		return xhttpHandler(ctx, cfg, base, false, nil)
 	})
-	RegisterTunnel("xhttp", "none", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		return xhttpHandler(ctx, cfg, baseConn, true)
+	RegisterTunnel("xhttp", "none", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
+		return xhttpHandler(ctx, cfg, base, true, nil)
 	})
+}
+
+// 辅助工具函数：原子更新最大值
+func updateUint64IfGreater(addr *uint64, newVal uint64) {
+	for {
+		old := atomic.LoadUint64(addr)
+		if newVal <= old || atomic.CompareAndSwapUint64(addr, old, newVal) {
+			break
+		}
+	}
+}
+
+// 辅助工具函数：轻量级 H2C 嗅探
+func probeH2C(ctx context.Context, addr string) bool {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	if _, err := conn.Write([]byte(preface)); err != nil {
+		return false
+	}
+
+	buf := make([]byte, 9)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return false
+	}
+	return buf[3] == 0x04 // SETTINGS frame type
 }

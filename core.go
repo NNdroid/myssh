@@ -2,6 +2,7 @@ package myssh
 
 import (
 	"bytes"
+	"crypto/rand"
 	"io"
 	"sync"
 )
@@ -34,7 +35,16 @@ var (
 			return new(bytes.Buffer)
 		},
 	}
+	// 填充池
+	padPool    []byte
+	padPoolLen = 64 * 1000
 )
+
+func init() {
+	// 随机填充池初始化
+	padPool = make([]byte, padPoolLen)
+	io.ReadFull(rand.Reader, padPool)
+}
 
 func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
 	// 1. 从池子里借一块内存

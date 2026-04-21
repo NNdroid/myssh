@@ -15,7 +15,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-// 🌟 HTTP/3 传输层全局复用池
+// HTTP/3 传输层全局复用池
 // 这将彻底发挥 QUIC 的多路复用优势，所有代理请求共享同一条底层的 UDP/QUIC 物理连接
 var (
 	h3TransportCache sync.Map
