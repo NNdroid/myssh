@@ -787,7 +787,7 @@ func StartSshTProxy2(configJson string) int {
 				zlog.Warnf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
 				zlog.Warnf("%s [SSH-Handshake] ===========================", TAG)
 				if cfg.VerifyFingerprint {
-					if fpMD5 == cfg.ServerFingerprint || fpSHA256 == cfg.ServerFingerprint {
+					if !(fpMD5 == cfg.ServerFingerprint || fpSHA256 == cfg.ServerFingerprint) {
 						return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerFingerprint)
 					}
 				}
