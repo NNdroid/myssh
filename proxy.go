@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -286,11 +287,17 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		errc := make(chan error, 2)
 		go func() {
-			_, err := tcpRelay(remote, c)
+			// Proxy -> Client (Rx for local, Tx for proxy logic if viewed from client's download)
+			// remote = ssh channel (download data)
+			// c = local client
+			_, err := tcpRelay(c, &TrackingReader{R: remote, Add: AddRx})
 			errc <- err
 		}()
 		go func() {
-			_, err := tcpRelay(c, remote)
+			// Client -> Proxy (Tx for local, Rx for proxy logic if viewed from client's upload)
+			// c = local client (upload data)
+			// remote = ssh channel
+			_, err := tcpRelay(remote, &TrackingReader{R: c, Add: AddTx})
 			errc <- err
 		}()
 
@@ -419,6 +426,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 						break
 					}
 
+					// 直连也统一下行流量 (可选)
+					AddRx(int64(n))
+
 					res := socks5.NewDatagram(dstAtyp, dstAddr, dstPortBytes, buf[:n])
 					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
 				}
@@ -426,9 +436,12 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
 		}
 
-		_, err := uc.Write(d.Data)
+		n, err := uc.Write(d.Data)
 		if err != nil {
 			zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入直连 UDP 数据失败: %v", TAG, err)
+		} else {
+			// 增加上行流量
+			AddTx(int64(n))
 		}
 		return nil
 	}
@@ -521,6 +534,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					udpBufPool.Put(bufPtr) // 读取失败也要归还
 					break
 				}
+
+				// 下行 UDP 流量统计
+				AddRx(int64(pktLen))
 
 				flags := pktBuf[0]
 				if flags&0x02 == 0x02 {
@@ -616,10 +632,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	copy(packet[5:], addrBytes)
 	copy(packet[5+len(addrBytes):], d.Data)
 
-	if _, err := udpgwConn.Write(packet); err != nil {
+	if n, err := udpgwConn.Write(packet); err != nil {
 		udpgwConn.Close()
 		udpgwMap.Delete(sessionKey)
 		zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入 UDPGW 数据失败: %v", TAG, err)
+	} else {
+		// 上行 UDP 流量统计
+		AddTx(int64(n))
 	}
 
 	// 写入完成后，由于 TCP Write 会阻塞直到数据进入内核缓冲区，
@@ -698,7 +717,8 @@ func parsePrivateKeySshSigner(privateKey []byte, passphrase []byte) (ssh.Signer,
 	// 尝试直接解析
 	signer, err := ssh.ParsePrivateKey(privateKey)
 	// 如果报错提示需要密码 (Passphrase)
-	if _, ok := err.(*ssh.PassphraseMissingError); ok {
+	var passphraseMissingError *ssh.PassphraseMissingError
+	if errors.As(err, &passphraseMissingError) {
 		return ssh.ParsePrivateKeyWithPassphrase(privateKey, passphrase)
 	}
 	return signer, err

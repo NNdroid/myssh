@@ -11,7 +11,6 @@ void redirect_stderr() {
     pipe(pipefd);
     dup2(pipefd[1], STDERR_FILENO);
     // 啟動一個線程讀取管道並打印到 Logcat
-    // 這裡只是簡化邏輯，實務中需要 loop 讀取
 }
 */
 import "C"
@@ -29,7 +28,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
-	"runtime/debug"
+	//"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,8 +48,8 @@ var (
 )
 
 func init() {
-	// C.redirect_stderr() // 實作此 C 函數可強制捕捉 stderr
-	debug.SetTraceback("all") // 打印所有 goroutine 的堆疊
+	C.redirect_stderr() // 實作此 C 函數可強制捕捉 stderr
+	//debug.SetTraceback("all") // 打印所有 goroutine 的堆疊
 }
 
 // ==========================================
@@ -225,6 +224,8 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 func (c *meekVirtualConn) Close() error {
 	c.readCond.L.Lock()
 	c.closed = true
+	// 释放乱序缓存，避免常驻内存导致泄露
+	c.oooBuf = nil
 	c.readCond.Broadcast()
 	c.readCond.L.Unlock()
 	return nil
@@ -248,18 +249,22 @@ type xhttpFramedConn struct {
 	remote        net.Addr
 	mu            sync.Mutex
 	readBuf       []byte
-	frameBuf      []byte
+	frameBufPtr   *[]byte // 使用指针便于池化回收
 	hdrBuf        []byte
-	payloadBuf    []byte
+	payloadBufPtr *[]byte // 使用指针便于池化回收
 	closeCh       chan struct{}
 	closedFlag    int32
 	lastWriteTime int64
 }
 
 func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, remote net.Addr) *xhttpFramedConn {
+	// 使用全局缓存池分配大内存块
+	fBufPtr := xhttpBufPool.Get().(*[]byte)
+	pBufPtr := xhttpBufPool.Get().(*[]byte)
+
 	conn := &xhttpFramedConn{
 		r: r, w: w, closer: closer, local: local, remote: remote,
-		frameBuf: make([]byte, maxframeSize), hdrBuf: make([]byte, 6), payloadBuf: make([]byte, maxsendBufSize),
+		frameBufPtr: fBufPtr, hdrBuf: make([]byte, 6), payloadBufPtr: pBufPtr,
 		closeCh:       make(chan struct{}),
 		lastWriteTime: time.Now().Unix(),
 	}
@@ -302,36 +307,39 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 	}
 
 	frameLen := 6 + padLenInt + chunkSize
+	fBuf := *c.frameBufPtr
+
 	// 判断底层数组容量(cap)是否足够
-	if frameLen > cap(c.frameBuf) {
+	if frameLen > cap(fBuf) {
 		// 如果不够，采用 2 倍扩容策略，避免频繁 make
-		newCap := cap(c.frameBuf) * 2
+		newCap := cap(fBuf) * 2
 		if newCap < frameLen {
 			newCap = frameLen
 		}
-		c.frameBuf = make([]byte, frameLen, newCap)
+		fBuf = make([]byte, frameLen, newCap)
+		*c.frameBufPtr = fBuf
 	} else {
 		// 容量足够时，直接拉伸Slice
-		c.frameBuf = c.frameBuf[:frameLen]
+		fBuf = fBuf[:frameLen]
 	}
 
 	// 写入 Header
-	binary.BigEndian.PutUint32(c.frameBuf[0:4], uint32(chunkSize))
-	binary.BigEndian.PutUint16(c.frameBuf[4:6], uint16(padLenInt))
+	binary.BigEndian.PutUint32(fBuf[0:4], uint32(chunkSize))
+	binary.BigEndian.PutUint16(fBuf[4:6], uint16(padLenInt))
 
 	// 极速 Padding 填充
 	if padLenInt > 0 {
 		offset := mrand.Intn(padPoolLen - padLenInt)
-		copy(c.frameBuf[6:6+padLenInt], padPool[offset:offset+padLenInt])
+		copy(fBuf[6:6+padLenInt], padPool[offset:offset+padLenInt])
 	}
 
 	// 写入 Payload
 	if chunkSize > 0 {
-		copy(c.frameBuf[6+padLenInt:], chunk)
+		copy(fBuf[6+padLenInt:], chunk)
 	}
 
 	// 单次系统调用发出
-	_, err := c.w.Write(c.frameBuf)
+	_, err := c.w.Write(fBuf)
 	return err
 }
 
@@ -373,12 +381,17 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		rawPayloadLen := binary.BigEndian.Uint32(c.hdrBuf[0:4])
 		padLen := int(binary.BigEndian.Uint16(c.hdrBuf[4:6]))
 
-		// 直接复用 c.payloadBuf 当作“垃圾桶”来接收 padding
+		pBuf := *c.payloadBufPtr
+
+		// 直接复用 c.payloadBufPtr 当作“垃圾桶”来接收 padding
 		if padLen > 0 {
-			if padLen > cap(c.payloadBuf) {
-				c.payloadBuf = make([]byte, padLen)
+			if padLen > cap(pBuf) {
+				pBuf = make([]byte, padLen)
+				*c.payloadBufPtr = pBuf
+			} else {
+				pBuf = pBuf[:padLen]
 			}
-			if _, err := io.ReadFull(c.r, c.payloadBuf[:padLen]); err != nil {
+			if _, err := io.ReadFull(c.r, pBuf); err != nil {
 				return 0, err
 			}
 		}
@@ -407,11 +420,13 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		// 如果用户的 p 太小，剩下的 payload 必须读入内部 buffer 暂存
 		leftover := payloadLen - readIntoP
 		if leftover > 0 {
+			pBuf = *c.payloadBufPtr
 			// 使用 cap 而不是 len 来判断，最大程度减少 make() 重新分配内存的次数
-			if leftover > cap(c.payloadBuf) {
-				c.payloadBuf = make([]byte, leftover)
+			if leftover > cap(pBuf) {
+				pBuf = make([]byte, leftover)
+				*c.payloadBufPtr = pBuf
 			}
-			leftoverBuf := c.payloadBuf[:leftover]
+			leftoverBuf := pBuf[:leftover]
 
 			if _, err := io.ReadFull(c.r, leftoverBuf); err != nil {
 				// 如果前面给用户的 p 已经读了 readIntoP 字节，
@@ -434,6 +449,17 @@ func (c *xhttpFramedConn) Close() error {
 		c.mu.Unlock()
 
 		close(c.closeCh)
+
+		// 回收缓存池
+		if c.frameBufPtr != nil {
+			xhttpBufPool.Put(c.frameBufPtr)
+			c.frameBufPtr = nil
+		}
+		if c.payloadBufPtr != nil {
+			xhttpBufPool.Put(c.payloadBufPtr)
+			c.payloadBufPtr = nil
+		}
+
 		return c.closer()
 	}
 	return nil
@@ -584,6 +610,8 @@ func init() {
 		var negotiatedProtocol string
 		var certificateFingerprint string
 		var err error
+		var cleanupFuncs []func() // 存放必须在隧道关闭时释放的资源（防泄露）
+
 		baseTlsConf := &tls.Config{
 			ServerName:         cfg.ServerName,
 			InsecureSkipVerify: true,
@@ -599,24 +627,39 @@ func init() {
 				h3TlsConf := baseTlsConf.Clone()
 				h3TlsConf.NextProtos = []string{"h3"}
 
-				_, certificateFingerprint, err = VerifyAndHandshakeQUIC(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+				var probeH3Conn *quic.Conn
+				probeH3Conn, certificateFingerprint, err = VerifyAndHandshakeQUIC(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
 				h3Cancel()
 
 				if err == nil {
+					// 探测成功，立即关闭探测连接以释放 UDP 端口和 Goroutine（内存泄露核心修复）
+					if probeH3Conn != nil {
+						(*probeH3Conn).CloseWithError(0, "probe_done")
+					}
+
 					zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, certificateFingerprint)
 					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)", TAG)
 					negotiatedProtocol = "h3"
-					client = &http.Client{
-						// 🌟 必须注入 TLSClientConfig，否则会报 IP SANs 校验错误
-						Transport: &http3.Transport{
-							TLSClientConfig: h3TlsConf,
-							Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, quicCfg *quic.Config) (*quic.Conn, error) {
-								qc, _, err := VerifyAndHandshakeQUIC(ctx, addr, tlsCfg, quicCfg, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
-								return qc, err
-							},
+
+					tr3 := &http3.Transport{
+						TLSClientConfig: h3TlsConf,
+						Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, quicCfg *quic.Config) (*quic.Conn, error) {
+							qc, _, err := VerifyAndHandshakeQUIC(ctx, addr, tlsCfg, quicCfg, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+							return qc, err
 						},
-						Timeout: 90 * time.Second,
 					}
+					client = &http.Client{
+						Transport: tr3,
+						Timeout:   90 * time.Second,
+					}
+
+					// 必须在隧道关闭时释放 http3.Transport，否则将泄露大量 UDP Goroutine
+					cleanupFuncs = append(cleanupFuncs, func() {
+						tr3.Close()
+					})
+				} else if probeH3Conn != nil {
+					// 探测失败但如果连接未关闭，必须清理
+					(*probeH3Conn).CloseWithError(0, "probe_failed")
 				}
 			}
 
@@ -640,8 +683,10 @@ func init() {
 
 				var uConn *utls.UConn
 				uConn, negotiatedProtocol, certificateFingerprint, err = VerifyAndHandshakeUTLS(parentCtx, tcpConn, utlsConfig, tcpAlpns, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+
 				zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, certificateFingerprint)
 				zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, negotiatedProtocol)
+
 				if err != nil {
 					tcpConn.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
 					return nil, fmt.Errorf("utls verify&handshake failed: %w", err)
@@ -650,6 +695,14 @@ func init() {
 				// 缓存探路连接 (Zero-Waste)
 				cachedConn := net.Conn(uConn)
 				var connConsumed atomic.Bool
+
+				// 防止未被消费的探测连接永久泄露 (内存/FD泄露修复)
+				cleanupFuncs = append(cleanupFuncs, func() {
+					if !connConsumed.Load() && cachedConn != nil {
+						cachedConn.Close()
+					}
+				})
+
 				dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
 					if connConsumed.CompareAndSwap(false, true) {
 						return cachedConn, nil
@@ -663,6 +716,7 @@ func init() {
 					uc, np, cf, err := VerifyAndHandshakeUTLS(ctx, tc, utlsConfig, tcpAlpns, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
 					zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, cf)
 					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
+
 					if err != nil {
 						tc.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
 						return nil, fmt.Errorf("utls verify&handshake failed: %w", err)
@@ -672,22 +726,30 @@ func init() {
 				}
 
 				if negotiatedProtocol == "h2" && slices.Contains(alpnList, "h2") {
-					client = &http.Client{
-						Transport: &http2.Transport{
-							DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-								return dialTLS(ctx, network, addr)
-							},
+					tr2 := &http2.Transport{
+						DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+							return dialTLS(ctx, network, addr)
 						},
-						Timeout: 90 * time.Second,
 					}
+					client = &http.Client{
+						Transport: tr2,
+						Timeout:   90 * time.Second,
+					}
+					cleanupFuncs = append(cleanupFuncs, func() {
+						tr2.CloseIdleConnections()
+					})
 				} else {
-					client = &http.Client{
-						Transport: &http.Transport{
-							DialTLSContext:  dialTLS,
-							TLSClientConfig: baseTlsConf,
-						},
-						Timeout: 90 * time.Second,
+					tr1 := &http.Transport{
+						DialTLSContext:  dialTLS,
+						TLSClientConfig: baseTlsConf,
 					}
+					client = &http.Client{
+						Transport: tr1,
+						Timeout:   90 * time.Second,
+					}
+					cleanupFuncs = append(cleanupFuncs, func() {
+						tr1.CloseIdleConnections()
+					})
 				}
 			}
 		} else {
@@ -707,6 +769,9 @@ func init() {
 					},
 				}
 				client = &http.Client{Transport: t2, Timeout: 90 * time.Second}
+				cleanupFuncs = append(cleanupFuncs, func() {
+					t2.CloseIdleConnections()
+				})
 			} else {
 				zlog.Infof("%s [Tunnel] 🐢 H2C 探测失败，平滑回退至纯 TCP HTTP/1.1 引擎", TAG)
 				t1 := &http.Transport{
@@ -718,6 +783,9 @@ func init() {
 					ExpectContinueTimeout: 5 * time.Second,
 				}
 				client = &http.Client{Transport: t1, Timeout: 90 * time.Second}
+				cleanupFuncs = append(cleanupFuncs, func() {
+					t1.CloseIdleConnections()
+				})
 			}
 		}
 
@@ -789,7 +857,7 @@ func init() {
 						req, _ := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 						req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 						req.Host = cfg.CustomHost
-						
+
 						// GET 防缓存
 						if len(upData) == 0 {
 							q := req.URL.Query()
@@ -832,6 +900,7 @@ func init() {
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr) // 假设 xhttpBufPool 在全局可用
 							}
+
 							zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)
 
 							// 若上下文被取消，直接退出
@@ -949,6 +1018,10 @@ func init() {
 
 		return newXhttpFramedConn(virtualConn, virtualConn, func() error {
 			cancel()
+			// 依次执行安全清理
+			for _, cleanup := range cleanupFuncs {
+				cleanup()
+			}
 			return virtualConn.Close()
 		}, localNetAddr, proxyNetAddr), nil
 	}
