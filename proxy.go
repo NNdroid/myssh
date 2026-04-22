@@ -22,28 +22,30 @@ import (
 const TAG = "[MySsh]"
 
 type ProxyConfig struct {
-	LocalAddr            string `json:"local_addr"`
-	SshAddr              string `json:"ssh_addr"`
-	User                 string `json:"user"`
-	AuthType             string `json:"auth_type"`
-	PrivateKey           string `json:"private_key"`
-	PrivateKeyPassphrase string `json:"private_key_passphrase"`
-	Pass                 string `json:"pass"`
-	VerifyFingerprint    bool   `json:"verify_finger_print"`
-	ServerFingerprint    string `json:"server_finger_print"`
-	TunnelType           string `json:"tunnel_type"`
-	ProxyAddr            string `json:"proxy_addr"`
-	ProxyAuthRequired    bool   `json:"proxy_auth_required"`
-	ProxyAuthToken       string `json:"proxy_auth_token"`
-	ProxyAuthUser        string `json:"proxy_auth_user"`
-	ProxyAuthPass        string `json:"proxy_auth_pass"`
-	CustomHost           string `json:"custom_host"`
-	ServerName           string `json:"server_name"`
-	HttpPayload          string `json:"http_payload"`
-	CustomPath           string `json:"custom_path"`
-	UdpgwAddr            string `json:"udpgw_addr"` // 留空则不开启 UDPGW
-	DisableStatusCheck   bool   `json:"disable_status_check"`
-	Alpn                 string `json:"alpn"`
+	LocalAddr                    string `json:"local_addr"`
+	SshAddr                      string `json:"ssh_addr"`
+	User                         string `json:"user"`
+	AuthType                     string `json:"auth_type"`
+	PrivateKey                   string `json:"private_key"`
+	PrivateKeyPassphrase         string `json:"private_key_passphrase"`
+	Pass                         string `json:"pass"`
+	VerifySSHFingerprint         bool   `json:"verify_finger_print"`
+	ServerSSHFingerprint         string `json:"server_finger_print"`
+	TunnelType                   string `json:"tunnel_type"`
+	ProxyAddr                    string `json:"proxy_addr"`
+	ProxyAuthRequired            bool   `json:"proxy_auth_required"`
+	ProxyAuthToken               string `json:"proxy_auth_token"`
+	ProxyAuthUser                string `json:"proxy_auth_user"`
+	ProxyAuthPass                string `json:"proxy_auth_pass"`
+	CustomHost                   string `json:"custom_host"`
+	ServerName                   string `json:"server_name"`
+	HttpPayload                  string `json:"http_payload"`
+	CustomPath                   string `json:"custom_path"`
+	UdpgwAddr                    string `json:"udpgw_addr"` // 留空则不开启 UDPGW
+	DisableStatusCheck           bool   `json:"disable_status_check"`
+	Alpn                         string `json:"alpn"`
+	VerifyCertificateFingerprint bool   `json:"verify_certificate_finger_print"`
+	ServerCertificateFingerprint string `json:"server_certificate_finger_print"`
 }
 
 type GlobalConfig struct {
@@ -435,7 +437,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 命中代理规则，判断是否配置了 UDPGW
 	// ==========================================
 	if h.UdpgwAddr == "" {
-		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+		zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
 		return nil
 	}
 
@@ -450,7 +452,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		mu.Unlock()
 
 		if client == nil {
-			zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
 			return fmt.Errorf("ssh client not ready")
 		}
 
@@ -786,9 +788,9 @@ func StartSshTProxy2(configJson string) int {
 				zlog.Warnf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
 				zlog.Warnf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
 				zlog.Warnf("%s [SSH-Handshake] ===========================", TAG)
-				if cfg.VerifyFingerprint {
-					if !(fpMD5 == cfg.ServerFingerprint || fpSHA256 == cfg.ServerFingerprint) {
-						return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerFingerprint)
+				if cfg.VerifySSHFingerprint {
+					if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
+						return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)
 					}
 				}
 				return nil

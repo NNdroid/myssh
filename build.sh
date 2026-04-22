@@ -11,16 +11,17 @@ GO_SRC_DIR="."
 OUTPUT_DIR="../../libs"
 
 # 生成的 AAR 文件名
-OUTPUT_FILE="myssh.aar"
+DEBUG_OUTPUT_FILE="myssh.debug.aar"
+RELEASE_OUTPUT_FILE="myssh.release.aar"
 
 # 完整的输出路径
-OUTPUT_PATH="${OUTPUT_DIR}/${OUTPUT_FILE}"
+DEBUG_OUTPUT_PATH="${OUTPUT_DIR}/${DEBUG_OUTPUT_FILE}"
+RELEASE_OUTPUT_PATH="${OUTPUT_DIR}/${RELEASE_OUTPUT_FILE}"
 
 # 定义发版版本号
 VERSION="v1.0.$(date +%Y%m%d)"
 # ============================================
 
-LDFLAGS="-s -w -X 'myssh.Version=$VERSION'"
 
 echo "🚀 开始使用 gomobile 编译..."
 
@@ -38,19 +39,28 @@ fi
 
 go mod tidy
 # 正式版
-#echo "📦 正在编译并打包至 $OUTPUT_PATH ..."
+LDFLAGS="-s -w -X 'myssh.Version=$VERSION'"
+echo "📦 正在编译并打包至 $RELEASE_OUTPUT_PATH ..."
 # 在 Git Bash 等环境中，相对路径 "../../libs" 能被原生的 gomobile.exe 完美识别
-#gomobile bind -v -target=android -androidapi 28 -ldflags="$LDFLAGS" -trimpath -o "$OUTPUT_PATH" "$GO_SRC_DIR"
+gomobile bind -v -target=android -androidapi 28 -ldflags="$LDFLAGS" -trimpath -o "$RELEASE_OUTPUT_PATH" "$GO_SRC_DIR"
+# 检查编译结果
+if [ -f "$RELEASE_OUTPUT_PATH" ]; then
+    echo "✅ 编译成功！"
+    echo "📄 AAR 文件已成功保存到: $RELEASE_OUTPUT_PATH"
+else
+    echo "❌ 编译失败: 未能在预期位置找到生成的文件。"
+    exit 1
+fi
 
 # 临时调试版本
 LDFLAGS="-X 'myssh.Version=$VERSION'"
 echo "📦 正在编译带调试符号的版本..."
-gomobile bind -v -target=android -androidapi 28 -ldflags="$LDFLAGS" -o "$OUTPUT_PATH" "$GO_SRC_DIR"
+gomobile bind -v -target=android -androidapi 28 -ldflags="$LDFLAGS" -o "$DEBUG_OUTPUT_PATH" "$GO_SRC_DIR"
 
 # 检查编译结果
-if [ -f "$OUTPUT_PATH" ]; then
+if [ -f "$DEBUG_OUTPUT_PATH" ]; then
     echo "✅ 编译成功！"
-    echo "📄 AAR 文件已成功保存到: $OUTPUT_PATH"
+    echo "📄 AAR 文件已成功保存到: $DEBUG_OUTPUT_PATH"
 else
     echo "❌ 编译失败: 未能在预期位置找到生成的文件。"
     exit 1

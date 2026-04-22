@@ -1,9 +1,25 @@
 package myssh
 
+/*
+#include <android/log.h>
+#include <stdio.h>
+#include <unistd.h>
+
+// 利用一個管道將 stderr 的內容轉發到 Android Log
+void redirect_stderr() {
+    int pipefd[2];
+    pipe(pipefd);
+    dup2(pipefd[1], STDERR_FILENO);
+    // 啟動一個線程讀取管道並打印到 Logcat
+    // 這裡只是簡化邏輯，實務中需要 loop 讀取
+}
+*/
+import "C"
 import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
@@ -13,6 +29,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +47,11 @@ var (
 	maxsendBufSize = 900 * 1000 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
 	maxframeSize   = 990 * 1000
 )
+
+func init() {
+	// C.redirect_stderr() // 實作此 C 函數可強制捕捉 stderr
+	debug.SetTraceback("all") // 打印所有 goroutine 的堆疊
+}
 
 // ==========================================
 // 1. 高性能可靠传输缓冲区 (Seq/Ack 机制)
@@ -246,8 +268,8 @@ func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, re
 }
 
 func (c *xhttpFramedConn) heartbeatLoop() {
-	// 巡逻周期设为 5 秒（不用频繁唤醒），但判断阈值依然是 20 秒
-	ticker := time.NewTicker(5 * time.Second)
+	// 巡逻周期设为 10 秒（不用频繁唤醒）
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -255,8 +277,8 @@ func (c *xhttpFramedConn) heartbeatLoop() {
 			// 获取上次真实发送数据的时间
 			last := atomic.LoadInt64(&c.lastWriteTime)
 
-			// 如果距离上次发包已经过去了 20 秒，说明连接处于绝对空闲状态
-			if time.Now().Unix()-last >= 20 {
+			// 如果距离上次发包已经过去了 60 秒，说明连接处于绝对空闲状态
+			if time.Now().Unix()-last >= 60 {
 				c.Write(nil) // 发送空帧，这会自动触发上面的 StoreInt64 刷新时间
 			}
 		case <-c.closeCh:
@@ -429,8 +451,114 @@ func generateRandomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// VerifyAndHandshakeUTLS 执行 uTLS 握手并校验首个证书的 SHA-256 指纹
+// expectedFingerprint 格式示例: "EE:21:43:..." (不区分大小写，支持冒号或空格分隔)
+func VerifyAndHandshakeUTLS(ctx context.Context, tcpConn net.Conn, utlsConfig *utls.Config, tcpAlpns []string, verifyFingerprint bool, expectedFingerprint string) (*utls.UConn, string, string, error) {
+
+	uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
+
+	// 1. 提前构建握手状态
+	if err := uConn.BuildHandshakeState(); err != nil {
+		tcpConn.Close()
+		return nil, "", "", fmt.Errorf("utls build handshake state failed: %w", err)
+	}
+
+	// 2. 修改 ALPN 扩展
+	for _, ext := range uConn.Extensions {
+		if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
+			alpnExt.AlpnProtocols = tcpAlpns
+			break
+		}
+	}
+
+	// 3. 执行握手
+	if err := uConn.HandshakeContext(ctx); err != nil {
+		tcpConn.Close()
+		return nil, "", "", fmt.Errorf("utls handshake failed: %w", err)
+	}
+
+	// 4. 获取连接状态并校验指纹
+	state := uConn.ConnectionState()
+	certs := state.PeerCertificates
+
+	if len(certs) == 0 {
+		uConn.Close()
+		return nil, "", "", fmt.Errorf("no certificates presented by peer")
+	}
+
+	negotiatedProtocol := state.NegotiatedProtocol
+
+	// 计算当前证书指纹
+	leafCert := certs[0]
+	sha256Sum := sha256.Sum256(leafCert.Raw)
+	actualFingerprint := fmt.Sprintf("%02X", sha256Sum[0])
+	for i := 1; i < len(sha256Sum); i++ {
+		actualFingerprint += ":" + fmt.Sprintf("%02X", sha256Sum[i])
+	}
+
+	// 如果传入了指纹限制，则进行比对
+	if verifyFingerprint {
+		// 标准化处理：转大写并移除常见的冒号/空格
+		cleanExpected := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(expectedFingerprint, ":", ""), " ", ""))
+		cleanActual := strings.ReplaceAll(actualFingerprint, ":", "")
+
+		if cleanExpected != cleanActual {
+			uConn.Close()
+			return nil, negotiatedProtocol, actualFingerprint, fmt.Errorf("TLS certificate fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFingerprint)
+		}
+	}
+	return uConn, negotiatedProtocol, actualFingerprint, nil
+}
+
+func VerifyAndHandshakeQUIC(ctx context.Context, addr string, tlsCfg *tls.Config, quicCfg *quic.Config, verifyFingerprint bool, expectedFingerprint string) (*quic.Conn, string, error) {
+	// 使用 DialAddrEarly 以支持 0-RTT（如果服务器支持）
+	conn, err := quic.DialAddrEarly(ctx, addr, tlsCfg, quicCfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("quic dial failed: %w", err)
+	}
+
+	select {
+	case <-conn.HandshakeComplete():
+	case <-ctx.Done():
+		conn.CloseWithError(0, "timeout")
+		return nil, "", ctx.Err()
+	}
+
+	// 提取证书并校验指纹
+	cs := conn.ConnectionState()
+	certs := cs.TLS.PeerCertificates
+	if len(certs) == 0 {
+		conn.CloseWithError(0, "no_certs")
+		return nil, "", fmt.Errorf("server provided no certificates")
+	}
+
+	// 计算实际指纹
+	sha256Sum := sha256.Sum256(certs[0].Raw)
+	var actualFPBuilder strings.Builder
+	for i, b := range sha256Sum {
+		if i > 0 {
+			actualFPBuilder.WriteString(":")
+		}
+		fmt.Fprintf(&actualFPBuilder, "%02X", b)
+	}
+	actualFP := actualFPBuilder.String()
+
+	// 比对指纹
+	if verifyFingerprint {
+		cleanExpected := strings.ToUpper(strings.ReplaceAll(expectedFingerprint, ":", ""))
+		cleanActual := strings.ReplaceAll(actualFP, ":", "")
+
+		if cleanExpected != cleanActual {
+			conn.CloseWithError(0, "fingerprint_mismatch")
+			return nil, actualFP, fmt.Errorf("fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFP)
+		}
+	}
+
+	return conn, actualFP, nil
+}
+
 // ==========================================
-// 4. Android 核心握手逻辑与注册
+// 注册
 // ==========================================
 func init() {
 
@@ -454,6 +582,8 @@ func init() {
 
 		var client *http.Client
 		var negotiatedProtocol string
+		var certificateFingerprint string
+		var err error
 		baseTlsConf := &tls.Config{
 			ServerName:         cfg.ServerName,
 			InsecureSkipVerify: true,
@@ -469,16 +599,21 @@ func init() {
 				h3TlsConf := baseTlsConf.Clone()
 				h3TlsConf.NextProtos = []string{"h3"}
 
-				_, err := quic.DialAddr(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf)
+				_, certificateFingerprint, err = VerifyAndHandshakeQUIC(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
 				h3Cancel()
 
 				if err == nil {
+					zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, certificateFingerprint)
 					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)", TAG)
 					negotiatedProtocol = "h3"
 					client = &http.Client{
 						// 🌟 必须注入 TLSClientConfig，否则会报 IP SANs 校验错误
 						Transport: &http3.Transport{
 							TLSClientConfig: h3TlsConf,
+							Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, quicCfg *quic.Config) (*quic.Conn, error) {
+								qc, _, err := VerifyAndHandshakeQUIC(ctx, addr, tlsCfg, quicCfg, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+								return qc, err
+							},
 						},
 						Timeout: 90 * time.Second,
 					}
@@ -503,28 +638,14 @@ func init() {
 					NextProtos:         tcpAlpns,
 				}
 
-				uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
-
-				// 提前构建握手状态
-				if err := uConn.BuildHandshakeState(); err != nil {
-					tcpConn.Close()
-					return nil, fmt.Errorf("utls build handshake state failed: %w", err)
-				}
-				// 找到 ALPN 扩展并强行修改为你的 tcpAlpns
-				for _, ext := range uConn.Extensions {
-					if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
-						alpnExt.AlpnProtocols = tcpAlpns // 例如 ["http/1.1"]
-						break
-					}
-				}
-
-				if err := uConn.HandshakeContext(parentCtx); err != nil {
-					tcpConn.Close()
-					return nil, fmt.Errorf("utls handshake failed: %w", err)
-				}
-
-				negotiatedProtocol = uConn.ConnectionState().NegotiatedProtocol
+				var uConn *utls.UConn
+				uConn, negotiatedProtocol, certificateFingerprint, err = VerifyAndHandshakeUTLS(parentCtx, tcpConn, utlsConfig, tcpAlpns, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+				zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, certificateFingerprint)
 				zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, negotiatedProtocol)
+				if err != nil {
+					tcpConn.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
+					return nil, fmt.Errorf("utls verify&handshake failed: %w", err)
+				}
 
 				// 缓存探路连接 (Zero-Waste)
 				cachedConn := net.Conn(uConn)
@@ -539,25 +660,12 @@ func init() {
 						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
 
-					uc := utls.UClient(tc, utlsConfig, utls.HelloChrome_Auto)
-
-					// 构建握手状态
-					if err := uc.BuildHandshakeState(); err != nil {
-						tc.Close() // 必须显式关闭底层连接，防止泄露
-						return nil, fmt.Errorf("utls build handshake state failed: %w", err)
-					}
-
-					// 找到 ALPN 扩展并强行修改为 tcpAlpns
-					for _, ext := range uc.Extensions {
-						if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
-							alpnExt.AlpnProtocols = tcpAlpns
-							break
-						}
-					}
-
-					if err := uc.HandshakeContext(ctx); err != nil {
+					uc, np, cf, err := VerifyAndHandshakeUTLS(ctx, tc, utlsConfig, tcpAlpns, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+					zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, cf)
+					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
+					if err != nil {
 						tc.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
-						return nil, fmt.Errorf("utls handshake failed: %w", err)
+						return nil, fmt.Errorf("utls verify&handshake failed: %w", err)
 					}
 
 					return uc, nil
@@ -653,10 +761,10 @@ func init() {
 						// GetSlice 实现了核心的滑动窗口
 						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currAck, dispatchSeq, maxsendBufSize)
 
-						// 空载限流策略：最多 2 个 Worker 保持长轮询
+						// 空载限流策略
 						if len(upData) == 0 {
-							// 如果没有上行数据，只允许最多 2 个 Worker 去服务端进行长轮询
-							if atomic.LoadInt32(&emptyPollers) >= 2 {
+							// 如果没有上行数据，只允许最多 1 个 Worker 去服务端进行长轮询
+							if atomic.LoadInt32(&emptyPollers) >= 1 {
 								windowMu.Unlock()
 								time.Sleep(100 * time.Millisecond) // 其他 Worker 本地待命，不发 HTTP 请求
 								continue
@@ -669,10 +777,29 @@ func init() {
 						windowMu.Unlock()
 
 						// 构造请求
-						req, _ := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(upData))
+						var method string
+						var bodyReader io.Reader
+						if len(upData) > 0 {
+							method = http.MethodPost
+							bodyReader = bytes.NewReader(upData)
+						} else {
+							method = http.MethodGet
+							bodyReader = http.NoBody
+						}
+						req, _ := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 						req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
-						req.ContentLength = int64(len(upData))
 						req.Host = cfg.CustomHost
+						
+						// GET 防缓存
+						if len(upData) == 0 {
+							q := req.URL.Query()
+							q.Set("t", strconv.FormatInt(time.Now().UnixNano(), 36))
+							req.URL.RawQuery = q.Encode()
+							req.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+						} else {
+							req.ContentLength = int64(len(upData))
+							req.Header.Set("Content-Type", "application/octet-stream")
+						}
 
 						// 注入控制头
 						req.Header.Set("Host", cfg.CustomHost)
@@ -812,7 +939,7 @@ func init() {
 
 						// 智能退避：如果双向都没有数据流动，才进行休眠
 						if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
-							time.Sleep(50 * time.Millisecond) // 可以稍微设短一点
+							time.Sleep(50 * time.Millisecond)
 						}
 					}
 				}()
