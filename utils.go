@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -268,13 +269,13 @@ func getCpuPercent() float64 {
 		return 0.0
 	}
 
-	fields := strings.Fields(string(data))
+	fields := bytes.Fields(data)
 	if len(fields) < 15 {
 		return 0.0
 	}
 
-	utime, _ := strconv.ParseFloat(fields[13], 64)
-	stime, _ := strconv.ParseFloat(fields[14], 64)
+	utime, _ := strconv.ParseFloat(string(fields[13]), 64)
+	stime, _ := strconv.ParseFloat(string(fields[14]), 64)
 
 	now := time.Now()
 	if !lastTime.IsZero() {

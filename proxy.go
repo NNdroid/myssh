@@ -351,8 +351,19 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			return err
 		}
 
-		res := socks5.NewDatagram(d.Atyp, d.DstAddr, d.DstPort, replyData)
-		_, err = s.UDPConn.WriteToUDP(res.Bytes(), addr)
+		outLen := 3 + 1 + len(d.DstAddr) + 2 + len(replyData)
+		outBufPtr := udpBufPool.Get().(*[]byte)
+		outBuf := *outBufPtr
+		if outLen <= cap(outBuf) {
+			outPkt := outBuf[:outLen]
+			outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
+			outPkt[3] = d.Atyp
+			copy(outPkt[4:], d.DstAddr)
+			copy(outPkt[4+len(d.DstAddr):], d.DstPort)
+			copy(outPkt[4+len(d.DstAddr)+2:], replyData)
+			_, err = s.UDPConn.WriteToUDP(outPkt, addr)
+		}
+		udpBufPool.Put(outBufPtr)
 		return err
 	}
 
@@ -417,7 +428,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 				bufPtr := udpBufPool.Get().(*[]byte)
 				buf := *bufPtr
-				defer udpBufPool.Put(buf)
+				defer udpBufPool.Put(bufPtr) // 修改了这里: 传入指针
 
 				for {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -429,8 +440,19 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					// 直连也统一下行流量 (可选)
 					AddRx(int64(n))
 
-					res := socks5.NewDatagram(dstAtyp, dstAddr, dstPortBytes, buf[:n])
-					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
+					outLen := 3 + 1 + len(dstAddr) + 2 + n
+					outBufPtr := udpBufPool.Get().(*[]byte)
+					outBuf := *outBufPtr
+					if outLen <= cap(outBuf) {
+						outPkt := outBuf[:outLen]
+						outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
+						outPkt[3] = dstAtyp
+						copy(outPkt[4:], dstAddr)
+						copy(outPkt[4+len(dstAddr):], dstPortBytes)
+						copy(outPkt[4+len(dstAddr)+2:], buf[:n])
+						s.UDPConn.WriteToUDP(outPkt, clientAddr)
+					}
+					udpBufPool.Put(outBufPtr)
 				}
 				zlog.Infof("%s [ROUTER] 🔴 UDP 直连会话已释放 -> %s", TAG, targetAddrStr)
 			}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
@@ -590,10 +612,19 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 					payload := pktBuf[offset:]
 
-					res := socks5.NewDatagram(atyp, dstAddr, dstPortBytes, payload)
-					// res.Bytes() 底层会产生一次 Copy (新的内存分配)，
-					// 所以这里写入底层 Socket 后，原来的 buf 就可以安全回收了。
-					s.UDPConn.WriteToUDP(res.Bytes(), clientAddr)
+					outLen := 3 + 1 + len(dstAddr) + 2 + len(payload)
+					outBufPtr := udpBufPool.Get().(*[]byte)
+					outBuf := *outBufPtr
+					if outLen <= cap(outBuf) {
+						outPkt := outBuf[:outLen]
+						outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
+						outPkt[3] = atyp
+						copy(outPkt[4:], dstAddr)
+						copy(outPkt[4+len(dstAddr):], dstPortBytes)
+						copy(outPkt[4+len(dstAddr)+2:], payload)
+						s.UDPConn.WriteToUDP(outPkt, clientAddr)
+					}
+					udpBufPool.Put(outBufPtr)
 				}
 
 				// 处理完毕，归还给内存池
@@ -603,13 +634,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		}(udpgwConn, addr, sessionKey)
 	}
 
-	addrBytes := make([]byte, 0, 1+len(d.DstAddr)+2)
-	addrBytes = append(addrBytes, d.Atyp)
-	addrBytes = append(addrBytes, d.DstAddr...)
-	addrBytes = append(addrBytes, d.DstPort...)
-
 	payloadLen := len(d.Data)
-	totalLen := 3 + len(addrBytes) + payloadLen
+	addrLen := 1 + len(d.DstAddr) + 2
+	totalLen := 3 + addrLen + payloadLen
 
 	// 从内存池获取
 	bufPtr := udpBufPool.Get().(*[]byte)
@@ -629,8 +656,10 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	packet[2] = 0x02
 	binary.BigEndian.PutUint16(packet[3:5], 1)
 
-	copy(packet[5:], addrBytes)
-	copy(packet[5+len(addrBytes):], d.Data)
+	packet[5] = d.Atyp
+	copy(packet[6:], d.DstAddr)
+	copy(packet[6+len(d.DstAddr):], d.DstPort)
+	copy(packet[6+len(d.DstAddr)+2:], d.Data)
 
 	if n, err := udpgwConn.Write(packet); err != nil {
 		udpgwConn.Close()

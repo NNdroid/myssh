@@ -1,19 +1,5 @@
 package myssh
 
-/*
-#include <android/log.h>
-#include <stdio.h>
-#include <unistd.h>
-
-// 利用一個管道將 stderr 的內容轉發到 Android Log
-void redirect_stderr() {
-    int pipefd[2];
-    pipe(pipefd);
-    dup2(pipefd[1], STDERR_FILENO);
-    // 啟動一個線程讀取管道並打印到 Logcat
-}
-*/
-import "C"
 import (
 	"bytes"
 	"context"
@@ -25,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	//"runtime/debug"
@@ -42,15 +28,15 @@ import (
 	"golang.org/x/net/http2"
 )
 
-var (
-	maxsendBufSize = 900 * 1000 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
-	maxframeSize   = 990 * 1000
+const (
+	xhttpHeaderSize     = 6   // 头部固定 6 字节 (4字节长度 + 2字节Padding长度)
+	xhttpMaxPaddingSize = 65535 // 最大 padding
 )
 
-func init() {
-	C.redirect_stderr() // 實作此 C 函數可強制捕捉 stderr
-	//debug.SetTraceback("all") // 打印所有 goroutine 的堆疊
-}
+var (
+	xhttpMaxsendBufSize = 900 * 1000 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
+	xhttpMaxframeSize   = xhttpMaxsendBufSize + xhttpMaxPaddingSize + xhttpHeaderSize
+)
 
 // ==========================================
 // 1. 高性能可靠传输缓冲区 (Seq/Ack 机制)
@@ -58,14 +44,34 @@ func init() {
 
 type reliableBuffer struct {
 	mu         sync.RWMutex
-	data       []byte // 原始数据缓冲区
-	baseOffset uint64 // 当前 data[0] 对应的绝对偏移量 (Seq)
+	cond       *sync.Cond
+	data       []byte // 必须改回单一切片 []byte
+	baseOffset uint64
+	maxSize    int
+	closed     bool
+}
+
+func newReliableBuffer(maxSize int) *reliableBuffer {
+	rb := &reliableBuffer{maxSize: maxSize}
+	rb.cond = sync.NewCond(&sync.Mutex{}) // 独立一把锁用于唤醒
+	return rb
 }
 
 func (rb *reliableBuffer) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+
+	rb.cond.L.Lock()
+	for len(rb.data) >= rb.maxSize && !rb.closed {
+		rb.cond.Wait() // 满了就等
+	}
+	if rb.closed {
+		rb.cond.L.Unlock()
+		return 0, io.ErrClosedPipe
+	}
+	rb.cond.L.Unlock()
+
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	rb.data = append(rb.data, p...)
@@ -77,15 +83,16 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen 
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
-	// 1. 清理对端已经确认收到的数据
+	// 清理对端已经确认收到的数据
+	freed := false
 	if remoteAck > rb.baseOffset {
 		skip := remoteAck - rb.baseOffset
 		if skip <= uint64(len(rb.data)) {
 			rb.data = rb.data[skip:]
 			rb.baseOffset = remoteAck
-
+			freed = true // 标记清理了内存
 			// 【惰性緊縮】：如果底層陣列膨脹超過 4MB 且空間浪費過半，才真正釋放記憶體
-			if cap(rb.data) > 4*1024*1024 && len(rb.data) < cap(rb.data)/2 {
+			if cap(rb.data) > rb.maxSize && len(rb.data) < cap(rb.data)/2 {
 				newData := make([]byte, len(rb.data))
 				copy(newData, rb.data)
 				rb.data = newData
@@ -93,7 +100,13 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen 
 		} else {
 			rb.data = nil
 			rb.baseOffset = remoteAck
+			freed = true
 		}
+	}
+
+	// 如果清理了旧数据，腾出了空间，唤醒被阻塞的 Write
+	if freed {
+		rb.cond.Broadcast()
 	}
 
 	// 修正派发起点：如果派发指针落后于已确认位置（说明发生了重传重置），则从当前最老的数据开始
@@ -134,6 +147,7 @@ func (rb *reliableBuffer) Len() int {
 // ==========================================
 
 type meekVirtualConn struct {
+	ctx       context.Context
 	sessionID string
 	local     net.Addr
 	remote    net.Addr
@@ -148,13 +162,14 @@ type meekVirtualConn struct {
 	closed bool
 }
 
-func newMeekVirtualConn(sessionID string, local, remote net.Addr) *meekVirtualConn {
+func newMeekVirtualConn(ctx context.Context, sessionID string, local, remote net.Addr) *meekVirtualConn {
 	return &meekVirtualConn{
+		ctx:       ctx,
 		sessionID: sessionID,
 		local:     local,
 		remote:    remote,
 		readCond:  sync.NewCond(&sync.Mutex{}),
-		writeBuf:  &reliableBuffer{},
+		writeBuf:  newReliableBuffer(4 * 1024 * 1024),
 		oooBuf:    make(map[uint64][]byte),
 	}
 }
@@ -163,26 +178,35 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 	c.readCond.L.Lock()
 	defer c.readCond.L.Unlock()
 	for c.readBuf.Len() == 0 && !c.closed {
-		c.readCond.Wait()
+		c.readCond.Wait() // 等待唤醒
 	}
-	if c.closed && c.readBuf.Len() == 0 {
+    
+	// 醒来后第一时间检查是否是因为上下文取消或被 Close 唤醒的
+	if c.ctx.Err() != nil || c.closed {
+		c.closed = true
 		return 0, io.EOF
 	}
-	return c.readBuf.Read(p)
+	
+	// 正常读取数据
+	n, err := c.readBuf.Read(p)
+
+	// ==========================================
+	// 【滞留内存释放】
+	// ==========================================
+	// 如果读取后缓冲区刚好空了，且底层容量撑得过大（比如超过了 1MB）
+	if c.readBuf.Len() == 0 && c.readBuf.Cap() > 1024*1024 {
+		// 直接赋予一个全新的空 Buffer。
+		// 这样一来，原来那个长达 1MB+ 的底层数组失去了引用，会被 Go 的 GC 迅速回收，释放系统内存。
+		c.readBuf = bytes.Buffer{} 
+	}
+
+	return n, err
 }
 
 func (c *meekVirtualConn) Write(p []byte) (int, error) {
-	// TCP 背壓限制 (Flow Control)
-	// 防止本地端上傳過快導致記憶體暴漲 100MB+，限制積壓上限為 4MB
-	for {
-		if c.closed {
+	if c.closed {
 			return 0, io.ErrClosedPipe
 		}
-		if c.writeBuf.Len() < 4*1024*1024 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond) // 阻塞，強迫本地 VPN/代理 客戶端減速
-	}
 	return c.writeBuf.Write(p)
 }
 
@@ -193,11 +217,11 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 
 	if len(data) > 0 {
 		if seq == c.nextReadSeq {
-			// 1. 序號正好匹配，寫入緩衝區
+			// 序號正好匹配，寫入緩衝區
 			c.readBuf.Write(data)
 			c.nextReadSeq += uint64(len(data))
 
-			// 2. 檢查暫存區有沒有「未來的包」現在可以接上了
+			// 檢查暫存區有沒有「未來的包」現在可以接上了
 			for {
 				if nextData, ok := c.oooBuf[c.nextReadSeq]; ok {
 					c.readBuf.Write(nextData)
@@ -209,9 +233,15 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 			}
 			c.readCond.Broadcast()
 		} else if seq > c.nextReadSeq {
-			// 3. 序號太新了，先存進 map
-			if len(c.oooBuf) < 1024 { // 防止惡意內存撐爆
-				// 因为外层使用了 bytesBufPool，这里必须分配独立内存拷贝！
+			// 序號太新了，先存進 map
+			// 序列号跨度过大（例如超过了 5MB 的数据量），视为无效包/恶意包，直接抛弃
+			// 假设你的一般包大小为 100KB，跨度超过 50 个包的距离就没必要缓存了
+			if seq - c.nextReadSeq > 5 * 1024 * 1024 { 
+				return c.nextReadSeq // 丢弃不合理的未来包
+			}
+
+			// 限制 Map 长度
+			if len(c.oooBuf) < 128 { // 1024 太大了，128 个乱序包已经能应对 99% 的弱网环境
 				dataCopy := make([]byte, len(data))
 				copy(dataCopy, data)
 				c.oooBuf[seq] = dataCopy
@@ -241,6 +271,19 @@ func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 // 3. 动态 Padding 与 0xFFFF 信令装甲
 // ==========================================
 
+// getBufFromPool 安全地从 sync.Pool 中获取 *[]byte
+// 当池子为空时，根据传入的 defaultSize 动态分配内存，完美支持多尺寸复用
+func getBufFromPool(pool *sync.Pool, defaultSize int) *[]byte {
+	obj := pool.Get()
+	
+	if obj == nil {
+		b := make([]byte, defaultSize)
+		return &b
+	}
+	
+	return obj.(*[]byte)
+}
+
 type xhttpFramedConn struct {
 	r             io.Reader
 	w             io.Writer
@@ -258,13 +301,16 @@ type xhttpFramedConn struct {
 }
 
 func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, remote net.Addr) *xhttpFramedConn {
-	// 使用全局缓存池分配大内存块
-	fBufPtr := xhttpBufPool.Get().(*[]byte)
-	pBufPtr := xhttpBufPool.Get().(*[]byte)
+	// 最大的 Payload + 最大的 Padding + 6字节头部
+	fBufPtr := getBufFromPool(&xhttpBufPool, xhttpMaxframeSize)
+	
+	pBufPtr := getBufFromPool(&xhttpBufPool, xhttpMaxsendBufSize)
 
 	conn := &xhttpFramedConn{
 		r: r, w: w, closer: closer, local: local, remote: remote,
-		frameBufPtr: fBufPtr, hdrBuf: make([]byte, 6), payloadBufPtr: pBufPtr,
+		frameBufPtr:  fBufPtr,
+		hdrBuf: make([]byte, 6), 
+		payloadBufPtr: pBufPtr,
 		closeCh:       make(chan struct{}),
 		lastWriteTime: time.Now().Unix(),
 	}
@@ -296,14 +342,14 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 	chunkSize := len(chunk)
 	var padLenInt int
 	if chunkSize == 0 {
-		padLenInt = 32 + mrand.Intn(128)
+		padLenInt = 32 + mrand.IntN(128)
 	} else if chunkSize < 512 {
-		padLenInt = (600 + mrand.Intn(600)) - chunkSize
+		padLenInt = (600 + mrand.IntN(600)) - chunkSize
 		if padLenInt < 0 {
-			padLenInt = mrand.Intn(256)
+			padLenInt = mrand.IntN(256)
 		}
 	} else {
-		padLenInt = 16 + mrand.Intn(112)
+		padLenInt = 16 + mrand.IntN(112)
 	}
 
 	frameLen := 6 + padLenInt + chunkSize
@@ -329,7 +375,7 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 
 	// 极速 Padding 填充
 	if padLenInt > 0 {
-		offset := mrand.Intn(padPoolLen - padLenInt)
+		offset := mrand.IntN(padPoolLen - padLenInt)
 		copy(fBuf[6:6+padLenInt], padPool[offset:offset+padLenInt])
 	}
 
@@ -352,7 +398,7 @@ func (c *xhttpFramedConn) Write(p []byte) (int, error) {
 	}
 
 	written := 0
-	maxPayload := maxframeSize
+	maxPayload := xhttpMaxsendBufSize
 	for len(p) > 0 {
 		chunkSize := len(p)
 		if chunkSize > maxPayload {
@@ -452,11 +498,16 @@ func (c *xhttpFramedConn) Close() error {
 
 		// 回收缓存池
 		if c.frameBufPtr != nil {
-			xhttpBufPool.Put(c.frameBufPtr)
+			// 如果容量没有因为异常而暴涨（设定一个合理阈值，比如 2 倍），才放入池中
+			if cap(*c.frameBufPtr) <= xhttpMaxframeSize*2 {
+				xhttpBufPool.Put(c.frameBufPtr)
+			}
 			c.frameBufPtr = nil
 		}
 		if c.payloadBufPtr != nil {
-			xhttpBufPool.Put(c.payloadBufPtr)
+			if cap(*c.payloadBufPtr) <= xhttpMaxsendBufSize*2 {
+				xhttpBufPool.Put(c.payloadBufPtr)
+			}
 			c.payloadBufPtr = nil
 		}
 
@@ -799,8 +850,8 @@ func init() {
 			// 远程是 IPv6
 			localNetAddr = &net.TCPAddr{IP: net.IPv6zero, Port: 0}
 		}
-		virtualConn := newMeekVirtualConn(sessionID, localNetAddr, proxyNetAddr)
 		ctx, cancel := context.WithCancel(parentCtx)
+		virtualConn := newMeekVirtualConn(ctx, sessionID, localNetAddr, proxyNetAddr)
 
 		// 数据泵核心逻辑
 		go func() {
@@ -817,6 +868,10 @@ func init() {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+					idleTimer := time.NewTimer(50 * time.Millisecond)
+					if !idleTimer.Stop() {
+						<-idleTimer.C // 抽干初始化的时间
+					}
 					for !virtualConn.closed && ctx.Err() == nil {
 						// 抢占任务：从写缓冲中划走一段数据
 						windowMu.Lock()
@@ -827,14 +882,22 @@ func init() {
 						}
 
 						// GetSlice 实现了核心的滑动窗口
-						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currAck, dispatchSeq, maxsendBufSize)
+						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currAck, dispatchSeq, xhttpMaxsendBufSize)
 
 						// 空载限流策略
 						if len(upData) == 0 {
 							// 如果没有上行数据，只允许最多 1 个 Worker 去服务端进行长轮询
 							if atomic.LoadInt32(&emptyPollers) >= 1 {
 								windowMu.Unlock()
-								time.Sleep(100 * time.Millisecond) // 其他 Worker 本地待命，不发 HTTP 请求
+								// 用 select 替代单纯的 Sleep，一旦隧道被关闭，能瞬间退出而不是傻等
+								idleTimer.Reset(100 * time.Millisecond)
+								select {
+								case <-idleTimer.C:
+									// 等待完成
+								case <-ctx.Done():
+									idleTimer.Stop() // 清理资源
+									return
+								}
 								continue
 							}
 							atomic.AddInt32(&emptyPollers, 1) // 登记为一个空载探子
@@ -921,7 +984,14 @@ func init() {
 								break
 							}
 
-							time.Sleep(300 * time.Millisecond)
+							idleTimer.Reset(300 * time.Millisecond)
+							select {
+							case <-idleTimer.C:
+								// 等待完成
+							case <-ctx.Done():
+								idleTimer.Stop() // 清理资源
+								return
+							}
 							continue
 						}
 
@@ -962,7 +1032,14 @@ func init() {
 								break
 							}
 
-							time.Sleep(1 * time.Second)
+							idleTimer.Reset(1 * time.Second)
+							select {
+							case <-idleTimer.C:
+								// 等待完成
+							case <-ctx.Done():
+								idleTimer.Stop() // 清理资源
+								return
+							}
 							continue
 						}
 
@@ -991,7 +1068,15 @@ func init() {
 							dispatchSeq = atomic.LoadUint64(&ackedByServer)
 							windowMu.Unlock()
 							atomic.StoreInt32(&triggerRetry, 1)
-							time.Sleep(300 * time.Millisecond)
+
+							idleTimer.Reset(300 * time.Millisecond)
+							select {
+							case <-idleTimer.C:
+								// 等待完成
+							case <-ctx.Done():
+								idleTimer.Stop() // 清理资源
+								return
+							}
 							continue
 						}
 
@@ -1008,7 +1093,15 @@ func init() {
 
 						// 智能退避：如果双向都没有数据流动，才进行休眠
 						if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
-							time.Sleep(50 * time.Millisecond)
+
+							idleTimer.Reset(50 * time.Millisecond)
+							select {
+							case <-idleTimer.C:
+								// 等待完成
+							case <-ctx.Done():
+								idleTimer.Stop() // 清理资源
+								return
+							}
 						}
 					}
 				}()
