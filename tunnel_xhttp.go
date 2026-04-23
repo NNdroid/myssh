@@ -25,6 +25,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
+	"go.uber.org/zap"
 )
 
 const (
@@ -347,6 +348,8 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 		if padLenInt < 0 {
 			padLenInt = mrand.IntN(256)
 		}
+	} else if chunkSize > 1024 * 100 {// 當封包大於 100KB 時，豁免 Padding
+		padLenInt = 0
 	} else {
 		padLenInt = 16 + mrand.IntN(112)
 	}
@@ -613,6 +616,7 @@ func init() {
 				if err != nil {
 					return nil, fmt.Errorf("probe tcp failed: %w", err)
 				}
+				TuneTCPConn(tcpConn)
 
 				// 剔除 h3，准备 uTLS 握手
 				tcpAlpns := slices.DeleteFunc(slices.Clone(alpnList), func(s string) bool { return s == "h3" })
@@ -669,6 +673,7 @@ func init() {
 					if err != nil {
 						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
+					TuneTCPConn(tc)
 
 					uc, np, err := handshakeUTLS(ctx, tc)
 					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
@@ -867,6 +872,11 @@ func init() {
 							// 归还pool
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr) // 假设 xhttpBufPool 在全局可用
+							}
+							
+							if ctx.Err() != nil {
+								zlog.Debug("🛑 [Pump] 收到 Context 取消信號，Worker 退出", zap.Int("worker", i))
+								break 
 							}
 
 							zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)

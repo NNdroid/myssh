@@ -190,6 +190,7 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 			return nil, err
 		}
 		zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
+		TuneTCPConn(baseConn)
 	case "udp":
 		zlog.Infof("%s [Tunnel] ⚡ 检测到 UDP 需求，已跳过常规 TCP 拨号", TAG)
 		baseConn = nil

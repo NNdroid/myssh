@@ -48,6 +48,8 @@ var (
 	// 填充池
 	padPool    []byte
 	padPoolLen = 64 * 1000
+	// tcp
+	tcpOptimizeBufferSize = 4 * 1024 * 1024
 )
 
 func init() {
@@ -132,4 +134,29 @@ func (c *DumpConn) Write(b []byte) (int, error) {
 		zlog.Debugf("\n--- [%s] ⬆️ 发送 %d 字节 ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
 	}
 	return n, err
+}
+
+// TuneTCPConn 針對 TCP 連線進行底層 Socket 最佳化
+// 1. 關閉 Nagle 演算法 (SetNoDelay) 以保證極低延遲 (適用於 SSH/即時指令)
+// 2. 擴大作業系統讀寫緩衝區至 4MB，以適應跨國高 BDP (頻寬延遲乘積) 網路
+func TuneTCPConn(conn net.Conn) {
+	// 嘗試將 net.Conn 轉型為底層的 *net.TCPConn
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		// 關閉 Nagle 演算法
+		if err := tcpConn.SetNoDelay(true); err != nil {
+			zlog.Warnf("%s [TCP Tune] 無法設定 NoDelay: %v", TAG, err)
+		}
+
+		// 設定讀取緩衝區
+		if err := tcpConn.SetReadBuffer(tcpOptimizeBufferSize); err != nil {
+			zlog.Warnf("%s [TCP Tune] 無法設定 ReadBuffer: %v", TAG, err)
+		}
+
+		// 設定寫入緩衝區
+		if err := tcpConn.SetWriteBuffer(tcpOptimizeBufferSize); err != nil {
+			zlog.Warnf("%s [TCP Tune] 無法設定 WriteBuffer: %v", TAG, err)
+		}
+		
+		zlog.Debugf("%s [TCP Tune] 已成功套用 Socket 最佳化 (4MB Buffer, NoDelay)", TAG)
+	}
 }
