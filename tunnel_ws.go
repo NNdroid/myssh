@@ -50,8 +50,8 @@ func init() {
 		if isWSS {
 			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				utlsConfig := &utls.Config{
-					ServerName: cfg.ServerName, 
-					InsecureSkipVerify: true,
+					ServerName:            cfg.ServerName,
+					InsecureSkipVerify:    true,
 					VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 				}
 				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)

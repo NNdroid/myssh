@@ -246,9 +246,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		mu.Unlock()
 
 		if client == nil {
-			if Debug {
-				zlog.Debug("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
-			}
+			zlog.Debug("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
 			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 			rep.WriteTo(c)
 			return fmt.Errorf("ssh client is currently reconnecting")
@@ -480,9 +478,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 命中代理规则，判断是否配置了 UDPGW
 	// ==========================================
 	if h.UdpgwAddr == "" {
-		if Debug {
-			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
-		}
+		zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
 		return nil
 	}
 
@@ -497,9 +493,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		mu.Unlock()
 
 		if client == nil {
-			if Debug {
-				zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
-			}
+			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
 			return fmt.Errorf("ssh client not ready")
 		}
 

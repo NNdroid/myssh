@@ -171,9 +171,9 @@ func init() {
 			// 这里的 ctx 是由 http2.Transport 在拨号时传入的，它已经自动继承了上面的 reqCtx
 			transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
 				utlsConfig := &utls.Config{
-					ServerName:         cfg.ServerName,
-					InsecureSkipVerify: true,
-					NextProtos:         []string{"h2", "http/1.1"},
+					ServerName:            cfg.ServerName,
+					InsecureSkipVerify:    true,
+					NextProtos:            []string{"h2", "http/1.1"},
 					VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 				}
 				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)

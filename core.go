@@ -14,11 +14,10 @@ import (
 	"sync"
 )
 
-
 var (
-	Version = "dev"
+	Version  = "dev"
 	DebugStr = "false"
-	Debug = false
+	Debug    = false
 	// 用于 TCP io.CopyBuffer 的 64KB 缓冲池
 	tcpBufPool = sync.Pool{
 		New: func() interface{} {
@@ -53,8 +52,8 @@ var (
 
 func init() {
 	if DebugStr == "true" {
-        Debug = true
-    }
+		Debug = true
+	}
 	// 随机填充池初始化
 	padPool = make([]byte, padPoolLen)
 	io.ReadFull(rand.Reader, padPool)
@@ -79,7 +78,7 @@ func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) fu
 		if len(rawCerts) == 0 {
 			return errors.New("no certificates presented by peer")
 		}
-		
+
 		// 无论是否开启验证，都先计算并打印实际的证书指纹，方便用户查看
 		sha256Sum := sha256.Sum256(rawCerts[0])
 		var actualFPBuilder strings.Builder
@@ -90,7 +89,7 @@ func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) fu
 			fmt.Fprintf(&actualFPBuilder, "%02X", b)
 		}
 		actualFingerprint := actualFPBuilder.String()
-		
+
 		// 只要有握手，就打出这个日志
 		zlog.Infof("%s [Tunnel] 实际证书指纹: %s", TAG, actualFingerprint)
 
@@ -108,7 +107,7 @@ func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) fu
 			zlog.Errorf("%s [Tunnel] ❌ 证书指纹不匹配！期望: %s, 实际: %s", TAG, expectedFingerprint, actualFingerprint)
 			return fmt.Errorf("fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFingerprint)
 		}
-		
+
 		zlog.Infof("%s [Tunnel] ✅ 证书指纹校验通过！", TAG)
 		return nil
 	}

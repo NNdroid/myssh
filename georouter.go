@@ -195,14 +195,10 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	ip := net.ParseIP(host)
 	if ip != nil {
 		if r.MatchIP(ip) {
-			if Debug {
-				zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
-			}
+			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
 			return RouteResult{IsDirect: true, DialHost: host}
 		}
-		if Debug {
-			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 未命中 GeoIP，走代理", TAG, host)
-		}
+		zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 未命中 GeoIP，走代理", TAG, host)
 		return RouteResult{IsDirect: false, DialHost: host}
 	}
 
@@ -210,14 +206,10 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	if r.MatchDomain(host) {
 		ips := GetCachedIPs(host)
 		if len(ips) > 0 {
-			if Debug {
-				zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 使用缓存 IP (%s) 走直连", TAG, host, ips[0].String())
-			}
+			zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 使用缓存 IP (%s) 走直连", TAG, host, ips[0].String())
 			return RouteResult{IsDirect: true, DialHost: ips[0].String()}
 		}
-		if Debug {
-			zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 无缓存 IP，保留域名走直连", TAG, host)
-		}
+		zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 无缓存 IP，保留域名走直连", TAG, host)
 		return RouteResult{IsDirect: true, DialHost: host}
 	}
 
@@ -232,17 +224,13 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	for _, resolvedIP := range ips {
 		if r.MatchIP(resolvedIP) {
-			if Debug {
-				zlog.Debugf("%s [Router] 域名 [%s] 解析的 IP (%s) 命中 GeoIP -> 走直连", TAG, host, resolvedIP.String())
-			}
+			zlog.Debugf("%s [Router] 域名 [%s] 解析的 IP (%s) 命中 GeoIP -> 走直连", TAG, host, resolvedIP.String())
 			return RouteResult{IsDirect: true, DialHost: resolvedIP.String()}
 		}
 	}
 
 	// 走代理 (未命中直连规则)
-	if Debug {
-		zlog.Debugf("%s [Router] 域名 [%s] 未命中任何直连规则 -> 走代理", TAG, host)
-	}
+	zlog.Debugf("%s [Router] 域名 [%s] 未命中任何直连规则 -> 走代理", TAG, host)
 	return RouteResult{IsDirect: false, DialHost: host}
 }
 
