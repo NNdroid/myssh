@@ -195,25 +195,33 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	ip := net.ParseIP(host)
 	if ip != nil {
 		if r.MatchIP(ip) {
-			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
+			if Debug {
+				zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
+			}
 			return RouteResult{IsDirect: true, DialHost: host}
 		}
-		zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 未命中 GeoIP，走代理", TAG, host)
+		if Debug {
+			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 未命中 GeoIP，走代理", TAG, host)
+		}
 		return RouteResult{IsDirect: false, DialHost: host}
 	}
 
-	// 1. 走 GeoSite (域名规则) 匹配
+	// 走 GeoSite (域名规则) 匹配
 	if r.MatchDomain(host) {
 		ips := GetCachedIPs(host)
 		if len(ips) > 0 {
-			zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 使用缓存 IP (%s) 走直连", TAG, host, ips[0].String())
+			if Debug {
+				zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 使用缓存 IP (%s) 走直连", TAG, host, ips[0].String())
+			}
 			return RouteResult{IsDirect: true, DialHost: ips[0].String()}
 		}
-		zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 无缓存 IP，保留域名走直连", TAG, host)
+		if Debug {
+			zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 无缓存 IP，保留域名走直连", TAG, host)
+		}
 		return RouteResult{IsDirect: true, DialHost: host}
 	}
 
-	// 2. 查 GeoIP (IP 规则)
+	// 查 GeoIP (IP 规则)
 	ips := GetCachedIPs(host)
 	if len(ips) == 0 {
 		localIPs, err := net.LookupIP(host)
@@ -224,13 +232,17 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	for _, resolvedIP := range ips {
 		if r.MatchIP(resolvedIP) {
-			zlog.Debugf("%s [Router] 域名 [%s] 解析的 IP (%s) 命中 GeoIP -> 走直连", TAG, host, resolvedIP.String())
+			if Debug {
+				zlog.Debugf("%s [Router] 域名 [%s] 解析的 IP (%s) 命中 GeoIP -> 走直连", TAG, host, resolvedIP.String())
+			}
 			return RouteResult{IsDirect: true, DialHost: resolvedIP.String()}
 		}
 	}
 
-	// 3. 走代理 (未命中直连规则)
-	zlog.Debugf("%s [Router] 域名 [%s] 未命中任何直连规则 -> 走代理", TAG, host)
+	// 走代理 (未命中直连规则)
+	if Debug {
+		zlog.Debugf("%s [Router] 域名 [%s] 未命中任何直连规则 -> 走代理", TAG, host)
+	}
 	return RouteResult{IsDirect: false, DialHost: host}
 }
 
@@ -238,12 +250,12 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 func (r *GeoRouter) MatchDomain(domain string) bool {
 	domain = strings.ToLower(domain)
 
-	// 1. Full 检查
+	// Full 检查
 	if _, ok := r.fullDomains[domain]; ok {
 		return true
 	}
 
-	// 2. Domain 检查
+	// Domain 检查
 	parts := strings.Split(domain, ".")
 	for i := 0; i < len(parts); i++ {
 		sub := strings.Join(parts[i:], ".")
@@ -252,14 +264,14 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 		}
 	}
 
-	// 3. Keyword 检查 - 按长度倒序优化匹配速度
+	// Keyword 检查 - 按长度倒序优化匹配速度
 	for _, kw := range r.keywordList {
 		if strings.Contains(domain, kw) {
 			return true
 		}
 	}
 
-	// 4. 🌟 使用合并的正则表达式 (大幅提升性能)
+	// 合并的正则表达式
 	if r.regexCombined != nil && r.regexCombined.MatchString(domain) {
 		return true
 	}

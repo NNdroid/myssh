@@ -98,7 +98,9 @@ func evictDNSCacheLocked() {
 	}
 
 	if deleted > 0 {
-		zlog.Debugf("%s [Cache-GC] ♻️ 清理/驱逐了 %d 条 DNS 缓存，当前余量: %d", TAG, deleted, len(dnsCache))
+		if Debug {
+			zlog.Debugf("%s [Cache-GC] ♻️ 清理/驱逐了 %d 条 DNS 缓存，当前余量: %d", TAG, deleted, len(dnsCache))
+		}
 	}
 }
 
@@ -498,6 +500,9 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 // ==================== 辅助打印与获取接口 ====================
 
 func printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Msg) {
+	if !Debug {
+		return
+	}
 	if reply == nil {
 		return
 	}

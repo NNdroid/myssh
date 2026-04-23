@@ -39,7 +39,7 @@ fi
 
 go mod tidy
 # 正式版
-LDFLAGS="-s -w -X 'myssh.Version=$VERSION'"
+LDFLAGS="-s -w -X 'myssh.Version=$VERSION' -X 'myssh.DebugStr=false'"
 echo "📦 正在编译并打包至 $RELEASE_OUTPUT_PATH ..."
 # 在 Git Bash 等环境中，相对路径 "../../libs" 能被原生的 gomobile.exe 完美识别
 gomobile bind -v -target=android -androidapi 28 -ldflags="$LDFLAGS" -trimpath -o "$RELEASE_OUTPUT_PATH" "$GO_SRC_DIR"
@@ -53,7 +53,7 @@ else
 fi
 
 # 临时调试版本
-LDFLAGS="-X 'myssh.Version=$VERSION'"
+LDFLAGS="-X 'myssh.Version=$VERSION' -X 'myssh.DebugStr=true'"
 echo "📦 正在编译带调试符号的版本..."
 gomobile bind -v -target=android -androidapi 28 -ldflags="$LDFLAGS" -o "$DEBUG_OUTPUT_PATH" "$GO_SRC_DIR"
 

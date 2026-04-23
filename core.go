@@ -5,14 +5,20 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 )
 
+
 var (
+	Version = "dev"
+	DebugStr = "false"
+	Debug = false
 	// 用于 TCP io.CopyBuffer 的 64KB 缓冲池
 	tcpBufPool = sync.Pool{
 		New: func() interface{} {
@@ -46,6 +52,9 @@ var (
 )
 
 func init() {
+	if DebugStr == "true" {
+        Debug = true
+    }
 	// 随机填充池初始化
 	padPool = make([]byte, padPoolLen)
 	io.ReadFull(rand.Reader, padPool)
@@ -103,4 +112,25 @@ func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) fu
 		zlog.Infof("%s [Tunnel] ✅ 证书指纹校验通过！", TAG)
 		return nil
 	}
+}
+
+type DumpConn struct {
+	net.Conn
+	Prefix string
+}
+
+func (c *DumpConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		zlog.Debugf("\n--- [%s] ⬇️ 读取 %d 字节 ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
+	}
+	return n, err
+}
+
+func (c *DumpConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		zlog.Debugf("\n--- [%s] ⬆️ 发送 %d 字节 ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
+	}
+	return n, err
 }

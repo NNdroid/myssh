@@ -198,7 +198,13 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		baseConn = nil
 	}
 
-	return proto.Handler(ctx, cfg, baseConn)
+	targetConn, err := proto.Handler(ctx, cfg, baseConn)
+	if err == nil {
+		if Debug {
+			targetConn = &DumpConn{Conn: targetConn, Prefix: "Client Local - Android"}
+		}
+	}
+	return targetConn, err
 }
 
 // ----- SOCKS5 代理处理器 -----
@@ -240,7 +246,9 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		mu.Unlock()
 
 		if client == nil {
-			zlog.Debug("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
+			if Debug {
+				zlog.Debug("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
+			}
 			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 			rep.WriteTo(c)
 			return fmt.Errorf("ssh client is currently reconnecting")
@@ -472,7 +480,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 命中代理规则，判断是否配置了 UDPGW
 	// ==========================================
 	if h.UdpgwAddr == "" {
-		zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+		if Debug {
+			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+		}
 		return nil
 	}
 
@@ -487,7 +497,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		mu.Unlock()
 
 		if client == nil {
-			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+			if Debug {
+				zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+			}
 			return fmt.Errorf("ssh client not ready")
 		}
 
