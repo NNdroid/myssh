@@ -39,9 +39,10 @@ func getWTSession(ctx context.Context, cfg ProxyConfig, reqUrl string) (*webtran
 	zlog.Infof("%s [Tunnel] ⚡ 正在建立底层 WebTransport 全新会话...", TAG)
 
 	tlsConf := &tls.Config{
-		ServerName:         cfg.ServerName,
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"h3"},
+		ServerName:            cfg.ServerName,
+		InsecureSkipVerify:    true,
+		NextProtos:            []string{"h3"},
+		VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 	}
 
 	// 防断流 QUIC 配置

@@ -30,8 +30,8 @@ type ProxyConfig struct {
 	PrivateKey                   string `json:"private_key"`
 	PrivateKeyPassphrase         string `json:"private_key_passphrase"`
 	Pass                         string `json:"pass"`
-	VerifySSHFingerprint         bool   `json:"verify_finger_print"`
-	ServerSSHFingerprint         string `json:"server_finger_print"`
+	VerifySSHFingerprint         bool   `json:"verify_ssh_finger_print"`
+	ServerSSHFingerprint         string `json:"server_ssh_finger_print"`
 	TunnelType                   string `json:"tunnel_type"`
 	ProxyAddr                    string `json:"proxy_addr"`
 	ProxyAuthRequired            bool   `json:"proxy_auth_required"`

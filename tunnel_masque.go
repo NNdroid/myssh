@@ -79,7 +79,7 @@ func init() {
 		req.Header.Set("X-Accel-Buffering", "no")
 
 		// 获取复用客户端
-		client := getH3Client(cfg.ProxyAddr, cfg.ServerName)
+		client := getH3Client(cfg.ProxyAddr, cfg.ServerName, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
 
 		respChan := make(chan *http.Response, 1)
 		errChan := make(chan error, 1)

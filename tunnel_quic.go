@@ -16,13 +16,13 @@ type quicNetConn struct {
 	conn *quic.Conn
 }
 
-func (q *quicNetConn) LocalAddr() net.Addr  { return q.conn.LocalAddr() }
-func (q *quicNetConn) RemoteAddr() net.Addr { return q.conn.RemoteAddr() }
+func (q *quicNetConn) LocalAddr() net.Addr  { return (*q.conn).LocalAddr() }
+func (q *quicNetConn) RemoteAddr() net.Addr { return (*q.conn).RemoteAddr() }
 func (q *quicNetConn) Close() error {
 	// 先关闭双向数据流
 	q.Stream.Close()
 	// 随后关闭整个 QUIC 连接以释放底层的 UDP 资源
-	return q.conn.CloseWithError(0, "tunnel closed by client")
+	return (*q.conn).CloseWithError(0, "tunnel closed by client")
 }
 
 func init() {
@@ -32,9 +32,10 @@ func init() {
 		zlog.Infof("%s [Tunnel] 准备进行 QUIC (UDP) 握手, 目标: %s, 伪装 SNI: %s", TAG, cfg.ProxyAddr, cfg.ServerName)
 
 		tlsConf := &tls.Config{
-			ServerName:         cfg.ServerName,
-			InsecureSkipVerify: true,
-			NextProtos:         []string{"h3"}, // ALPN 强行伪装为 HTTP/3 流量
+			ServerName:            cfg.ServerName,
+			InsecureSkipVerify:    true,
+			NextProtos:            []string{"h3"}, // ALPN 强行伪装为 HTTP/3 流量
+			VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 		}
 
 		quicConfig := &quic.Config{
@@ -47,7 +48,7 @@ func init() {
 		dialCtx, cancel := context.WithTimeout(parentCtx, 10*time.Second)
 		defer cancel()
 
-		conn, err := quic.DialAddr(dialCtx, cfg.ProxyAddr, tlsConf, quicConfig)
+		conn, err := quic.DialAddrEarly(dialCtx, cfg.ProxyAddr, tlsConf, quicConfig)
 		if err != nil {
 			zlog.Errorf("%s [Tunnel] ❌ QUIC 连接失败: %v", TAG, err)
 			return nil, err

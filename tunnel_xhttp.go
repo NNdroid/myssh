@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
@@ -29,7 +28,7 @@ import (
 )
 
 const (
-	xhttpHeaderSize     = 6   // 头部固定 6 字节 (4字节长度 + 2字节Padding长度)
+	xhttpHeaderSize     = 6     // 头部固定 6 字节 (4字节长度 + 2字节Padding长度)
 	xhttpMaxPaddingSize = 65535 // 最大 padding
 )
 
@@ -180,13 +179,13 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 	for c.readBuf.Len() == 0 && !c.closed {
 		c.readCond.Wait() // 等待唤醒
 	}
-    
+
 	// 醒来后第一时间检查是否是因为上下文取消或被 Close 唤醒的
 	if c.ctx.Err() != nil || c.closed {
 		c.closed = true
 		return 0, io.EOF
 	}
-	
+
 	// 正常读取数据
 	n, err := c.readBuf.Read(p)
 
@@ -197,7 +196,7 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 	if c.readBuf.Len() == 0 && c.readBuf.Cap() > 1024*1024 {
 		// 直接赋予一个全新的空 Buffer。
 		// 这样一来，原来那个长达 1MB+ 的底层数组失去了引用，会被 Go 的 GC 迅速回收，释放系统内存。
-		c.readBuf = bytes.Buffer{} 
+		c.readBuf = bytes.Buffer{}
 	}
 
 	return n, err
@@ -205,8 +204,8 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 
 func (c *meekVirtualConn) Write(p []byte) (int, error) {
 	if c.closed {
-			return 0, io.ErrClosedPipe
-		}
+		return 0, io.ErrClosedPipe
+	}
 	return c.writeBuf.Write(p)
 }
 
@@ -236,7 +235,7 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 			// 序號太新了，先存進 map
 			// 序列号跨度过大（例如超过了 5MB 的数据量），视为无效包/恶意包，直接抛弃
 			// 假设你的一般包大小为 100KB，跨度超过 50 个包的距离就没必要缓存了
-			if seq - c.nextReadSeq > 5 * 1024 * 1024 { 
+			if seq-c.nextReadSeq > 5*1024*1024 {
 				return c.nextReadSeq // 丢弃不合理的未来包
 			}
 
@@ -275,12 +274,12 @@ func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 // 当池子为空时，根据传入的 defaultSize 动态分配内存，完美支持多尺寸复用
 func getBufFromPool(pool *sync.Pool, defaultSize int) *[]byte {
 	obj := pool.Get()
-	
+
 	if obj == nil {
 		b := make([]byte, defaultSize)
 		return &b
 	}
-	
+
 	return obj.(*[]byte)
 }
 
@@ -303,13 +302,13 @@ type xhttpFramedConn struct {
 func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, remote net.Addr) *xhttpFramedConn {
 	// 最大的 Payload + 最大的 Padding + 6字节头部
 	fBufPtr := getBufFromPool(&xhttpBufPool, xhttpMaxframeSize)
-	
+
 	pBufPtr := getBufFromPool(&xhttpBufPool, xhttpMaxsendBufSize)
 
 	conn := &xhttpFramedConn{
 		r: r, w: w, closer: closer, local: local, remote: remote,
-		frameBufPtr:  fBufPtr,
-		hdrBuf: make([]byte, 6), 
+		frameBufPtr:   fBufPtr,
+		hdrBuf:        make([]byte, 6),
 		payloadBufPtr: pBufPtr,
 		closeCh:       make(chan struct{}),
 		lastWriteTime: time.Now().Unix(),
@@ -528,112 +527,6 @@ func generateRandomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// VerifyAndHandshakeUTLS 执行 uTLS 握手并校验首个证书的 SHA-256 指纹
-// expectedFingerprint 格式示例: "EE:21:43:..." (不区分大小写，支持冒号或空格分隔)
-func VerifyAndHandshakeUTLS(ctx context.Context, tcpConn net.Conn, utlsConfig *utls.Config, tcpAlpns []string, verifyFingerprint bool, expectedFingerprint string) (*utls.UConn, string, string, error) {
-
-	uConn := utls.UClient(tcpConn, utlsConfig, utls.HelloChrome_Auto)
-
-	// 1. 提前构建握手状态
-	if err := uConn.BuildHandshakeState(); err != nil {
-		tcpConn.Close()
-		return nil, "", "", fmt.Errorf("utls build handshake state failed: %w", err)
-	}
-
-	// 2. 修改 ALPN 扩展
-	for _, ext := range uConn.Extensions {
-		if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
-			alpnExt.AlpnProtocols = tcpAlpns
-			break
-		}
-	}
-
-	// 3. 执行握手
-	if err := uConn.HandshakeContext(ctx); err != nil {
-		tcpConn.Close()
-		return nil, "", "", fmt.Errorf("utls handshake failed: %w", err)
-	}
-
-	// 4. 获取连接状态并校验指纹
-	state := uConn.ConnectionState()
-	certs := state.PeerCertificates
-
-	if len(certs) == 0 {
-		uConn.Close()
-		return nil, "", "", fmt.Errorf("no certificates presented by peer")
-	}
-
-	negotiatedProtocol := state.NegotiatedProtocol
-
-	// 计算当前证书指纹
-	leafCert := certs[0]
-	sha256Sum := sha256.Sum256(leafCert.Raw)
-	actualFingerprint := fmt.Sprintf("%02X", sha256Sum[0])
-	for i := 1; i < len(sha256Sum); i++ {
-		actualFingerprint += ":" + fmt.Sprintf("%02X", sha256Sum[i])
-	}
-
-	// 如果传入了指纹限制，则进行比对
-	if verifyFingerprint {
-		// 标准化处理：转大写并移除常见的冒号/空格
-		cleanExpected := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(expectedFingerprint, ":", ""), " ", ""))
-		cleanActual := strings.ReplaceAll(actualFingerprint, ":", "")
-
-		if cleanExpected != cleanActual {
-			uConn.Close()
-			return nil, negotiatedProtocol, actualFingerprint, fmt.Errorf("TLS certificate fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFingerprint)
-		}
-	}
-	return uConn, negotiatedProtocol, actualFingerprint, nil
-}
-
-func VerifyAndHandshakeQUIC(ctx context.Context, addr string, tlsCfg *tls.Config, quicCfg *quic.Config, verifyFingerprint bool, expectedFingerprint string) (*quic.Conn, string, error) {
-	// 使用 DialAddrEarly 以支持 0-RTT（如果服务器支持）
-	conn, err := quic.DialAddrEarly(ctx, addr, tlsCfg, quicCfg)
-	if err != nil {
-		return nil, "", fmt.Errorf("quic dial failed: %w", err)
-	}
-
-	select {
-	case <-conn.HandshakeComplete():
-	case <-ctx.Done():
-		conn.CloseWithError(0, "timeout")
-		return nil, "", ctx.Err()
-	}
-
-	// 提取证书并校验指纹
-	cs := conn.ConnectionState()
-	certs := cs.TLS.PeerCertificates
-	if len(certs) == 0 {
-		conn.CloseWithError(0, "no_certs")
-		return nil, "", fmt.Errorf("server provided no certificates")
-	}
-
-	// 计算实际指纹
-	sha256Sum := sha256.Sum256(certs[0].Raw)
-	var actualFPBuilder strings.Builder
-	for i, b := range sha256Sum {
-		if i > 0 {
-			actualFPBuilder.WriteString(":")
-		}
-		fmt.Fprintf(&actualFPBuilder, "%02X", b)
-	}
-	actualFP := actualFPBuilder.String()
-
-	// 比对指纹
-	if verifyFingerprint {
-		cleanExpected := strings.ToUpper(strings.ReplaceAll(expectedFingerprint, ":", ""))
-		cleanActual := strings.ReplaceAll(actualFP, ":", "")
-
-		if cleanExpected != cleanActual {
-			conn.CloseWithError(0, "fingerprint_mismatch")
-			return nil, actualFP, fmt.Errorf("fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFP)
-		}
-	}
-
-	return conn, actualFP, nil
-}
-
 // ==========================================
 // 注册
 // ==========================================
@@ -659,13 +552,13 @@ func init() {
 
 		var client *http.Client
 		var negotiatedProtocol string
-		var certificateFingerprint string
 		var err error
 		var cleanupFuncs []func() // 存放必须在隧道关闭时释放的资源（防泄露）
 
 		baseTlsConf := &tls.Config{
-			ServerName:         cfg.ServerName,
-			InsecureSkipVerify: true,
+			ServerName:            cfg.ServerName,
+			InsecureSkipVerify:    true,
+			VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 		}
 
 		if isTLS {
@@ -679,7 +572,7 @@ func init() {
 				h3TlsConf.NextProtos = []string{"h3"}
 
 				var probeH3Conn *quic.Conn
-				probeH3Conn, certificateFingerprint, err = VerifyAndHandshakeQUIC(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
+				probeH3Conn, err = quic.DialAddrEarly(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf)
 				h3Cancel()
 
 				if err == nil {
@@ -688,16 +581,12 @@ func init() {
 						(*probeH3Conn).CloseWithError(0, "probe_done")
 					}
 
-					zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, certificateFingerprint)
 					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)", TAG)
 					negotiatedProtocol = "h3"
 
 					tr3 := &http3.Transport{
 						TLSClientConfig: h3TlsConf,
-						Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, quicCfg *quic.Config) (*quic.Conn, error) {
-							qc, _, err := VerifyAndHandshakeQUIC(ctx, addr, tlsCfg, quicCfg, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
-							return qc, err
-						},
+						Dial:            quic.DialAddrEarly,
 					}
 					client = &http.Client{
 						Transport: tr3,
@@ -718,8 +607,9 @@ func init() {
 			// 2. TCP ALPN 探测 (h2 / http/1.1)
 			// ==========================================
 			if client == nil {
+				var tcpConn net.Conn
 				var d net.Dialer
-				tcpConn, err := d.DialContext(parentCtx, "tcp", cfg.ProxyAddr)
+				tcpConn, err = d.DialContext(parentCtx, "tcp", cfg.ProxyAddr)
 				if err != nil {
 					return nil, fmt.Errorf("probe tcp failed: %w", err)
 				}
@@ -727,15 +617,31 @@ func init() {
 				// 剔除 h3，准备 uTLS 握手
 				tcpAlpns := slices.DeleteFunc(slices.Clone(alpnList), func(s string) bool { return s == "h3" })
 				utlsConfig := &utls.Config{
-					ServerName:         cfg.ServerName,
-					InsecureSkipVerify: true,
-					NextProtos:         tcpAlpns,
+					ServerName:            baseTlsConf.ServerName,
+					InsecureSkipVerify:    baseTlsConf.InsecureSkipVerify,
+					VerifyPeerCertificate: baseTlsConf.VerifyPeerCertificate,
+					NextProtos:            tcpAlpns,
+				}
+
+				handshakeUTLS := func(ctx context.Context, conn net.Conn) (*utls.UConn, string, error) {
+					uConn := utls.UClient(conn, utlsConfig, utls.HelloChrome_Auto)
+					if err := uConn.BuildHandshakeState(); err != nil {
+						return nil, "", fmt.Errorf("utls build handshake state failed: %w", err)
+					}
+					for _, ext := range uConn.Extensions {
+						if alpnExt, ok := ext.(*utls.ALPNExtension); ok {
+							alpnExt.AlpnProtocols = tcpAlpns
+							break
+						}
+					}
+					if err := uConn.HandshakeContext(ctx); err != nil {
+						return nil, "", fmt.Errorf("utls handshake failed: %w", err)
+					}
+					return uConn, uConn.ConnectionState().NegotiatedProtocol, nil
 				}
 
 				var uConn *utls.UConn
-				uConn, negotiatedProtocol, certificateFingerprint, err = VerifyAndHandshakeUTLS(parentCtx, tcpConn, utlsConfig, tcpAlpns, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
-
-				zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, certificateFingerprint)
+				uConn, negotiatedProtocol, err = handshakeUTLS(parentCtx, tcpConn)
 				zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, negotiatedProtocol)
 
 				if err != nil {
@@ -764,8 +670,7 @@ func init() {
 						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
 
-					uc, np, cf, err := VerifyAndHandshakeUTLS(ctx, tc, utlsConfig, tcpAlpns, cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint)
-					zlog.Infof("%s [Tunnel] 证书指纹: %s", TAG, cf)
+					uc, np, err := handshakeUTLS(ctx, tc)
 					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
 
 					if err != nil {

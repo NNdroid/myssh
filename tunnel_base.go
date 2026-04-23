@@ -18,25 +18,26 @@ func init() {
 		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 SNI: %s", TAG, cfg.ServerName)
 
 		utlsConfig := &utls.Config{
-			ServerName:         cfg.ServerName,
-			InsecureSkipVerify: true,
+			ServerName:            cfg.ServerName,
+			InsecureSkipVerify:    true,
+			VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 		}
 
-		tlsConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ TLS 握手失败: %v", TAG, err)
+		uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
+		if err := uConn.HandshakeContext(ctx); err != nil {
+			zlog.Errorf("%s [Tunnel] ❌ TLS 连接失败: %v", TAG, err)
 			return nil, err
 		}
-		zlog.Infof("%s [Tunnel] ✅ TLS (utls) 握手成功", TAG)
+
+		zlog.Infof("%s [Tunnel] ✅ TLS 握手成功", TAG)
 
 		go func() {
 			<-ctx.Done()
-			if tlsConn != nil {
-				tlsConn.Close()
+			if uConn != nil {
+				uConn.Close()
 			}
 		}()
 
-		return tlsConn, nil
+		return uConn, nil
 	})
 }

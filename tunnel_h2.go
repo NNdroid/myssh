@@ -174,6 +174,7 @@ func init() {
 					ServerName:         cfg.ServerName,
 					InsecureSkipVerify: true,
 					NextProtos:         []string{"h2", "http/1.1"},
+					VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 				}
 				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
 				if err := uConn.HandshakeContext(ctx); err != nil {
