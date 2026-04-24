@@ -142,9 +142,11 @@ func init() {
 
 		zlog.Debugf("%s [Tunnel] ⚡ 已分配新的 WT 虚拟流通道", TAG)
 
-		return &wtConn{
+		rConn := &wtConn{
 			Stream:     stream,
 			remoteAddr: cfg.ProxyAddr,
-		}, nil
+		}
+		
+		return WrapWithPadding(rConn), nil
 	})
 }

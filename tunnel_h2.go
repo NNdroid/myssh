@@ -225,17 +225,19 @@ func init() {
 				respBody: resp.Body,
 				cancel:   cancel,
 			}
+			
+			var rConn net.Conn = sConn
 
 			// 🌟 如果是 gRPC，给这个连接套上数据帧封包器
 			if isGRPC {
-				return &grpcConn{
+				rConn = &grpcConn{
 					Conn: sConn,
 					gw:   &grpcWriter{w: sConn},
 					gr:   &grpcReader{r: sConn},
-				}, nil
+				}
 			}
 
-			return sConn, nil
+			return WrapWithPadding(rConn), nil
 
 		case <-time.After(15 * time.Second):
 			cancel()

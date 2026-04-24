@@ -115,12 +115,14 @@ func init() {
 			}
 			zlog.Infof("%s [Tunnel] ✅ MASQUE TCP 隧道握手成功，底层双向流已建立", TAG)
 
-			return &h3Conn{
+			rConn := &h3Conn{
 				remoteAddr: cfg.ProxyAddr,
 				pw:         pw,
 				respBody:   resp.Body,
 				cancel:     cancel,
-			}, nil
+			}
+
+			return WrapWithPadding(rConn), nil
 		case <-time.After(15 * time.Second):
 			cancel()
 			zlog.Errorf("%s [Tunnel] ❌ MASQUE 握手超时", TAG)

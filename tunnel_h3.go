@@ -210,12 +210,14 @@ func init() {
 			}
 			zlog.Infof("%s [Tunnel] ✅ HTTP/3 隧道握手成功，底层数据流已就绪", TAG)
 
-			return &h3Conn{
+			rConn := &h3Conn{
 				remoteAddr: cfg.ProxyAddr,
 				pw:         pw,
 				respBody:   resp.Body,
 				cancel:     cancel, // 赋值给 Close 方法去调用
-			}, nil
+			}
+
+			return WrapWithPadding(rConn), nil
 		case <-time.After(15 * time.Second):
 			cancel() // 如果 15 秒了连首字节都没收到，果断取消并抛错
 			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 握手超时 (疑似遭遇 UDP 阻断)", TAG)
