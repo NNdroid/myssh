@@ -33,7 +33,9 @@ func nextConID() uint16 {
 // Badvpn UDPGW 协议常量 (基于 udpgw.c 源码)
 const (
 	UDPGW_CLIENT_FLAG_KEEPALIVE = 0x01
-	UDPGW_CLIENT_FLAG_IPV6      = 0x04
+	UDPGW_CLIENT_FLAG_REBIND    = 0x02
+	UDPGW_CLIENT_FLAG_DNS       = 0x04
+	UDPGW_CLIENT_FLAG_IPV6      = 0x08
 )
 
 type BadvpnUdpgwConn struct {
@@ -63,6 +65,9 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 	if err != nil {
 		zlog.Errorf("%s [UDPGW-Dial] ❌ 解析目标地址失败 (%s): %v", TAG, remoteTarget, err)
 		return nil, fmt.Errorf("resolve error: %w", err)
+	}
+	if Debug {
+		zlog.Debugf("%s [UDPGW-Dial] Dialed IP: %s, isIPv6 resolved: %v", TAG, addr.IP, addr.IP.To4() == nil)
 	}
 
 	underlyingConn, err := sshClient.Dial("tcp", udpgwServerAddr)
@@ -130,7 +135,9 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 		// 构造心跳包: Flags(1) + ConID(2 小端)
 		hb := make([]byte, 3)
 		hb[0] = UDPGW_CLIENT_FLAG_KEEPALIVE
-		binary.LittleEndian.PutUint16(hb[1:], c.conID)
+		// binary.LittleEndian.PutUint16(hb[1:], c.conID)
+		// ConID 固定为 0，与 C 语言版客户端对齐
+		binary.LittleEndian.PutUint16(hb[1:], 0)
 
 		if Debug {
 			zlog.Debugf("%s [UDPGW-keepAliveLoop] 💓 发送 Keepalive (ID: %d)\n", TAG, c.conID)
