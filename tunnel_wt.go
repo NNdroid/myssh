@@ -146,7 +146,7 @@ func init() {
 			Stream:     stream,
 			remoteAddr: cfg.ProxyAddr,
 		}
-		
+
 		return WrapWithPadding(rConn), nil
 	})
 }

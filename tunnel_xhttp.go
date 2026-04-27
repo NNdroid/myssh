@@ -24,8 +24,8 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
-	"golang.org/x/net/http2"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 const (
@@ -348,7 +348,7 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 		if padLenInt < 0 {
 			padLenInt = mrand.IntN(256)
 		}
-	} else if chunkSize > 1024 * 100 {// 當封包大於 100KB 時，豁免 Padding
+	} else if chunkSize > 1024*100 { // 當封包大於 100KB 時，豁免 Padding
 		padLenInt = 0
 	} else {
 		padLenInt = 16 + mrand.IntN(112)
@@ -873,10 +873,10 @@ func init() {
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr) // 假设 xhttpBufPool 在全局可用
 							}
-							
+
 							if ctx.Err() != nil {
 								zlog.Debug("🛑 [Pump] 收到 Context 取消信號，Worker 退出", zap.Int("worker", i))
-								break 
+								break
 							}
 
 							zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)

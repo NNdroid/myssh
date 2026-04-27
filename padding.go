@@ -20,7 +20,6 @@ var paddingWritePool = sync.Pool{
 	},
 }
 
-
 func init() {
 	rand.Read(paddingGarbage[:])
 }
@@ -89,7 +88,7 @@ func (pw *PaddingWriter) Write(p []byte) (nTotal int, err error) {
 		}
 
 		// 智能计算 Padding 长度
-		padLen := calculatePadding(len(chunk)) 
+		padLen := calculatePadding(len(chunk))
 		totalLen := 6 + len(chunk) + padLen
 
 		// 🌟 核心优化：从全局池子里“借”一块内存，坚决不用 make
@@ -99,10 +98,10 @@ func (pw *PaddingWriter) Write(p []byte) (nTotal int, err error) {
 		// 写入 6 字节 Header
 		binary.BigEndian.PutUint32(buf[0:4], uint32(len(chunk)))
 		binary.BigEndian.PutUint16(buf[4:6], uint16(padLen))
-		
+
 		// 写入真实数据
 		copy(buf[6:], chunk)
-		
+
 		// 写入垃圾 Padding
 		if padLen > 0 {
 			copy(buf[6+len(chunk):], paddingGarbage[:padLen])
@@ -110,7 +109,7 @@ func (pw *PaddingWriter) Write(p []byte) (nTotal int, err error) {
 
 		// 🌟 提交给底层发送（切片截取到实际组装的 totalLen）
 		_, errW := pw.w.Write(buf[:totalLen])
-		
+
 		// 🌟 用完立刻“还”回池子，供其他并发连接复用
 		paddingWritePool.Put(bufPtr)
 
@@ -124,7 +123,7 @@ func (pw *PaddingWriter) Write(p []byte) (nTotal int, err error) {
 	return nTotal, nil
 }
 
-//傳遞關閉信號到底層 Writer
+// 傳遞關閉信號到底層 Writer
 func (pw *PaddingWriter) Close() error {
 	if closer, ok := pw.w.(io.Closer); ok {
 		return closer.Close()
@@ -172,7 +171,7 @@ func (pr *PaddingReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-//傳遞關閉信號到底層 Reader
+// 傳遞關閉信號到底層 Reader
 func (pr *PaddingReader) Close() error {
 	if closer, ok := pr.r.(io.Closer); ok {
 		return closer.Close()

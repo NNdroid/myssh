@@ -47,6 +47,8 @@ type ProxyConfig struct {
 	Alpn                         string `json:"alpn"`
 	VerifyCertificateFingerprint bool   `json:"verify_certificate_finger_print"`
 	ServerCertificateFingerprint string `json:"server_certificate_finger_print"`
+	DnsAddr                      string `json:"dns_addr"`
+	UdpgwVersion                 string `json:"udpgw_version"`
 }
 
 type GlobalConfig struct {
@@ -201,9 +203,9 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 
 	targetConn, err := proto.Handler(ctx, cfg, baseConn)
 	if err == nil {
-		if Debug {
-			targetConn = &DumpConn{Conn: targetConn, Prefix: "Client Local - Android"}
-		}
+		//if Debug {
+		//	targetConn = &DumpConn{Conn: targetConn, Prefix: "Client Local - Android"}
+		//}
 	}
 	return targetConn, err
 }
@@ -212,6 +214,7 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 
 type SshProxyHandler struct {
 	UdpgwAddr string
+	UdpgwVersion string
 }
 
 func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
@@ -336,48 +339,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 拦截 UDP 443 (QUIC) 强制客户端降级到 TCP
 	// ==========================================
 	if dstPort == 443 {
-		// 静默丢弃，不给客户端返回任何错误。
-		// 浏览器发送 QUIC 超时后会立刻 fallback 到 HTTPS/TCP 443。
 		if Debug {
 			zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
 		}
 		return nil
 	}
 
-	// 劫持UDP53端口的DNS查询
-	if dstPort == 53 {
-		reqMsg := new(dns.Msg)
-		if err := reqMsg.Unpack(d.Data); err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] ❌ 解析原生 DNS 数据包失败: %v", TAG, err)
-			return err
-		}
-
-		replyMsg, err := handleSshTcpDns(reqMsg)
-		if err != nil || replyMsg == nil {
-			return err
-		}
-
-		replyData, err := replyMsg.Pack()
-		if err != nil {
-			return err
-		}
-
-		outLen := 3 + 1 + len(d.DstAddr) + 2 + len(replyData)
-		outBufPtr := udpBufPool.Get().(*[]byte)
-		outBuf := *outBufPtr
-		if outLen <= cap(outBuf) {
-			outPkt := outBuf[:outLen]
-			outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
-			outPkt[3] = d.Atyp
-			copy(outPkt[4:], d.DstAddr)
-			copy(outPkt[4+len(d.DstAddr):], d.DstPort)
-			copy(outPkt[4+len(d.DstAddr)+2:], replyData)
-			_, err = s.UDPConn.WriteToUDP(outPkt, addr)
-		}
-		udpBufPool.Put(outBufPtr)
-		return err
-	}
-
+	// 提前解析目标地址
 	var targetHost string
 	switch d.Atyp {
 	case socks5.ATYPIPv4, socks5.ATYPIPv6:
@@ -389,8 +357,45 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			targetHost = "unknown_domain"
 		}
 	default:
-		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 未知地址类型", TAG)
+		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 未知地址类型: %v", TAG, d.Atyp)
 		return nil
+	}
+
+	targetAddrStr := net.JoinHostPort(targetHost, strconv.Itoa(int(dstPort)))
+
+	if Debug {
+		zlog.Debugf("%s [SOCKS5-UDP] 📨 收到上行数据 | 客户端: %s | 目标: %s | 长度: %d bytes", TAG, addr.String(), targetAddrStr, len(d.Data))
+	}
+
+	// 劫持 DNS
+	if dstPort == 53 {
+		isConfiguredDNS := strings.Contains(globalConfig.LocalDnsServer, targetAddrStr) ||
+			strings.Contains(globalConfig.RemoteDnsServer, targetAddrStr)
+
+		if !isConfiguredDNS {
+			if Debug {
+				zlog.Debugf("%s [SOCKS5-UDP] 🔍 触发 DNS 劫持 -> 目标: %s", TAG, targetAddrStr)
+			}
+			reqMsg := new(dns.Msg)
+			if err := reqMsg.Unpack(d.Data); err != nil {
+				zlog.Errorf("%s [SOCKS5-UDP] ❌ 解析原生 DNS 失败: %v", TAG, err)
+				return err
+			}
+
+			if localDnsServer != nil {
+				replyMsg, err := localDnsServer.HandleDnsRequest(reqMsg)
+				if err == nil && replyMsg != nil {
+					replyData, _ := replyMsg.Pack()
+					h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
+				}
+				// 无论成败，被劫持的 DNS 请求都不再往下继续走真实 UDP 转发
+				return err
+			}
+		} else {
+			if Debug {
+				zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 目标为配置的 DNS 服务器 (%s)，跳过劫持，执行标准路由", TAG, targetAddrStr)
+			}
+		}
 	}
 
 	var isDirect bool
@@ -412,24 +417,25 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		sessionKey := addr.String() + "<->" + targetAddrStr
 
 		var uc *net.UDPConn
-
 		if val, ok := udpNatMap.Load(sessionKey); ok {
 			uc = val.(*net.UDPConn)
+			if Debug {
+				zlog.Debugf("%s [ROUTER-Direct] ♻️ 复用本地直连会话 -> %s", TAG, sessionKey)
+			}
 		} else {
 			raddr, err := net.ResolveUDPAddr("udp", targetAddrStr)
 			if err != nil {
-				zlog.Errorf("%s [SOCKS5-UDP] ❌ 解析直连 UDP 地址失败: %v", TAG, err)
+				zlog.Errorf("%s [ROUTER-Direct] ❌ 解析直连地址失败 (%s): %v", TAG, targetAddrStr, err)
 				return err
 			}
-
 			uc, err = net.DialUDP("udp", nil, raddr)
 			if err != nil {
-				zlog.Errorf("%s [SOCKS5-UDP] ❌ 建立本地 UDP 连接失败: %v", TAG, err)
+				zlog.Errorf("%s [ROUTER-Direct] ❌ 建立直连 UDP 失败: %v", TAG, err)
 				return err
 			}
 
 			if Debug {
-				zlog.Debugf("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
+				zlog.Debugf("%s [ROUTER-Direct] 🟢 新建本地直连会话 -> %s", TAG, sessionKey)
 			}
 			udpNatMap.Store(sessionKey, uc)
 
@@ -440,64 +446,58 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				defer udpNatMap.Delete(key)
 
 				bufPtr := udpBufPool.Get().(*[]byte)
-				buf := *bufPtr
-				defer udpBufPool.Put(bufPtr) // 修改了这里: 传入指针
+				// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度，防止复用引发的 0 长度截断
+				buf := (*bufPtr)[:cap(*bufPtr)]
+				defer udpBufPool.Put(bufPtr)
 
 				for {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 					n, _, err := conn.ReadFromUDP(buf)
 					if err != nil {
+						if Debug {
+							zlog.Debugf("%s [ROUTER-Direct] 🔴 直连下行读取结束 -> 会话: %s | 原因: %v", TAG, key, err)
+						}
 						break
 					}
-
-					// 直连也统一下行流量 (可选)
-					AddRx(int64(n))
-
-					outLen := 3 + 1 + len(dstAddr) + 2 + n
-					outBufPtr := udpBufPool.Get().(*[]byte)
-					outBuf := *outBufPtr
-					if outLen <= cap(outBuf) {
-						outPkt := outBuf[:outLen]
-						outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
-						outPkt[3] = dstAtyp
-						copy(outPkt[4:], dstAddr)
-						copy(outPkt[4+len(dstAddr):], dstPortBytes)
-						copy(outPkt[4+len(dstAddr)+2:], buf[:n])
-						s.UDPConn.WriteToUDP(outPkt, clientAddr)
+					if Debug {
+						zlog.Debugf("%s [ROUTER-Direct] 📥 收到下行直连数据 -> 会话: %s | 长度: %d bytes", TAG, key, n)
 					}
-					udpBufPool.Put(outBufPtr)
-				}
-				if Debug {
-					zlog.Debugf("%s [ROUTER] 🔴 UDP 直连会话已释放 -> %s", TAG, targetAddrStr)
+					h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 				}
 			}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
 		}
 
 		n, err := uc.Write(d.Data)
 		if err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入直连 UDP 数据失败: %v", TAG, err)
+			if Debug {
+				zlog.Errorf("%s [ROUTER-Direct] ❌ 上行数据写入失败 -> %s: %v", TAG, sessionKey, err)
+			}
 		} else {
-			// 增加上行流量
-			AddTx(int64(n))
+			if Debug {
+				zlog.Debugf("%s [ROUTER-Direct] 📤 成功写入上行数据 -> %s | 长度: %d bytes", TAG, sessionKey, n)
+			}
 		}
 		return nil
 	}
 
 	// ==========================================
-	// 命中代理规则，判断是否配置了 UDPGW
+	// 命中代理规则，通过 UDPGW 虚拟连接处理
 	// ==========================================
 	if h.UdpgwAddr == "" {
 		if Debug {
-			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+			zlog.Warnf("%s [ROUTER-Proxy] ⚠️ 拦截 UDP 报文 -> 目标: %s | 原因: UDPGW 未配置", TAG, targetAddrStr)
 		}
 		return nil
 	}
 
 	sessionKey := addr.String()
-	var udpgwConn net.Conn
+	var uConn net.Conn
 
 	if val, ok := udpgwMap.Load(sessionKey); ok {
-		udpgwConn = val.(net.Conn)
+		uConn = val.(net.Conn)
+		if Debug {
+			zlog.Debugf("%s [ROUTER-Proxy] ♻️ 复用代理会话 (UDPGW) -> 客户端: %s", TAG, sessionKey)
+		}
 	} else {
 		mu.Lock()
 		client := sshClient
@@ -505,199 +505,99 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 		if client == nil {
 			if Debug {
-				zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+				zlog.Warnf("%s [ROUTER-Proxy] ⚠️ 拒绝 UDP 报文 -> 目标: %s | 原因: SSH 未连接", TAG, targetAddrStr)
 			}
 			return fmt.Errorf("ssh client not ready")
 		}
 
-		conn, err := client.Dial("tcp", h.UdpgwAddr)
+		// 🌟 直接拨号目标地址，DialUdpgw 内部会自动处理域名解析和 IPv6 优先
+		var err error
+		if h.UdpgwVersion == "badvpn" {
+			if Debug {
+				zlog.Debugf("%s [ROUTER-Proxy] 🚀 选用 Badvpn 协议建立UDPGW隧道", TAG)
+			}
+			uConn, err = DialBadvpnUdpgw(client, h.UdpgwAddr, targetAddrStr)
+		} else {
+			// 默认走 Tun2Proxy
+			if Debug {
+				zlog.Debugf("%s [ROUTER-Proxy] 🚀 选用 Tun2Proxy 协议建立UDPGW隧道", TAG)
+			}
+			uConn, err = DialTun2proxyUdpgw(client, h.UdpgwAddr, targetAddrStr)
+		}
 		if err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] ❌ 建立远端 UDPGW 连接失败 (%s): %v", TAG, h.UdpgwAddr, err)
+			zlog.Errorf("%s [ROUTER-Proxy] ❌ 建立 UDPGW 隧道失败 -> 目标: %s | 错误: %v", TAG, targetAddrStr, err)
 			return err
 		}
 
-		udpgwConn = conn
-		udpgwMap.Store(sessionKey, udpgwConn)
+		udpgwMap.Store(sessionKey, uConn)
 		if Debug {
-			zlog.Debugf("%s [UDPGW] 🟢 建立 UDPGW 代理会话 -> 客户端: %s, 远端节点: %s", TAG, sessionKey, h.UdpgwAddr)
+			zlog.Debugf("%s [ROUTER-Proxy] 🟢 新建代理会话 (UDPGW) -> 客户端: %s | 隧道目标: %s", TAG, sessionKey, targetAddrStr)
 		}
 
 		wg.Add(1)
-		go func(uConn net.Conn, clientAddr *net.UDPAddr, key string) {
+		go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
 			defer wg.Done()
-			defer uConn.Close()
+			defer conn.Close()
 			defer udpgwMap.Delete(key)
 
-			// keepalive
-			keepaliveCtx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go func() {
-				ticker := time.NewTicker(15 * time.Second)
-				defer ticker.Stop()
-				keepalivePkt := []byte{0x00, 0x03, 0x01, 0x00, 0x01}
-				for {
-					select {
-					case <-ticker.C:
-						if _, err := uConn.Write(keepalivePkt); err != nil {
-							return
-						}
-					case <-keepaliveCtx.Done():
-						return
-					}
-				}
-			}()
+			// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度
+			bufPtr := udpBufPool.Get().(*[]byte)
+			buf := (*bufPtr)[:cap(*bufPtr)]
+			defer udpBufPool.Put(bufPtr)
 
-			lenBuf := make([]byte, 2)
 			for {
-				uConn.SetReadDeadline(time.Now().Add(60 * time.Second)) // UDP读取超时60s
-
-				if _, err := io.ReadFull(uConn, lenBuf); err != nil {
-					break
-				}
-				pktLen := binary.BigEndian.Uint16(lenBuf)
-				if pktLen < 3 {
-					io.CopyN(io.Discard, uConn, int64(pktLen))
-					continue
-				}
-
-				// 从内存池获取复用的 byte slice
-				bufPtr := udpBufPool.Get().(*[]byte)
-				buf := *bufPtr
-
-				// 保护机制：防止异常的超大包导致越界 (虽然 UDP 理论最大 65535)
-				if int(pktLen) > cap(buf) {
-					zlog.Warnf("%s [UDPGW] ⚠️ 异常包大小 %d，超过 Buffer 容量", TAG, pktLen)
-					udpBufPool.Put(bufPtr)
+				conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+				n, err := conn.Read(buf)
+				if err != nil {
+					if Debug {
+						zlog.Debugf("%s [ROUTER-Proxy] 🔴 代理下行读取结束 -> 会话: %s | 原因: %v", TAG, key, err)
+					}
 					break
 				}
 
-				// 复用切片，避免 make 分配
-				pktBuf := buf[:pktLen]
-				if _, err := io.ReadFull(uConn, pktBuf); err != nil {
-					udpBufPool.Put(bufPtr) // 读取失败也要归还
-					break
+				if Debug {
+					zlog.Debugf("%s [ROUTER-Proxy] 📥 收到下行代理数据 -> 会话: %s | 净载荷: %d bytes", TAG, key, n)
 				}
-
-				// 下行 UDP 流量统计
-				AddRx(int64(pktLen))
-
-				flags := pktBuf[0]
-				if flags&0x02 == 0x02 {
-					offset := 3
-					if offset >= int(pktLen) {
-						udpBufPool.Put(bufPtr)
-						continue
-					}
-
-					atyp := pktBuf[offset]
-					offset++
-
-					var dstAddr []byte
-					if atyp == socks5.ATYPIPv4 {
-						if offset+4 > int(pktLen) {
-							udpBufPool.Put(bufPtr)
-							continue
-						}
-						dstAddr = pktBuf[offset : offset+4]
-						offset += 4
-					} else if atyp == socks5.ATYPIPv6 {
-						if offset+16 > int(pktLen) {
-							udpBufPool.Put(bufPtr)
-							continue
-						}
-						dstAddr = pktBuf[offset : offset+16]
-						offset += 16
-					} else if atyp == socks5.ATYPDomain {
-						if offset >= int(pktLen) {
-							udpBufPool.Put(bufPtr)
-							continue
-						}
-						domainLen := int(pktBuf[offset])
-						if offset+1+domainLen > int(pktLen) {
-							udpBufPool.Put(bufPtr)
-							continue
-						}
-						dstAddr = pktBuf[offset : offset+1+domainLen]
-						offset += 1 + domainLen
-					} else {
-						udpBufPool.Put(bufPtr)
-						continue
-					}
-
-					if offset+2 > int(pktLen) {
-						udpBufPool.Put(bufPtr)
-						continue
-					}
-					dstPortBytes := pktBuf[offset : offset+2]
-					offset += 2
-
-					payload := pktBuf[offset:]
-
-					outLen := 3 + 1 + len(dstAddr) + 2 + len(payload)
-					outBufPtr := udpBufPool.Get().(*[]byte)
-					outBuf := *outBufPtr
-					if outLen <= cap(outBuf) {
-						outPkt := outBuf[:outLen]
-						outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
-						outPkt[3] = atyp
-						copy(outPkt[4:], dstAddr)
-						copy(outPkt[4+len(dstAddr):], dstPortBytes)
-						copy(outPkt[4+len(dstAddr)+2:], payload)
-						s.UDPConn.WriteToUDP(outPkt, clientAddr)
-					}
-					udpBufPool.Put(outBufPtr)
-				}
-
-				// 处理完毕，归还给内存池
-				udpBufPool.Put(bufPtr)
+				h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 			}
-			if Debug {
-				zlog.Debugf("%s [UDPGW] 🔴 UDPGW 代理会话已释放 -> %s", TAG, key)
-			}
-		}(udpgwConn, addr, sessionKey)
+		}(uConn, addr, sessionKey, d.Atyp, d.DstAddr, d.DstPort)
 	}
 
-	payloadLen := len(d.Data)
-	addrLen := 1 + len(d.DstAddr) + 2
-	totalLen := 3 + addrLen + payloadLen
-
-	// 从内存池获取
-	bufPtr := udpBufPool.Get().(*[]byte)
-	buf := *bufPtr
-
-	// 🌟 防越界拦截。如果封包过大，放弃复用或直接丢弃
-	if 2+totalLen > cap(buf) {
-		udpBufPool.Put(bufPtr)
-		zlog.Errorf("%s [SOCKS5-UDP] ❌ 封包过大 (需 %d, 只有 %d)，触发防崩溃拦截", TAG, 2+totalLen, cap(buf))
-		return fmt.Errorf("packet too large, exceeds buffer pool capacity")
-	}
-
-	// 截取所需大小的切片
-	packet := buf[:2+totalLen]
-
-	binary.BigEndian.PutUint16(packet[0:2], uint16(totalLen))
-	packet[2] = 0x02
-	binary.BigEndian.PutUint16(packet[3:5], 1)
-
-	packet[5] = d.Atyp
-	copy(packet[6:], d.DstAddr)
-	copy(packet[6+len(d.DstAddr):], d.DstPort)
-	copy(packet[6+len(d.DstAddr)+2:], d.Data)
-
-	if n, err := udpgwConn.Write(packet); err != nil {
-		udpgwConn.Close()
+	// 🌟 写入数据：UdpgwConn.Write 会自动进行 UDPGW 封包
+	n, err := uConn.Write(d.Data)
+	if err != nil {
+		if Debug {
+			zlog.Errorf("%s [ROUTER-Proxy] ❌ 写入代理数据失败 -> 会话: %s | 错误: %v", TAG, sessionKey, err)
+		}
+		uConn.Close()
 		udpgwMap.Delete(sessionKey)
-		zlog.Errorf("%s [SOCKS5-UDP] ❌ 写入 UDPGW 数据失败: %v", TAG, err)
 	} else {
-		// 上行 UDP 流量统计
-		AddTx(int64(n))
+		if Debug {
+			zlog.Debugf("%s [ROUTER-Proxy] 📤 成功写入代理数据 -> 会话: %s | 长度: %d bytes", TAG, sessionKey, n)
+		}
 	}
+	return err
+}
 
-	// 写入完成后，由于 TCP Write 会阻塞直到数据进入内核缓冲区，
-	// 所以此行执行完后 packet 就不再被需要了，可以安全归还。
-	udpBufPool.Put(bufPtr)
+// 封装 SOCKS5 UDP 响应格式
+func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *net.UDPAddr, atyp byte, addr []byte, port []byte, data []byte) {
+	outLen := 3 + 1 + len(addr) + 2 + len(data)
+	outBufPtr := udpBufPool.Get().(*[]byte)
+	outBuf := *outBufPtr
+	defer udpBufPool.Put(outBufPtr)
 
-	return nil
+	if outLen <= cap(outBuf) {
+		outPkt := outBuf[:outLen]
+		outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
+		outPkt[3] = atyp
+		copy(outPkt[4:], addr)
+		copy(outPkt[4+len(addr):], port)
+		copy(outPkt[4+len(addr)+2:], data)
+		s.UDPConn.WriteToUDP(outPkt, clientAddr)
+
+		// 记录下行流量
+		AddRx(int64(outLen))
+	}
 }
 
 // ----- 核心引擎调度 -----
@@ -739,13 +639,13 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 			return
 		case <-ticker.C:
 			resCh := make(chan keepAliveResult, 1)
-			
+
 			go func() {
 				start := time.Now() // 🌟 开始计时
 				// 发送 SSH 标准保活探测包
 				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
 				duration := time.Since(start) // 🌟 计算耗时
-				
+
 				resCh <- keepAliveResult{
 					err:      err,
 					duration: duration,
@@ -802,6 +702,14 @@ func StartSshTProxy2(configJson string) int {
 
 	zlog.Infof("%s [Core] ==================== 启动代理引擎 (AutoSSH模式) ====================", TAG)
 
+	// 初始化 DNS 服务
+	NewLocalDnsServer(cfg.UdpgwAddr, cfg.UdpgwVersion)
+
+	// 启动本地 DNS 监听
+	if localDnsServer != nil {
+		localDnsServer.Start(cfg.DnsAddr)
+	}
+
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
 	if err != nil {
 		zlog.Errorf("%s [SOCKS5] ❌ 创建 SOCKS5 服务器实例失败: %v", TAG, err)
@@ -813,7 +721,8 @@ func StartSshTProxy2(configJson string) int {
 	mu.Unlock()
 
 	handler := &SshProxyHandler{
-		UdpgwAddr: cfg.UdpgwAddr, // 完全由配置决定，为空则禁用 UDPGW
+		UdpgwAddr:    cfg.UdpgwAddr, // 完全由配置决定，为空则禁用 UDPGW
+		UdpgwVersion: cfg.UdpgwVersion,
 	}
 
 	wg.Add(1)
@@ -963,6 +872,10 @@ func StopSshTProxy() {
 	mu.Lock()
 	defer mu.Unlock()
 	zlog.Infof("%s [Core] 正在停止资源...", TAG)
+
+	if localDnsServer != nil {
+		localDnsServer.Stop()
+	}
 
 	if socksServer != nil {
 		socksServer.Shutdown()
