@@ -247,7 +247,9 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		mu.Unlock()
 
 		if client == nil {
-			zlog.Debugf("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
+			if Debug {
+				zlog.Debugf("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
+			}
 			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 			rep.WriteTo(c)
 			return fmt.Errorf("ssh client is currently reconnecting")
@@ -336,7 +338,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	if dstPort == 443 {
 		// 静默丢弃，不给客户端返回任何错误。
 		// 浏览器发送 QUIC 超时后会立刻 fallback 到 HTTPS/TCP 443。
-		zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
+		if Debug {
+			zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
+		}
 		return nil
 	}
 
@@ -424,7 +428,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				return err
 			}
 
-			zlog.Infof("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
+			if Debug {
+				zlog.Debugf("%s [ROUTER] 🟢 建立本地 UDP 直连会话 -> 目标: %s", TAG, targetAddrStr)
+			}
 			udpNatMap.Store(sessionKey, uc)
 
 			wg.Add(1)
@@ -461,7 +467,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					}
 					udpBufPool.Put(outBufPtr)
 				}
-				zlog.Infof("%s [ROUTER] 🔴 UDP 直连会话已释放 -> %s", TAG, targetAddrStr)
+				if Debug {
+					zlog.Debugf("%s [ROUTER] 🔴 UDP 直连会话已释放 -> %s", TAG, targetAddrStr)
+				}
 			}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
 		}
 
@@ -479,7 +487,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 命中代理规则，判断是否配置了 UDPGW
 	// ==========================================
 	if h.UdpgwAddr == "" {
-		zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+		if Debug {
+			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 拦截并丢弃代理 UDP 数据包 -> %s:%d (未配置 UDPGW)", TAG, targetHost, dstPort)
+		}
 		return nil
 	}
 
@@ -494,7 +504,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		mu.Unlock()
 
 		if client == nil {
-			zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+			if Debug {
+				zlog.Debugf("%s [SOCKS5-UDP] ⚠️ 隧道未连接，丢弃 UDP 报文 -> %s", TAG, targetHost)
+			}
 			return fmt.Errorf("ssh client not ready")
 		}
 
@@ -506,7 +518,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 		udpgwConn = conn
 		udpgwMap.Store(sessionKey, udpgwConn)
-		zlog.Infof("%s [UDPGW] 🟢 建立 UDPGW 代理会话 -> 客户端: %s, 远端节点: %s", TAG, sessionKey, h.UdpgwAddr)
+		if Debug {
+			zlog.Debugf("%s [UDPGW] 🟢 建立 UDPGW 代理会话 -> 客户端: %s, 远端节点: %s", TAG, sessionKey, h.UdpgwAddr)
+		}
 
 		wg.Add(1)
 		go func(uConn net.Conn, clientAddr *net.UDPAddr, key string) {
@@ -637,7 +651,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				// 处理完毕，归还给内存池
 				udpBufPool.Put(bufPtr)
 			}
-			zlog.Infof("%s [UDPGW] 🔴 UDPGW 代理会话已释放 -> %s", TAG, key)
+			if Debug {
+				zlog.Debugf("%s [UDPGW] 🔴 UDPGW 代理会话已释放 -> %s", TAG, key)
+			}
 		}(udpgwConn, addr, sessionKey)
 	}
 
@@ -708,41 +724,50 @@ func killActiveProxyConnections() {
 }
 
 func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
-	// 每 15 秒发起一次探测
+	// 每 18 秒发起一次探测
 	ticker := time.NewTicker(18 * time.Second)
 	defer ticker.Stop()
+
+	type keepAliveResult struct {
+		err      error
+		duration time.Duration
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 🌟 将同步阻塞的发送放入子 Goroutine，通过 Channel 接收结果
-			errCh := make(chan error, 1)
+			resCh := make(chan keepAliveResult, 1)
+			
 			go func() {
-				// 发送 SSH 标准保活探测包，要求必须回复
+				start := time.Now() // 🌟 开始计时
+				// 发送 SSH 标准保活探测包
 				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-				errCh <- err
+				duration := time.Since(start) // 🌟 计算耗时
+				
+				resCh <- keepAliveResult{
+					err:      err,
+					duration: duration,
+				}
 			}()
 
-			// 🌟 三重竞速选择（上下文退出 vs 心跳返回 vs 严格超时）
 			select {
 			case <-ctx.Done():
-				return // 收到全局退出信号
+				return
 
-			case err := <-errCh:
-				if err != nil {
-					// 真实的网络断开错误（如 EOF, connection reset）
-					zlog.Warnf("%s [AutoSSH] ⚠️ 心跳发送失败: %v (准备断开重建)", TAG, err)
-					client.Close() // 强制关闭死连接，触发 Wait() 返回
+			case res := <-resCh:
+				if res.err != nil {
+					zlog.Warnf("%s [AutoSSH] ⚠️ 心跳发送失败: %v (准备断开重建)", TAG, res.err)
+					client.Close()
 					return
 				}
-				zlog.Debugf("%s [AutoSSH] 💓 心跳正常", TAG)
+				// 🌟 打印耗时，使用 .Milliseconds() 获取 ms 数值
+				zlog.Infof("%s [AutoSSH] 💓 心跳正常 | 延迟: %dms", TAG, res.duration.Milliseconds())
 
 			case <-time.After(8 * time.Second):
-				// 🌟 如果 8 秒都没收到 SSH 服务器的回复，认定为遭遇“网络黑洞”
 				zlog.Warnf("%s [AutoSSH] ⚠️ 心跳响应严重超时 (疑似网络假死)，强行切断重建", TAG)
-				client.Close() // 强制物理切断，立刻触发外层重连！
+				client.Close()
 				return
 			}
 		}

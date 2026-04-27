@@ -54,6 +54,9 @@ var (
 
 	// 并发防击穿
 	dnsFlightGroup singleflight.Group
+	
+	// dns.Client 本身是并发安全的。
+    globalUdpClient = &dns.Client{Net: "udp", Timeout: 3 * time.Second}
 )
 
 func init() {
@@ -141,27 +144,29 @@ func copyAndAdjustTTL(entry dnsCacheEntry, newMsgId uint16) *dns.Msg {
 
 // ==================== 传统 TCP 连接池 ====================
 
-func getDnsConn(client *ssh.Client, addr string) (*dns.Conn, error) {
-	for {
-		select {
-		case pc := <-dnsConnPool:
-			// 🌟 核心机制：检查空闲保质期
-			// 如果连接在池子里闲置超过 8 秒，极大概率已被对端 DNS 服务器主动回收。
-			// 我们直接关闭这个死连接，并通过 continue 循环去拿下一个或新建。
-			if time.Since(pc.lastUsed) > 8*time.Second {
-				pc.conn.Close()
-				continue
+func getDnsConn(client *ssh.Client, addr string, forceNew bool) (*dns.Conn, error) {
+	if !forceNew {
+		for {
+			select {
+			case pc := <-dnsConnPool:
+				// 🌟 公共 DNS 斩断连接非常快，将 8 秒缩短为 2 秒
+				if time.Since(pc.lastUsed) > 2*time.Second {
+					pc.conn.Close()
+					continue
+				}
+				return pc.conn, nil
+			default:
+				goto DialNew
 			}
-			return pc.conn, nil
-		default:
-			// 池子空了，或者旧连接已被全部清理，发起全新的拨号
-			netConn, err := client.Dial("tcp", addr)
-			if err != nil {
-				return nil, err
-			}
-			return &dns.Conn{Conn: netConn}, nil
 		}
 	}
+
+DialNew:
+	netConn, err := client.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return &dns.Conn{Conn: netConn}, nil
 }
 
 func putDnsConn(conn *dns.Conn) {
@@ -231,7 +236,11 @@ func resolveDoH(req *dns.Msg, url string, isDirect bool, sshClient *ssh.Client) 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// 排空 Body，确保连接可被 HTTP/2 连接池安全回收
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DoH server returned status: %d", resp.StatusCode)
@@ -249,6 +258,8 @@ func resolveDoH(req *dns.Msg, url string, isDirect bool, sshClient *ssh.Client) 
 	return reply, nil
 }
 
+// TLS Session 缓存
+var dotSessionCache = tls.NewLRUClientSessionCache(64)
 // DoT 解析器
 func resolveDoT(req *dns.Msg, addr string, dialer func(network, addr string) (net.Conn, error)) (*dns.Msg, error) {
 	addr = strings.TrimPrefix(addr, "tls://")
@@ -269,7 +280,10 @@ func resolveDoT(req *dns.Msg, addr string, dialer func(network, addr string) (ne
 	}
 
 	host, _, _ := net.SplitHostPort(addr)
-	tlsConn := tls.Client(netConn, &tls.Config{ServerName: host})
+	tlsConn := tls.Client(netConn, &tls.Config{
+		ServerName:         host,
+		ClientSessionCache: dotSessionCache, // 复用 TLS Session 票据
+	})
 	if err := tlsConn.Handshake(); err != nil {
 		tlsConn.Close()
 		return nil, err
@@ -294,23 +308,36 @@ func resolveTCP(req *dns.Msg, addr string, dialer func(network, addr string) (ne
 
 	var netConn net.Conn
 	var err error
+	
+	// 计时开始
+	start := time.Now()
+	
 	if dialer != nil {
+		// 通过 SSH 拨号
 		netConn, err = dialer("tcp", addr)
 	} else {
 		netConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
 	}
+	
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("TCP拨号失败(%s): %v", addr, err)
 	}
+	defer netConn.Close()
 
 	dnsConn := &dns.Conn{Conn: netConn}
-	defer dnsConn.Close()
-
 	dnsConn.SetDeadline(time.Now().Add(5 * time.Second))
+	
 	if err := dnsConn.WriteMsg(req); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("写入DNS请求失败: %v", err)
 	}
-	return dnsConn.ReadMsg()
+	
+	reply, err := dnsConn.ReadMsg()
+	if err != nil {
+		return nil, fmt.Errorf("读取DNS响应超时/失败: %v", err)
+	}
+
+	zlog.Debugf("%s [DNS-TCP] 📡 远程解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
+	return reply, nil
 }
 
 // ==================== 主入口点 ====================
@@ -385,7 +412,14 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 				return nil, fmt.Errorf("ssh client not ready")
 			}
 			dialer = func(network, addr string) (net.Conn, error) {
-				return currentSshClient.Dial(network, addr)
+				zlog.Debugf("%s [DNS-Debug] 正在通过 SSH 隧道拨号到远程地址: %s", TAG, addr)
+				conn, err := currentSshClient.Dial(network, addr)
+				if err != nil {
+					zlog.Errorf("%s [DNS-Debug] ❌ SSH 隧道拨号失败: %v", TAG, err)
+				} else {
+					zlog.Debugf("%s [DNS-Debug] ✅ SSH 隧道拨号成功", TAG)
+				}
+				return conn, err
 			}
 		}
 
@@ -411,8 +445,7 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 				if !strings.Contains(addr, ":") {
 					addr += ":53"
 				}
-				dnsClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
-				reply, _, finalErr = dnsClient.Exchange(requestMsg, addr)
+				reply, _, finalErr = globalUdpClient.Exchange(requestMsg, addr)
 			} else {
 				// 兼容老版本的无前缀配置
 				if isDirect {
@@ -420,7 +453,8 @@ func handleSshTcpDns(requestMsg *dns.Msg) (*dns.Msg, error) {
 					reply, _, finalErr = dnsClient.Exchange(requestMsg, serverUrl)
 				} else {
 					// 传统的复用池 TCP 解析
-					tcpConn, getErr := getDnsConn(currentSshClient, serverUrl)
+					forceNew := attempt > 1 
+					tcpConn, getErr := getDnsConn(currentSshClient, serverUrl, forceNew)
 					if getErr == nil {
 						tcpConn.SetDeadline(time.Now().Add(5 * time.Second))
 						if finalErr = tcpConn.WriteMsg(requestMsg); finalErr == nil {
@@ -502,19 +536,19 @@ func printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Ms
 		return
 	}
 	rcodeStr := dns.RcodeToString[reply.MsgHdr.Rcode]
-	zlog.Infof("%s [DNS] ✅ 解析成功 | 来源=[%s] | 节点=[%s] | 域名=[%s] | 类型=[%s] | 状态=[%s] | 记录数=[%d]",
+	zlog.Debugf("%s [DNS] ✅ 解析成功 | 来源=[%s] | 节点=[%s] | 域名=[%s] | 类型=[%s] | 状态=[%s] | 记录数=[%d]",
 		TAG, source, server, domainName, qtypeStr, rcodeStr, len(reply.Answer))
 
 	for _, ans := range reply.Answer {
 		switch record := ans.(type) {
 		case *dns.A:
-			zlog.Infof("%s [DNS] └─ [A记录] IP: %s (TTL: %d)", TAG, record.A.String(), record.Hdr.Ttl)
+			zlog.Debugf("%s [DNS] └─ [A记录] IP: %s (TTL: %d)", TAG, record.A.String(), record.Hdr.Ttl)
 		case *dns.AAAA:
-			zlog.Infof("%s [DNS] └─ [AAAA记录] IPv6: %s (TTL: %d)", TAG, record.AAAA.String(), record.Hdr.Ttl)
+			zlog.Debugf("%s [DNS] └─ [AAAA记录] IPv6: %s (TTL: %d)", TAG, record.AAAA.String(), record.Hdr.Ttl)
 		case *dns.CNAME:
-			zlog.Infof("%s [DNS] └─ [CNAME记录] 别名: %s (TTL: %d)", TAG, record.Target, record.Hdr.Ttl)
+			zlog.Debugf("%s [DNS] └─ [CNAME记录] 别名: %s (TTL: %d)", TAG, record.Target, record.Hdr.Ttl)
 		default:
-			zlog.Infof("%s [DNS] └─ [%s记录] %s (TTL: %d)", TAG, dns.TypeToString[ans.Header().Rrtype], ans.String(), ans.Header().Ttl)
+			zlog.Debugf("%s [DNS] └─ [%s记录] %s (TTL: %d)", TAG, dns.TypeToString[ans.Header().Rrtype], ans.String(), ans.Header().Ttl)
 		}
 	}
 }
