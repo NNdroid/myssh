@@ -2,289 +2,247 @@ package myssh
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
 	"golang.org/x/crypto/ssh"
 )
 
-// ==========================================
-// Badvpn UDPGW 协议常量定义
-// ==========================================
-const (
-	BadvpnFlagData      = 0x00 // Badvpn 原生数据包 Flag
-	BadvpnFlagKeepalive = 0x01 // Badvpn 原生心跳包 Flag
+// 全局 ConID 分配器 (从 1 开始)
+var globalConID uint32 = 0
 
-	BadvpnAtypIPv4   = 0x01 // IPv4 地址
-	BadvpnAtypIPv6   = 0x02 // 🌟 Badvpn 原生私有 IPv6 定义 (不同于 SOCKS5 的 0x04)
-	BadvpnAtypDomain = 0x03 // 域名地址
+// 获取下一个唯一的 ConID
+func nextConID() uint16 {
+	// 使用原子操作递增，防止并发冲突
+	id := atomic.AddUint32(&globalConID, 1)
+	
+	// 如果达到上限 (65535)，则绕回。
+	// 注意：badvpn-udpgw 通常不支持 0 作为有效 conid，所以绕回时加 1
+	if id > 65535 {
+		atomic.CompareAndSwapUint32(&globalConID, id, 1)
+		return 1
+	}
+	return uint16(id)
+}
+
+// Badvpn UDPGW 协议常量 (基于 udpgw.c 源码)
+const (
+	UDPGW_CLIENT_FLAG_KEEPALIVE = 0x01
+	UDPGW_CLIENT_FLAG_IPV6      = 0x04
 )
 
-// BadvpnUdpgwConn 将 SSH TCP 隧道包装为逻辑上的 Badvpn UDPGW 连接
 type BadvpnUdpgwConn struct {
 	net.Conn
-	targetAddressData []byte // 序列化后的目标 IP 或 域名
-	targetPortData    []byte // 目标端口 (2字节)
-	addressType       byte   // ATYP
+	targetIP   net.IP
+	targetPort uint16
+	isIPv6     bool
+	conID      uint16
 
-	readLock  sync.Mutex
 	writeLock sync.Mutex
-
-	uploadCounter   func(int64)
-	downloadCounter func(int64)
-
 	closed    chan struct{}
 	closeOnce sync.Once
 }
 
-// DialBadvpnUdpgw 是基于 SSH 隧道的 Badvpn-UDPGW 协议拨号器
+// DialBadvpnUdpgw 初始化基于 SSH 隧道的 Badvpn-UDPGW 连接
 func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
 	if sshClient == nil {
 		return nil, fmt.Errorf("ssh client is not initialized")
 	}
 
 	if Debug {
-		zlog.Debugf("%s [BADVPN-Dial] 📞 开始拨号 | 服务端: %s | 目标: %s", TAG, udpgwServerAddr, remoteTarget)
+		zlog.Debugf("%s [UDPGW-Dial] 📞 拨号目标: %s -> 服务端: %s\n", TAG, remoteTarget, udpgwServerAddr)
 	}
 
-	host, portStr, err := net.SplitHostPort(remoteTarget)
+	// udpgw.c 不处理域名，必须预先解析为 IP
+	addr, err := net.ResolveUDPAddr("udp", remoteTarget)
 	if err != nil {
-		return nil, err
+		zlog.Errorf("%s [UDPGW-Dial] ❌ 解析目标地址失败 (%s): %v", TAG, remoteTarget, err)
+		return nil, fmt.Errorf("resolve error: %w", err)
 	}
 
-	// 1. 域名解析逻辑：优先获取 IPv6
-	var targetIP net.IP
-	if ip := net.ParseIP(host); ip != nil {
-		targetIP = ip
-	} else {
-		ips := GetCachedIPs(host)
-		for _, ip := range ips {
-			if ip.To4() == nil {
-				targetIP = ip
-				if Debug {
-					zlog.Debugf("%s [BADVPN-Dial] ⚡ 命中 DNS 缓存 (IPv6): %s", TAG, targetIP.String())
-				}
-				break
-			}
-		}
-		if targetIP == nil && len(ips) > 0 {
-			targetIP = ips[0]
-			if Debug {
-				zlog.Debugf("%s [BADVPN-Dial] ⚡ 命中 DNS 缓存 (IPv4): %s", TAG, targetIP.String())
-			}
-		}
-
-		if targetIP == nil {
-			targetIP = ResolveOne(host, dns.TypeAAAA)
-			if targetIP == nil {
-				targetIP = ResolveOne(host, dns.TypeA)
-			}
-			if Debug && targetIP != nil {
-				zlog.Debugf("%s [BADVPN-Dial] ✅ 实时解析成功: %s -> %s", TAG, host, targetIP.String())
-			}
-		}
-	}
-
-	// 2. 建立底层 TCP 隧道
 	underlyingConn, err := sshClient.Dial("tcp", udpgwServerAddr)
 	if err != nil {
-		zlog.Errorf("%s [BADVPN-Dial] ❌ 底层 TCP 连接建立失败: %v", TAG, err)
-		return nil, fmt.Errorf("dial badvpn udpgw server failed: %w", err)
+		zlog.Errorf("%s [UDPGW-Dial] ❌ SSH 建立 TCP 隧道失败 (%s): %v", TAG, udpgwServerAddr, err)
+		return nil, err
 	}
-
-	if Debug {
-		zlog.Debugf("%s [BADVPN-Dial] 🟢 底层 TCP 隧道建立成功", TAG)
-	}
-
-	// 3. 构建 Badvpn 专属地址头
-	portValue, _ := strconv.Atoi(portStr)
-	portBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBytes, uint16(portValue))
-
-	var addrType byte
-	var addrData []byte
-
-	if targetIP != nil {
-		if ipv4 := targetIP.To4(); ipv4 != nil {
-			addrType = BadvpnAtypIPv4
-			addrData = ipv4
-		} else {
-			addrType = BadvpnAtypIPv6 // 🌟 使用 Badvpn 专属的 0x02
-			addrData = targetIP.To16()
-		}
-	} else {
-		addrType = BadvpnAtypDomain
-		addrData = append([]byte{byte(len(host))}, []byte(host)...)
-	}
+	
+	// 获取一个唯一的 conID
+    uniqueID := nextConID()
 
 	c := &BadvpnUdpgwConn{
-		Conn:              underlyingConn,
-		addressType:       addrType,
-		targetAddressData: addrData,
-		targetPortData:    portBytes,
-		uploadCounter:     AddTx,
-		downloadCounter:   AddRx,
-		closed:            make(chan struct{}),
+		Conn:       underlyingConn,
+		targetIP:   addr.IP,
+		targetPort: uint16(addr.Port),
+		isIPv6:     addr.IP.To4() == nil,
+		conID:      uniqueID, // 初始会话 ID
+		closed:     make(chan struct{}),
 	}
+	
+	if Debug {
+        zlog.Debugf("%s [UDPGW-Dial] 🆕 分配了新的 ConID: %d", TAG, uniqueID)
+    }
 
-	// 4. 启动后台心跳守护
 	go c.keepAliveLoop()
-
 	return c, nil
 }
 
-// keepAliveLoop 维持 Badvpn 状态机
-func (c *BadvpnUdpgwConn) keepAliveLoop() {
-	// Badvpn Keepalive 格式: [LEN: 3] [FLAG: 0x01] [CONN_ID: 1]
-	keepalivePkt := []byte{0x00, 0x03, BadvpnFlagKeepalive, 0x00, 0x01}
-
-	// 建立连接后立刻发送心跳注册会话
+func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 	c.writeLock.Lock()
-	c.Conn.Write(keepalivePkt)
-	c.writeLock.Unlock()
+	defer c.writeLock.Unlock()
 
-	if Debug {
-		zlog.Debugf("%s [BADVPN-Daemon] 🚀 已发送初始 Keepalive (Flag: 0x01)，会话注册完毕", TAG)
+	length := len(payload)
+	if length > 0xFFFF {
+		err := fmt.Errorf("payload too large: %d bytes", length)
+		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 载荷过大: %v", TAG, err)
+		return err
 	}
 
+	// Badvpn PacketProto 严格要求 2 字节小端序长度
+	header := make([]byte, 2)
+	binary.LittleEndian.PutUint16(header, uint16(length))
+
+	if Debug {
+		zlog.Debugf("%s [UDPGW-writeFrame] 📤 发送帧 | 长度前缀: %X | 载荷长度: %d\n", TAG, header, length)
+		zlog.Debugf("%s [UDPGW-writeFrame] 📤 帧内容(Hex): %s\n", TAG, hex.EncodeToString(payload))
+	}
+
+	if _, err := c.Conn.Write(header); err != nil {
+		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 写入长度前缀失败: %v", TAG, err)
+		return err
+	}
+	if _, err := c.Conn.Write(payload); err != nil {
+		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 写入数据载荷失败: %v", TAG, err)
+		return err
+	}
+	return nil
+}
+
+func (c *BadvpnUdpgwConn) keepAliveLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {
+		// 构造心跳包: Flags(1) + ConID(2 小端)
+		hb := make([]byte, 3)
+		hb[0] = UDPGW_CLIENT_FLAG_KEEPALIVE
+		binary.LittleEndian.PutUint16(hb[1:], c.conID)
+
+		if Debug {
+			zlog.Debugf("%s [UDPGW-keepAliveLoop] 💓 发送 Keepalive (ID: %d)\n", TAG, c.conID)
+		}
+		if err := c.writeFrame(hb); err != nil {
+			zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Keepalive 写入失败: %v\n", TAG, err)
+			return
+		}
+
 		select {
 		case <-ticker.C:
-			c.writeLock.Lock()
-			c.Conn.Write(keepalivePkt)
-			c.writeLock.Unlock()
 		case <-c.closed:
-			if Debug {
-				zlog.Debugf("%s [BADVPN-Daemon] 🛑 连接关闭，守护协程安全退出", TAG)
-			}
 			return
 		}
 	}
 }
 
-// Write 封装并发送 Badvpn 数据帧
-func (c *BadvpnUdpgwConn) Write(payload []byte) (int, error) {
-	c.writeLock.Lock()
-	defer c.writeLock.Unlock()
-
-	dataLen := len(payload)
-	headerLen := 3 + (1 + len(c.targetAddressData) + 2)
-	totalSize := headerLen + dataLen
-
-	bufPtr := udpBufPool.Get().(*[]byte)
-	buffer := (*bufPtr)[:cap(*bufPtr)] // 恢复切片最大可用空间
-	defer udpBufPool.Put(bufPtr)
-
-	if 2+totalSize > cap(buffer) {
-		return 0, fmt.Errorf("payload too large")
+// Write 封装并发送数据。注意：此处不要加锁，writeFrame 会处理并发安全。
+func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
+	addrLen := 4
+	var flags byte = 0x00
+	ipData := c.targetIP.To4()
+	if c.isIPv6 {
+		addrLen = 16
+		flags |= UDPGW_CLIENT_FLAG_IPV6
+		ipData = c.targetIP.To16()
 	}
 
-	packet := buffer[:2+totalSize]
-	binary.BigEndian.PutUint16(packet[0:2], uint16(totalSize))
-	packet[2] = BadvpnFlagData                 // 🌟 Badvpn 原生数据包 Flag: 0x00
-	binary.BigEndian.PutUint16(packet[3:5], 1) // CONN_ID: 1
+	// 封装格式: Flags(1) + ConID(2) + IPAddr(N) + Port(2) + Payload
+	packet := make([]byte, 3+addrLen+2+len(b))
 
-	packet[5] = c.addressType
-	copy(packet[6:], c.targetAddressData)
-	copy(packet[6+len(c.targetAddressData):], c.targetPortData)
-	copy(packet[6+len(c.targetAddressData)+2:], payload)
+	// 1. Header: Flags 和 ConID (ConID 必须用小端序)
+	packet[0] = flags
+	binary.LittleEndian.PutUint16(packet[1:3], c.conID)
 
-	if _, err := c.Conn.Write(packet); err != nil {
-		if Debug {
-			zlog.Errorf("%s [BADVPN-Write] ❌ 写入隧道失败: %v", TAG, err)
-		}
-		return 0, err
-	}
+	copy(packet[3:], ipData) // IP 地址原始字节
+
+	// 端口在 udpgw.c 结构体中通常是网络字节序 (BigEndian)
+	binary.BigEndian.PutUint16(packet[3+addrLen:], c.targetPort)
+
+	copy(packet[3+addrLen+2:], b)
 
 	if Debug {
-		zlog.Debugf("%s [BADVPN-Write] 📤 上行数据发送 | 净载荷: %d bytes, 总长: %d bytes, ATYP: 0x%02X", TAG, dataLen, totalSize, c.addressType)
+		zlog.Debugf("%s [UDPGW-Write] 📝 写入数据 | 目标: %s:%d | 长度: %d\n", TAG, c.targetIP, c.targetPort, len(b))
 	}
 
-	if c.uploadCounter != nil {
-		c.uploadCounter(int64(2 + totalSize))
+	if err := c.writeFrame(packet); err != nil {
+		zlog.Errorf("%s [UDPGW-Write] ❌ 发送 UDP 数据帧失败: %v", TAG, err)
+		return 0, err
 	}
-	return dataLen, nil
+	return len(b), nil
 }
 
-// Read 从 Badvpn 底层连接解析下行数据包
 func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
-	c.readLock.Lock()
-	defer c.readLock.Unlock()
-
-	sizeBuf := make([]byte, 2)
 	for {
-		if _, err := io.ReadFull(c.Conn, sizeBuf); err != nil {
+		// 1. 严格读取 2 字节小端序长度
+		lenBuf := make([]byte, 2)
+		if _, err := io.ReadFull(c.Conn, lenBuf); err != nil {
+			zlog.Errorf("%s [UDPGW-Read] ❌ 读取长度前缀失败: %v", TAG, err)
 			return 0, err
 		}
-		pLen := binary.BigEndian.Uint16(sizeBuf)
 
+		pLen := int(binary.LittleEndian.Uint16(lenBuf))
+
+		// 防御性拦截（超大畸形包直接断开，防止 OOM）
+		if pLen > 0xFFFF {
+			err := fmt.Errorf("invalid packet length: %d", pLen)
+			zlog.Errorf("%s [UDPGW-Read] ❌ 畸形包拦截: %v", TAG, err)
+			return 0, err
+		}
+
+		// 2. 读出完整载荷
 		body := make([]byte, pLen)
 		if _, err := io.ReadFull(c.Conn, body); err != nil {
+			zlog.Errorf("%s [UDPGW-Read] ❌ 读取包体载荷失败 (预期长度: %d): %v", TAG, pLen, err)
 			return 0, err
 		}
 
-		flag := body[0]
-		switch flag {
-		case BadvpnFlagData: // 🌟 Badvpn 数据包 (0x00)
-			offset := 3 // 跳过 FLAG(1) + CONN_ID(2)
-			if offset >= int(pLen) {
-				continue // 畸形包防御
-			}
+		if Debug {
+			zlog.Debugf("%s [UDPGW-Read] 📥 收到回帧 | 长度: %d | Hex: %s\n", TAG, pLen, hex.EncodeToString(body))
+		}
 
-			atyp := body[offset]
-			offset++
-
-			switch atyp {
-			case BadvpnAtypIPv4:
-				offset += 4
-			case BadvpnAtypIPv6: // Badvpn 的 0x02
-				offset += 16
-			case BadvpnAtypDomain:
-				offset += int(body[offset]) + 1
-			}
-			offset += 2 // 跳过 DST.PORT(2)
-
-			if offset > int(pLen) {
-				if Debug {
-					zlog.Errorf("%s [BADVPN-Read] ❌ 数据包越界截断，安全丢弃", TAG)
-				}
-				continue
-			}
-
-			n := copy(b, body[offset:])
-			if Debug {
-				zlog.Debugf("%s [BADVPN-Read] 📥 成功解包数据 | 净载荷: %d bytes", TAG, n)
-			}
-			if c.downloadCounter != nil {
-				c.downloadCounter(int64(pLen + 2))
-			}
-			return n, nil
-
-		case BadvpnFlagKeepalive: // 0x01 心跳回包
-			if Debug {
-				zlog.Debugf("%s [BADVPN-Read] 💓 收到远端 Keepalive 应答", TAG)
-			}
+		if pLen < 3 {
 			continue
+		}
 
-		default:
-			// 捕获 Badvpn 发出的未定义错误或关闭指令
+		flags := body[0]
+		if flags&UDPGW_CLIENT_FLAG_KEEPALIVE != 0 {
 			if Debug {
-				zlog.Warnf("%s [BADVPN-Read] ⚠️ 收到异常控制帧/断开指令 (Flag: 0x%02X) | Hex: %X", TAG, flag, body)
+				zlog.Debugf("%s [UDPGW-Read] 💓 收到服务端心跳回包\n", TAG)
 			}
 			continue
 		}
+
+		addrSize := 4
+		if flags&UDPGW_CLIENT_FLAG_IPV6 != 0 {
+			addrSize = 16
+		}
+
+		offset := 3 + addrSize + 2
+		if pLen <= offset {
+			continue
+		}
+
+		n := copy(b, body[offset:])
+		if Debug {
+			zlog.Debugf("%s [UDPGW-Read] ✅ 提取 UDP Payload: %d bytes\n", TAG, n)
+		}
+		return n, nil
 	}
 }
 
-// Close 安全关闭连接并退出后台守护协程
 func (c *BadvpnUdpgwConn) Close() error {
 	c.closeOnce.Do(func() { close(c.closed) })
 	return c.Conn.Close()

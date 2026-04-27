@@ -213,7 +213,7 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 // ----- SOCKS5 代理处理器 -----
 
 type SshProxyHandler struct {
-	UdpgwAddr string
+	UdpgwAddr    string
 	UdpgwVersion string
 }
 

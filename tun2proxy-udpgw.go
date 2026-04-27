@@ -178,9 +178,7 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	copy(packet[6+len(c.targetAddressData)+2:], payload)
 
 	if _, err := c.Conn.Write(packet); err != nil {
-		if Debug {
-			zlog.Errorf("%s [UDPGW-Write] ❌ 写入隧道失败: %v", TAG, err)
-		}
+		zlog.Errorf("%s [UDPGW-Write] ❌ 写入隧道失败: %v", TAG, err)
 		return 0, err
 	}
 
@@ -232,9 +230,7 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			offset += 2 // 跳过 DST.PORT(2)
 
 			if offset > int(pLen) {
-				if Debug {
-					zlog.Errorf("%s [UDPGW-Read] ❌ 数据包越界截断，安全丢弃", TAG)
-				}
+				zlog.Errorf("%s [UDPGW-Read] ❌ 数据包越界截断，安全丢弃", TAG)
 				continue
 			}
 
@@ -254,9 +250,7 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			continue
 
 		case UdpgwFlagError: // 0x20 远端错误
-			if Debug {
-				zlog.Errorf("%s [UDPGW-Read] ❌ 收到远端 UDPGW 报错 (Flag: 0x20)！可能目标不可达或解析失败", TAG)
-			}
+			zlog.Errorf("%s [UDPGW-Read] ❌ 收到远端 UDPGW 报错 (Flag: 0x20)！可能目标不可达或解析失败", TAG)
 			continue
 
 		default:
