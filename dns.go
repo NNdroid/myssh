@@ -49,7 +49,8 @@ type LocalDnsServer struct {
 	tcpServer *dns.Server
 
 	// 连接池与客户端组件
-	dnsConnPool     chan pooledDnsConn
+	tcpConnPools    sync.Map
+	dotConnPools    sync.Map
 	directUdpClient *dns.Client
 	dohMu           sync.Mutex
 	directDoH       *http.Client
@@ -73,14 +74,57 @@ func NewLocalDnsServer(udpgwAddr string, udpgwVersion string) *LocalDnsServer {
 	l := &LocalDnsServer{
 		UdpgwAddr:       udpgwAddr,
 		UdpgwVersion:    udpgwVersion,
-		dnsConnPool:     make(chan pooledDnsConn, 10),
-		directUdpClient: &dns.Client{Net: "udp", Timeout: 3 * time.Second},
 		singleflight:    &singleflight.Group{},
 		cache:           make(map[string]dnsCacheEntry),
 	}
 	go l.cacheCleanupLoop()
 	localDnsServer = l
 	return l
+}
+
+// getPool 动态获取或创建专属连接池
+func (l *LocalDnsServer) getPool(poolsMap *sync.Map, poolKey string) chan pooledDnsConn {
+	val, _ := poolsMap.LoadOrStore(poolKey, make(chan pooledDnsConn, 10))
+	return val.(chan pooledDnsConn)
+}
+
+// dialTracked 统一处理直连/代理的拨号逻辑，并自动进行 WrapConn 流量追踪
+func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshClient *ssh.Client, prefix string) (net.Conn, error) {
+	var rawConn net.Conn
+	var err error
+
+	if isDirect {
+		// 🟢 直连模式：无论是 TCP 还是 UDP，都直接使用标准库 Dial
+		rawConn, err = net.DialTimeout(network, addr, 5*time.Second)
+	} else {
+		if sshClient == nil {
+			return nil, fmt.Errorf("ssh client disconnected")
+		}
+
+		// 🔵 代理模式：必须区分 TCP 和 UDP 协议
+		if network == "udp" {
+			// 代理 UDP 必须走 UDPGW 隧道
+			if l.UdpgwAddr == "" {
+				return nil, fmt.Errorf("proxy udp requires udpgw_addr to be configured")
+			}
+			
+			if l.UdpgwVersion == "badvpn" {
+				rawConn, err = DialBadvpnUdpgw(sshClient, l.UdpgwAddr, addr)
+			} else {
+				rawConn, err = DialTun2proxyUdpgw(sshClient, l.UdpgwAddr, addr)
+			}
+		} else {
+			// 代理 TCP 走标准 SSH 隧道转发
+			rawConn, err = sshClient.Dial(network, addr)
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	sessionName := fmt.Sprintf("%s->%s", prefix, addr)
+	return WrapConn(rawConn, sessionName), nil
 }
 
 func (l *LocalDnsServer) cacheCleanupLoop() {
@@ -170,7 +214,7 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 				target := strings.Replace(serverUrl, "doh://", "https://", 1)
 				reply, finalErr = l.resolveDoH(requestMsg, target, isDirect, curSshClient)
 			} else if strings.HasPrefix(serverUrl, "tls://") || strings.HasPrefix(serverUrl, "dot://") {
-				reply, finalErr = l.resolveDoT(requestMsg, serverUrl, isDirect, curSshClient)
+				reply, finalErr = l.resolveDoT(requestMsg, serverUrl, isDirect, curSshClient, attempt > 1)
 			} else if strings.HasPrefix(serverUrl, "tcp://") {
 				reply, finalErr = l.resolveTCP(requestMsg, serverUrl, isDirect, curSshClient, attempt > 1)
 			} else { // udp \ default
@@ -222,77 +266,52 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 
 // ==================== 协议解析器实现 (保留原生逻辑) ====================
 
-// resolveUDP 根据路由规则决定是直接发送原生 UDP 还是通过隧道 UDPGW 发送
+// resolveUDP 解析 UDP 流量 (已重构接入 dialTracked)
 func (l *LocalDnsServer) resolveUDP(req *dns.Msg, addr string, isDirect bool, sshClient *ssh.Client) (*dns.Msg, error) {
 	addr = strings.TrimPrefix(addr, "udp://")
 	if !strings.Contains(addr, ":") {
 		addr += ":53"
 	}
 
-	if isDirect {
-		// 🟢 直连模式：使用本地原生 UDP 客户端
-		reply, _, err := l.directUdpClient.Exchange(req, addr)
-		if err == nil {
-			zlog.Debugf("%s [DNS-UDP] 🟢 本地直连解析成功: %s", TAG, addr)
-		}
-		return reply, err
-	}
-
-	// 🔵 代理模式：复用 udpgw 模块
-	if l.UdpgwAddr == "" {
-		return nil, fmt.Errorf("proxy dns requires udpgw_addr to be configured")
-	}
-
-	// 建立到底层的 UDPGW 隧道
-	var vConn net.Conn
-	var err error
-	if l.UdpgwVersion == "badvpn" {
-		if Debug {
-			zlog.Debugf("%s [DNS-UDP] 🚀 选用 Badvpn 协议建立UDPGW隧道", TAG)
-		}
-		vConn, err = DialBadvpnUdpgw(sshClient, l.UdpgwAddr, addr)
-	} else {
-		// 默认走 Tun2Proxy
-		if Debug {
-			zlog.Debugf("%s [DNS-UDP] 🚀 选用 Tun2Proxy 协议建立UDPGW隧道", TAG)
-		}
-		vConn, err = DialTun2proxyUdpgw(sshClient, l.UdpgwAddr, addr)
-	}
+	// 🌟 1. 一行代码搞定拨号、UDPGW 分流和流量追踪！
+	trackedConn, err := l.dialTracked("udp", addr, isDirect, sshClient, "DNS-UDP")
 	if err != nil {
-		return nil, fmt.Errorf("dial udpgw for dns failed: %w", err)
+		return nil, err
 	}
-	defer vConn.Close()
+	defer trackedConn.Close()
 
-	vConn.SetDeadline(time.Now().Add(5 * time.Second))
+	trackedConn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// 🌟 手动打包成纯 UDP 字节流，绝对不能用 &dns.Conn{} 包装！
-	// 我们的 UdpgwConn 是一个自定义结构体，不等于原生的 *net.UDPConn。于是 miekg/dns 认为它是 TCP，强制在你的 DNS 查询前面塞了 [0x00, 0x2A]（两个字节的长度头）。
+	// 🌟 2. 直连模式：依然可以使用 miekg/dns 的便捷方法
+	if isDirect {
+		dnsConn := &dns.Conn{Conn: trackedConn}
+		resp, _, err := l.directUdpClient.ExchangeWithConn(req, dnsConn)
+		return resp, err
+	}
+
+	// 🌟 3. 代理模式 (UDPGW)：底层是 TCP 承载的 UDP 报文，不能用 ExchangeWithConn，必须手动收发
 	reqBytes, err := req.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("pack dns request failed: %v", err)
 	}
 
-	// 直接将纯净的 UDP Payload 写入 UDPGW 隧道
-	if _, err := vConn.Write(reqBytes); err != nil {
+	if _, err := trackedConn.Write(reqBytes); err != nil {
 		return nil, fmt.Errorf("write udp dns request failed: %v", err)
 	}
 
-	// 读取纯净的 UDP 回包 (DNS UDP 报文最大 65535 字节)
 	bufPtr := udpBufPool.Get().(*[]byte)
 	buffer := (*bufPtr)[:cap(*bufPtr)]
 	defer udpBufPool.Put(bufPtr)
-	n, err := vConn.Read(buffer)
+
+	n, err := trackedConn.Read(buffer)
 	if err != nil {
 		return nil, fmt.Errorf("read udp dns response failed: %v", err)
 	}
 
-	// 🌟 手动解包
 	reply := new(dns.Msg)
 	if err := reply.Unpack(buffer[:n]); err != nil {
 		return nil, fmt.Errorf("unpack dns response failed: %v", err)
 	}
-
-	zlog.Debugf("%s [DNS-UDPGW] 🔵 隧道代理解析成功: %s", TAG, addr)
 
 	return reply, nil
 }
@@ -303,41 +322,28 @@ func (l *LocalDnsServer) resolveTCP(req *dns.Msg, addr string, isDirect bool, ss
 		addr += ":53"
 	}
 
-	var tcpConn *dns.Conn
-	var err error
 	start := time.Now()
-
-	if isDirect {
-		netConn, dErr := net.DialTimeout("tcp", addr, 5*time.Second)
-		if dErr != nil {
-			return nil, dErr
-		}
-		tcpConn = &dns.Conn{Conn: netConn}
-		defer tcpConn.Close()
-	} else {
-		tcpConn, err = l.getDnsConnFromPool(sshClient, addr, forceNew)
-		if err != nil {
-			return nil, err
-		}
+	// 🌟 接收 poolKey
+	tcpConn, poolKey, err := l.getTcpConnFromPool(addr, isDirect, sshClient, forceNew)
+	if err != nil {
+		return nil, err
 	}
 
 	tcpConn.SetDeadline(time.Now().Add(5 * time.Second))
 	if err := tcpConn.WriteMsg(req); err != nil {
-		if !isDirect {
-			tcpConn.Close()
-		}
+		tcpConn.Close()
 		return nil, err
 	}
-	reply, err := tcpConn.ReadMsg()
 
-	if !isDirect {
-		if err == nil {
-			l.putDnsConnToPool(tcpConn)
-			zlog.Debugf("%s [DNS-TCP] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
-		} else {
-			tcpConn.Close()
-		}
+	reply, err := tcpConn.ReadMsg()
+	if err == nil {
+		// 🌟 按 poolKey 精准归还
+		l.putTcpConnToPool(tcpConn, poolKey)
+		zlog.Debugf("%s [DNS-TCP] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
+	} else {
+		tcpConn.Close()
 	}
+
 	return reply, err
 }
 
@@ -366,41 +372,36 @@ func (l *LocalDnsServer) resolveDoH(req *dns.Msg, url string, isDirect bool, ssh
 	return reply, err
 }
 
-func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, sshClient *ssh.Client) (*dns.Msg, error) {
+func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, sshClient *ssh.Client, forceNew bool) (*dns.Msg, error) {
 	addr = strings.TrimPrefix(addr, "tls://")
 	addr = strings.TrimPrefix(addr, "dot://")
 	if !strings.Contains(addr, ":") {
 		addr += ":853"
 	}
 
-	var netConn net.Conn
-	var err error
-	if isDirect {
-		netConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
-	} else {
-		netConn, err = sshClient.Dial("tcp", addr)
-	}
+	start := time.Now()
+	// 🌟 接收 poolKey
+	dotConn, poolKey, err := l.getDoTConnFromPool(addr, isDirect, sshClient, forceNew)
 	if err != nil {
 		return nil, err
 	}
 
-	host, _, _ := net.SplitHostPort(addr)
-	tlsConn := tls.Client(netConn, &tls.Config{
-		ServerName:         host,
-		ClientSessionCache: dotSessionCache,
-	})
-	if err := tlsConn.Handshake(); err != nil {
-		tlsConn.Close()
+	dotConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := dotConn.WriteMsg(req); err != nil {
+		dotConn.Close()
 		return nil, err
 	}
 
-	dnsConn := &dns.Conn{Conn: tlsConn}
-	defer dnsConn.Close()
-	dnsConn.SetDeadline(time.Now().Add(5 * time.Second))
-	if err := dnsConn.WriteMsg(req); err != nil {
-		return nil, err
+	reply, err := dotConn.ReadMsg()
+	if err == nil {
+		// 🌟 按 poolKey 精准归还
+		l.putDoTConnToPool(dotConn, poolKey)
+		zlog.Debugf("%s [DNS-DoT] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
+	} else {
+		dotConn.Close()
 	}
-	return dnsConn.ReadMsg()
+
+	return reply, err
 }
 
 // ==================== 内部组件与辅助方法 ====================
@@ -408,56 +409,129 @@ func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, ss
 func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *http.Client {
 	l.dohMu.Lock()
 	defer l.dohMu.Unlock()
+	
+	// ==========================================
+	// 1. 直连 DoH Client
+	// ==========================================
 	if isDirect {
 		if l.directDoH == nil {
-			l.directDoH = &http.Client{Timeout: 5 * time.Second}
+			l.directDoH = &http.Client{
+				Timeout: 5 * time.Second,
+				Transport: &http.Transport{
+					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+						return l.dialTracked(network, addr, true, nil, "DNS-DoH-Direct")
+					},
+					ForceAttemptHTTP2: true,
+					MaxIdleConns:        100,
+					MaxIdleConnsPerHost: 10,
+					IdleConnTimeout:     30 * time.Second,
+				},
+			}
 		}
 		return l.directDoH
 	}
+	
+	// ==========================================
+	// 2. 代理 DoH Client
+	// ==========================================
 	if l.proxiedDoH == nil || sshClient != l.lastSshClient {
 		l.lastSshClient = sshClient
 		l.proxiedDoH = &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					if sshClient == nil {
-						return nil, fmt.Errorf("ssh client disconnected")
-					}
-					return sshClient.Dial("tcp", addr)
+					return l.dialTracked(network, addr, false, sshClient, "DNS-DoH-Proxy")
 				},
 				ForceAttemptHTTP2: true,
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     30 * time.Second,
 			},
 		}
 	}
 	return l.proxiedDoH
 }
 
-func (l *LocalDnsServer) getDnsConnFromPool(client *ssh.Client, addr string, forceNew bool) (*dns.Conn, error) {
+// ==================== TCP 池管理 ====================
+
+func (l *LocalDnsServer) getTcpConnFromPool(addr string, isDirect bool, client *ssh.Client, forceNew bool) (*dns.Conn, string, error) {
+	poolKey := fmt.Sprintf("%v|%s", isDirect, addr) // 例如 "true|8.8.8.8:53"
+	pool := l.getPool(&l.tcpConnPools, poolKey)
+
 	if !forceNew {
 		for {
 			select {
-			case pc := <-l.dnsConnPool:
-				if time.Since(pc.lastUsed) > 2*time.Second {
+			case pc := <-pool:
+				if time.Since(pc.lastUsed) > 5*time.Second {
 					pc.conn.Close()
 					continue
 				}
-				return pc.conn, nil
+				return pc.conn, poolKey, nil
 			default:
 				goto DialNew
 			}
 		}
 	}
 DialNew:
-	netConn, err := client.Dial("tcp", addr)
+	trackedConn, err := l.dialTracked("tcp", addr, isDirect, client, "DNS-TCP")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &dns.Conn{Conn: netConn}, nil
+	return &dns.Conn{Conn: trackedConn}, poolKey, nil
 }
 
-func (l *LocalDnsServer) putDnsConnToPool(conn *dns.Conn) {
+func (l *LocalDnsServer) putTcpConnToPool(conn *dns.Conn, poolKey string) {
+	pool := l.getPool(&l.tcpConnPools, poolKey)
 	select {
-	case l.dnsConnPool <- pooledDnsConn{conn: conn, lastUsed: time.Now()}:
+	case pool <- pooledDnsConn{conn: conn, lastUsed: time.Now()}:
+	default:
+		conn.Close()
+	}
+}
+
+// ==================== DoT 池管理 ====================
+
+func (l *LocalDnsServer) getDoTConnFromPool(addr string, isDirect bool, client *ssh.Client, forceNew bool) (*dns.Conn, string, error) {
+	poolKey := fmt.Sprintf("%v|%s", isDirect, addr) // 例如 "false|8.8.8.8:853"
+	pool := l.getPool(&l.dotConnPools, poolKey)
+
+	if !forceNew {
+		for {
+			select {
+			case pc := <-pool:
+				if time.Since(pc.lastUsed) > 5*time.Second {
+					pc.conn.Close()
+					continue
+				}
+				return pc.conn, poolKey, nil
+			default:
+				goto DialNew
+			}
+		}
+	}
+DialNew:
+	trackedConn, err := l.dialTracked("tcp", addr, isDirect, client, "DNS-DoT")
+	if err != nil {
+		return nil, "", err
+	}
+
+	host, _, _ := net.SplitHostPort(addr)
+	tlsConn := tls.Client(trackedConn, &tls.Config{
+		ServerName:         host,
+		ClientSessionCache: dotSessionCache,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		tlsConn.Close()
+		return nil, "", err
+	}
+
+	return &dns.Conn{Conn: tlsConn}, poolKey, nil
+}
+
+func (l *LocalDnsServer) putDoTConnToPool(conn *dns.Conn, poolKey string) {
+	pool := l.getPool(&l.dotConnPools, poolKey)
+	select {
+	case pool <- pooledDnsConn{conn: conn, lastUsed: time.Now()}:
 	default:
 		conn.Close()
 	}

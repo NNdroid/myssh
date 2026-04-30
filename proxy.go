@@ -291,6 +291,10 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			return dialErr
 		}
 
+		// --- Wrap the outbound connection ---
+	    remote = WrapConn(remote, target)
+	    // ------------------------------------
+
 		defer remote.Close()
 		rep := socks5.NewReply(socks5.RepSuccess, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 		if _, err := rep.WriteTo(c); err != nil {
@@ -302,14 +306,14 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			// Proxy -> Client (Rx for local, Tx for proxy logic if viewed from client's download)
 			// remote = ssh channel (download data)
 			// c = local client
-			_, err := tcpRelay(c, &TrackingReader{R: remote, Add: AddRx})
+			_, err := tcpRelay(c, remote)
 			errc <- err
 		}()
 		go func() {
 			// Client -> Proxy (Tx for local, Rx for proxy logic if viewed from client's upload)
 			// c = local client (upload data)
 			// remote = ssh channel
-			_, err := tcpRelay(remote, &TrackingReader{R: c, Add: AddTx})
+			_, err := tcpRelay(remote, c)
 			errc <- err
 		}()
 
@@ -416,23 +420,22 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		targetAddrStr := net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
 		sessionKey := addr.String() + "<->" + targetAddrStr
 
-		var uc *net.UDPConn
+		var uc net.Conn
 		if val, ok := udpNatMap.Load(sessionKey); ok {
-			uc = val.(*net.UDPConn)
+			uc = val.(net.Conn)
 			if Debug {
 				zlog.Debugf("%s [ROUTER-Direct] ♻️ 复用本地直连会话 -> %s", TAG, sessionKey)
 			}
 		} else {
-			raddr, err := net.ResolveUDPAddr("udp", targetAddrStr)
-			if err != nil {
-				zlog.Errorf("%s [ROUTER-Direct] ❌ 解析直连地址失败 (%s): %v", TAG, targetAddrStr, err)
-				return err
-			}
-			uc, err = net.DialUDP("udp", nil, raddr)
+			rawConn, err := net.Dial("udp", targetAddrStr)
 			if err != nil {
 				zlog.Errorf("%s [ROUTER-Direct] ❌ 建立直连 UDP 失败: %v", TAG, err)
 				return err
 			}
+
+			// --- Wrap the outbound connection ---
+			uc = WrapConn(rawConn, targetAddrStr)
+            // ------------------------------------
 
 			if Debug {
 				zlog.Debugf("%s [ROUTER-Direct] 🟢 新建本地直连会话 -> %s", TAG, sessionKey)
@@ -440,7 +443,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			udpNatMap.Store(sessionKey, uc)
 
 			wg.Add(1)
-			go func(conn *net.UDPConn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
+			go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
 				defer wg.Done()
 				defer conn.Close()
 				defer udpNatMap.Delete(key)
@@ -452,7 +455,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 				for {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-					n, _, err := conn.ReadFromUDP(buf)
+					n, err := conn.Read(buf)
 					if err != nil {
 						if Debug {
 							zlog.Debugf("%s [ROUTER-Direct] 🔴 直连下行读取结束 -> 会话: %s | 原因: %v", TAG, key, err)
@@ -529,6 +532,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			return err
 		}
 
+		// --- Wrap the UDPGW connection ---
+		uConn = WrapConn(uConn, fmt.Sprintf("UDPGW->%s", targetAddrStr))
+		// ---------------------------------
 		udpgwMap.Store(sessionKey, uConn)
 		if Debug {
 			zlog.Debugf("%s [ROUTER-Proxy] 🟢 新建代理会话 (UDPGW) -> 客户端: %s | 隧道目标: %s", TAG, sessionKey, targetAddrStr)
@@ -594,9 +600,6 @@ func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *ne
 		copy(outPkt[4+len(addr):], port)
 		copy(outPkt[4+len(addr)+2:], data)
 		s.UDPConn.WriteToUDP(outPkt, clientAddr)
-
-		// 记录下行流量
-		AddRx(int64(outLen))
 	}
 }
 

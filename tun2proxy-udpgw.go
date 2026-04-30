@@ -112,8 +112,8 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		addressType:       addrType,
 		targetAddressData: addrData,
 		targetPortData:    portBytes,
-		uploadCounter:     AddTx,
-		downloadCounter:   AddRx,
+		uploadCounter:     nil,
+		downloadCounter:   nil,
 		closed:            make(chan struct{}),
 	}
 
