@@ -20,7 +20,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const TAG = "[MySsh]"
+const TAG = "[M]"
 
 type ProxyConfig struct {
 	LocalAddr                    string `json:"local_addr"`
@@ -825,11 +825,11 @@ func StartSshTProxy2(configJson string) int {
 				continue
 			}
 
-			zlog.Infof("%s [AutoSSH] 正在进行 SSH 安全认证...", TAG)
+			zlog.Infof("%s [AutoSSH] 正在进行SSH安全认证...", TAG)
 			scc, chans, reqs, err := ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
 			if err != nil {
 				conn.Close()
-				zlog.Errorf("%s [AutoSSH] ❌ SSH 握手失败: %v", TAG, err)
+				zlog.Errorf("%s [AutoSSH] ❌ SSH握手失败: %v", TAG, err)
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -843,7 +843,7 @@ func StartSshTProxy2(configJson string) int {
 			mu.Lock()
 			sshClient = client
 			mu.Unlock()
-			zlog.Infof("%s [AutoSSH] ✅ SSH 隧道建立成功，已接管全局流量！", TAG)
+			zlog.Infof("%s [AutoSSH] ✅ SSH隧道建立成功，已接管全局流量！", TAG)
 
 			go maintainKeepAlive(engineCtx, client)
 
