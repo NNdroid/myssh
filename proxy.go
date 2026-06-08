@@ -49,6 +49,7 @@ type ProxyConfig struct {
 	ServerCertificateFingerprint string `json:"server_certificate_finger_print"`
 	DnsAddr                      string `json:"dns_addr"`
 	UdpgwVersion                 string `json:"udpgw_version"`
+	BindInterface				 string `json:"bind_interface"`
 }
 
 type GlobalConfig struct {
@@ -162,6 +163,42 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	return 0
 }
 
+// dialTCP 处理底层 TCP 物理连接的建立
+func dialTCP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	if cfg.BindInterface != "" {
+		bindDevice(dialer, cfg.BindInterface)
+	}
+
+	conn, err := dialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		zlog.Errorf("%s [Tunnel] ❌ 底层 TCP 连接失败: %v", TAG, err)
+		return nil, err
+	}
+	zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
+	
+	TuneTCPConn(conn)
+	return conn, nil
+}
+
+// dialUDP 处理底层 UDP 物理连接的建立
+func dialUDP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	if cfg.BindInterface != "" {
+		bindDevice(dialer, cfg.BindInterface)
+	}
+
+	conn, err := dialer.DialContext(ctx, "udp", target)
+	if err != nil {
+		zlog.Errorf("%s [Tunnel] ❌ 底层 UDP 拨号失败: %v", TAG, err)
+		return nil, err
+	}
+	zlog.Infof("%s [Tunnel] ✅ 底层 UDP Socket 准备完毕 (绑定接口: %s)", TAG, cfg.BindInterface)
+	
+	return conn, nil
+}
+
+// dialTunnel 是隧道建立的统一入口，负责策略分发
 func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	tunnelType := strings.ToLower(cfg.TunnelType)
 	if tunnelType == "" {
@@ -183,30 +220,32 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	var baseConn net.Conn
 	var err error
 
+	// 根据协议要求调用拆分好的拨号函数
 	switch proto.Network {
 	case "tcp":
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		baseConn, err = dialer.DialContext(ctx, "tcp", target)
-		if err != nil {
-			zlog.Errorf("%s [Tunnel] ❌ 底层 TCP 连接失败: %v", TAG, err)
-			return nil, err
-		}
-		zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
-		TuneTCPConn(baseConn)
+		baseConn, err = dialTCP(ctx, cfg, target)
 	case "udp":
-		zlog.Infof("%s [Tunnel] ⚡ 检测到 UDP 需求，已跳过常规 TCP 拨号", TAG)
+		baseConn, err = dialUDP(ctx, cfg, target)
+	case "custom":
+		zlog.Infof("%s [Tunnel] ⚡ 采用协议接管底层拨号 (按需懒加载)", TAG)
 		baseConn = nil
 	default:
-		zlog.Infof("%s [Tunnel] ⚡ 采用自定义拨号", TAG)
 		baseConn = nil
 	}
 
+	// 如果前置物理连接建立失败，直接阻断，无需进入 Handler
+	if err != nil {
+		return nil, err
+	}
+
+	// 将底层的 baseConn 移交给具体的隧道协议处理器 (如 HTTP/3, WebSocket, Base SSH 等)
 	targetConn, err := proto.Handler(ctx, cfg, baseConn)
 	if err == nil {
 		//if Debug {
 		//	targetConn = &DumpConn{Conn: targetConn, Prefix: "Client Local - Android"}
 		//}
 	}
+	
 	return targetConn, err
 }
 

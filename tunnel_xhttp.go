@@ -21,8 +21,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -555,7 +553,6 @@ func init() {
 
 		var client *http.Client
 		var negotiatedProtocol string
-		var err error
 		var cleanupFuncs []func() // 存放必须在隧道关闭时释放的资源（防泄露）
 
 		baseTlsConf := &tls.Config{
@@ -569,40 +566,23 @@ func init() {
 			// 1. 优先探测 HTTP/3 (QUIC)
 			// ==========================================
 			if slices.Contains(alpnList, "h3") {
-				h3Ctx, h3Cancel := context.WithTimeout(parentCtx, 2*time.Second)
-				qconf := &quic.Config{MaxIdleTimeout: 10 * time.Second}
-				h3TlsConf := baseTlsConf.Clone()
-				h3TlsConf.NextProtos = []string{"h3"}
+				// 💡 核心修改1：直接调用我们写好的全局复用器
+				// 这会自动处理网卡绑定、底层 Socket 懒加载和连接寿命管理
+				tr3, h3Err := getH3Transport(cfg)
 
-				var probeH3Conn *quic.Conn
-				probeH3Conn, err = quic.DialAddrEarly(h3Ctx, cfg.ProxyAddr, h3TlsConf, qconf)
-				h3Cancel()
-
-				if err == nil {
-					// 探测成功，立即关闭探测连接以释放 UDP 端口和 Goroutine（内存泄露核心修复）
-					if probeH3Conn != nil {
-						(*probeH3Conn).CloseWithError(0, "probe_done")
-					}
-
-					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)", TAG)
+				if h3Err == nil && tr3 != nil {
+					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)，复用底层物理 UDP 链路", TAG)
 					negotiatedProtocol = "h3"
 
-					tr3 := &http3.Transport{
-						TLSClientConfig: h3TlsConf,
-						Dial:            quic.DialAddrEarly,
-					}
 					client = &http.Client{
 						Transport: tr3,
 						Timeout:   90 * time.Second,
 					}
 
-					// 必须在隧道关闭时释放 http3.Transport，否则将泄露大量 UDP Goroutine
-					cleanupFuncs = append(cleanupFuncs, func() {
-						tr3.Close()
-					})
-				} else if probeH3Conn != nil {
-					// 探测失败但如果连接未关闭，必须清理
-					(*probeH3Conn).CloseWithError(0, "probe_failed")
+					// 💡 注意：因为 tr3 是全局按需复用的，所以这里不要再把它加入 cleanupFuncs 去 Close()
+					// 它的生命周期已经由 tunnel_h3.go 完美接管了
+				} else {
+					zlog.Warnf("%s [Tunnel] ⚠️ HTTP/3 (QUIC) 探测/获取失败，准备降级探测 TCP: %v", TAG, h3Err)
 				}
 			}
 
@@ -610,13 +590,23 @@ func init() {
 			// 2. TCP ALPN 探测 (h2 / http/1.1)
 			// ==========================================
 			if client == nil {
+				// 💡 核心修改2：创建一个带有网卡绑定能力的 TCP 拨号闭包
+				dialTCPWithBind := func(ctx context.Context, network, addr string) (net.Conn, error) {
+					dialer := &net.Dialer{Timeout: 10 * time.Second}
+					if cfg.BindInterface != "" {
+						bindDevice(dialer, cfg.BindInterface)
+					}
+					return dialer.DialContext(ctx, network, addr)
+				}
+
 				var tcpConn net.Conn
-				var d net.Dialer
-				tcpConn, err = d.DialContext(parentCtx, "tcp", cfg.ProxyAddr)
+				var err error
+				// 使用带绑卡的拨号器
+				tcpConn, err = dialTCPWithBind(parentCtx, "tcp", cfg.ProxyAddr)
 				if err != nil {
 					return nil, fmt.Errorf("probe tcp failed: %w", err)
 				}
-				TuneTCPConn(tcpConn)
+				TuneTCPConn(tcpConn) // 保留你的 TCP 调优逻辑
 
 				// 剔除 h3，准备 uTLS 握手
 				tcpAlpns := slices.DeleteFunc(slices.Clone(alpnList), func(s string) bool { return s == "h3" })
@@ -669,7 +659,8 @@ func init() {
 						return cachedConn, nil
 					}
 
-					tc, err := d.DialContext(ctx, "tcp", cfg.ProxyAddr)
+					// 使用带绑卡的拨号器
+					tc, err := dialTCPWithBind(ctx, "tcp", cfg.ProxyAddr)
 					if err != nil {
 						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
@@ -679,7 +670,7 @@ func init() {
 					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
 
 					if err != nil {
-						tc.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
+						tc.Close() // 握手失败时主动关闭
 						return nil, fmt.Errorf("utls verify&handshake failed: %w", err)
 					}
 
@@ -717,16 +708,22 @@ func init() {
 			// ==========================================
 			// 3. 纯 TCP 模式 (h2c 探测)
 			// ==========================================
-			dialTCP := func(ctx context.Context, network, addr string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "tcp", cfg.ProxyAddr)
+			// 💡 核心修改3：为明文模式也加上绑卡拨号器
+			dialTCPWithBind := func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dialer := &net.Dialer{Timeout: 10 * time.Second}
+				if cfg.BindInterface != "" {
+					bindDevice(dialer, cfg.BindInterface)
+				}
+				return dialer.DialContext(ctx, network, addr)
 			}
-			if probeH2C(parentCtx, cfg.ProxyAddr) && slices.Contains(alpnList, "h2") {
+			
+			// 💡 注意：这里的 probeH2C 传入的是 cfg，以便它内部也能调用绑卡逻辑
+			if probeH2C(parentCtx, cfg) && slices.Contains(alpnList, "h2") {
 				zlog.Infof("%s [Tunnel] ⚡ 探测成功，启用 H2C (明文 HTTP/2) 引擎", TAG)
 				t2 := &http2.Transport{
 					AllowHTTP: true,
-					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-						return dialTCP(ctx, network, addr)
+					DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+						return dialTCPWithBind(ctx, network, addr)
 					},
 				}
 				client = &http.Client{Transport: t2, Timeout: 90 * time.Second}
@@ -736,7 +733,7 @@ func init() {
 			} else {
 				zlog.Infof("%s [Tunnel] 🐢 H2C 探测失败，平滑回退至纯 TCP HTTP/1.1 引擎", TAG)
 				t1 := &http.Transport{
-					DialContext:           dialTCP,
+					DialContext:           dialTCPWithBind,
 					MaxIdleConns:          100,
 					MaxIdleConnsPerHost:   100,
 					MaxConnsPerHost:       100,
@@ -1035,11 +1032,11 @@ func init() {
 	}
 
 	// 注册 Tunnel
-	RegisterTunnel("xhttpc", "none", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
+	RegisterTunnel("xhttpc", "custom", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
 		alpnList := strings.Split(cfg.Alpn, ",")
 		return xhttpHandler(ctx, cfg, base, false, alpnList)
 	})
-	RegisterTunnel("xhttp", "none", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
+	RegisterTunnel("xhttp", "custom", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
 		alpnList := strings.Split(cfg.Alpn, ",")
 		return xhttpHandler(ctx, cfg, base, true, alpnList)
 	})
@@ -1056,9 +1053,13 @@ func updateUint64IfGreater(addr *uint64, newVal uint64) {
 }
 
 // 辅助工具函数：轻量级 H2C 嗅探
-func probeH2C(ctx context.Context, addr string) bool {
-	d := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+func probeH2C(ctx context.Context, cfg ProxyConfig) bool {
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	if cfg.BindInterface != "" {
+		bindDevice(dialer, cfg.BindInterface)
+	}
+
+	conn, err := dialer.DialContext(ctx, "tcp", cfg.ProxyAddr)
 	if err != nil {
 		return false
 	}
