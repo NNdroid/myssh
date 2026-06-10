@@ -84,6 +84,18 @@ func ValidatePassphrase(key string, pass string) bool {
 	return err == nil
 }
 
+// parsePrivateKeySshSigner 解析 SSH 私钥
+func parsePrivateKeySshSigner(privateKey []byte, passphrase []byte) (ssh.Signer, error) {
+	// 尝试直接解析
+	signer, err := ssh.ParsePrivateKey(privateKey)
+	// 如果报错提示需要密码 (Passphrase)
+	var passphraseMissingError *ssh.PassphraseMissingError
+	if errors.As(err, &passphraseMissingError) {
+		return ssh.ParsePrivateKeyWithPassphrase(privateKey, passphrase)
+	}
+	return signer, err
+}
+
 type CertInfo struct {
 	Subject    string `json:"subject"`
 	Issuer     string `json:"issuer"`
@@ -120,15 +132,30 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 
 	if useQUIC {
 		protocol = "QUIC"
-		conn, err := quic.DialAddr(ctx, addr, tlsConfig, nil)
+		baseConn, err := dialProtected(ctx, ProxyConfig{}, "udp", addr, 8*time.Second)
 		if err != nil {
+			return nil, err
+		}
+		udpConn, ok := baseConn.(*net.UDPConn)
+		if !ok {
+			baseConn.Close()
+			return nil, fmt.Errorf("expected *net.UDPConn, got %T", baseConn)
+		}
+		udpAddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			udpConn.Close()
+			return nil, err
+		}
+		conn, err := quic.DialEarly(ctx, udpConn, udpAddr, tlsConfig, nil)
+		if err != nil {
+			udpConn.Close()
 			return nil, err
 		}
 		defer conn.CloseWithError(0, "")
 		peerCerts = conn.ConnectionState().TLS.PeerCertificates
 	} else {
 		protocol = "TLS"
-		dialer := &net.Dialer{Timeout: 8 * time.Second}
+		dialer := newProtectedDialer(ProxyConfig{}, 8*time.Second)
 		conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
 		if err != nil {
 			return nil, err
@@ -273,7 +300,7 @@ func (tc *TrackedPacketConn) Close() error {
 
 // DialTracked 替代 net.DialTimeout
 func DialTracked(network, address string, timeout time.Duration, targetAddr string) (net.Conn, error) {
-	conn, err := net.DialTimeout(network, address, timeout)
+	conn, err := dialProtected(context.Background(), ProxyConfig{}, network, address, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -457,25 +484,25 @@ func init() {
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		for range ticker.C {
-			// 1. 提取当前总流量和连接数
+			// 当前总流量和连接数
 			tTx := atomic.LoadUint64(&globalTrafficManager.TxTotal)
 			tRx := atomic.LoadUint64(&globalTrafficManager.RxTotal)
 			actConns := atomic.LoadInt64(&globalTrafficManager.ActiveConns)
 			totConns := atomic.LoadInt64(&globalTrafficManager.TotalConns)
 
-			// 2. 提取上一秒总流量，并替换为最新总流量
+			// 上一秒总流量，并替换为最新总流量
 			lTx := atomic.SwapUint64(&lastTxTotal, tTx)
 			lRx := atomic.SwapUint64(&lastRxTotal, tRx)
 
-			// 3. 计算当前 1 秒内产生的流量速率
+			// 计算当前 1 秒内产生的流量速率
 			txRate := tTx - lTx
 			rxRate := tRx - lRx
 
-			// 4. 更新供主动查询使用的速率
+			// 更新供主动查询使用的速率
 			atomic.StoreUint64(&currentTxRate, txRate)
 			atomic.StoreUint64(&currentRxRate, rxRate)
 
-			// 5. 触发回调给 Android
+			// 触发回调给 Android
 			if trafficCb != nil {
 				trafficCb.OnTrafficUpdate(int64(txRate), int64(rxRate), int64(tTx), int64(tRx), actConns, totConns)
 			}

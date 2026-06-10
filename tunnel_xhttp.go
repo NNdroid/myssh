@@ -37,7 +37,7 @@ var (
 )
 
 // ==========================================
-// 1. 高性能可靠传输缓冲区 (Seq/Ack 机制)
+// 高性能可靠传输缓冲区 (Seq/Ack 机制)
 // ==========================================
 
 type reliableBuffer struct {
@@ -140,8 +140,15 @@ func (rb *reliableBuffer) Len() int {
 	return len(rb.data)
 }
 
+func (rb *reliableBuffer) Close() {
+	rb.cond.L.Lock()
+	rb.closed = true
+	rb.cond.Broadcast()
+	rb.cond.L.Unlock()
+}
+
 // ==========================================
-// 2. Meek 虚拟连接 (集成可靠传输)
+// Meek 虚拟连接 (集成可靠传输)
 // ==========================================
 
 type meekVirtualConn struct {
@@ -256,6 +263,9 @@ func (c *meekVirtualConn) Close() error {
 	c.oooBuf = nil
 	c.readCond.Broadcast()
 	c.readCond.L.Unlock()
+	if c.writeBuf != nil {
+		c.writeBuf.Close()
+	}
 	return nil
 }
 
@@ -266,7 +276,7 @@ func (c *meekVirtualConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // ==========================================
-// 3. 动态 Padding 与 0xFFFF 信令装甲
+// 动态 Padding 与 0xFFFF 信令装甲
 // ==========================================
 
 // getBufFromPool 安全地从 sync.Pool 中获取 *[]byte
@@ -460,7 +470,9 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 
 		// 数据直接从 io.Reader 灌入用户的 p
 		if _, err := io.ReadFull(c.r, p[:readIntoP]); err != nil {
-			return 0, err
+			// 如果前面给用户的 p 已经读了 readIntoP 字节，
+			// 这里哪怕断开，也应该把已读到的长度返回给上层
+			return readIntoP, err
 		}
 
 		// 如果用户的 p 太小，剩下的 payload 必须读入内部 buffer 暂存
@@ -696,11 +708,7 @@ func init() {
 			// 纯 TCP 模式 (h2c 探测)
 			// ==========================================
 			dialTCPWithBind := func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dialer := &net.Dialer{Timeout: 10 * time.Second}
-				if cfg.BindInterface != "" {
-					bindDevice(dialer, cfg.BindInterface)
-				}
-				return dialer.DialContext(ctx, network, addr)
+				return dialProtected(ctx, cfg, network, addr, 10*time.Second)
 			}
 
 			// 💡 注意：这里的 probeH2C 传入的是 cfg，以便它内部也能调用绑卡逻辑
@@ -1040,12 +1048,7 @@ func updateUint64IfGreater(addr *uint64, newVal uint64) {
 
 // 辅助工具函数：轻量级 H2C 嗅探
 func probeH2C(ctx context.Context, cfg ProxyConfig) bool {
-	dialer := &net.Dialer{Timeout: 2 * time.Second}
-	if cfg.BindInterface != "" {
-		bindDevice(dialer, cfg.BindInterface)
-	}
-
-	conn, err := dialer.DialContext(ctx, "tcp", cfg.ProxyAddr)
+	conn, err := dialProtected(ctx, cfg, "tcp", cfg.ProxyAddr, 2*time.Second)
 	if err != nil {
 		return false
 	}

@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+func newProtectedDialer(cfg ProxyConfig, timeout time.Duration) *net.Dialer {
+	dialer := &net.Dialer{Timeout: timeout}
+	if cfg.BindInterface != "" {
+		zlog.Debugf("%s [Dialer] bind interface: %s", TAG, cfg.BindInterface)
+		bindDevice(dialer, cfg.BindInterface)
+	}
+	return wrapAndroidProtect(dialer)
+}
+
+func dialProtected(ctx context.Context, cfg ProxyConfig, network, address string, timeout time.Duration) (net.Conn, error) {
+	return newProtectedDialer(cfg, timeout).DialContext(ctx, network, address)
+}
+
 // 針對 TCP 連線進行底層 Socket 最佳化
 // 關閉 Nagle 演算法 (SetNoDelay) 以保證極低延遲 (適用於 SSH/即時指令)
 // 擴大作業系統讀寫緩衝區至 4MB，以適應跨國高 BDP (頻寬延遲乘積) 網路
@@ -40,21 +53,32 @@ func applyOptimiseForTcpConnection(conn net.Conn) {
 			}
 		}
 
-		zlog.Debugf("%s [TCP Tune] 已成功套用 Socket 最佳化 (4MB Buffer, NoDelay, KeepAlive)", TAG)
+		zlog.Debugf("%s [TCP Tune] 🚀 已成功套用 Socket 最佳化 (4MB Buffer, NoDelay, KeepAlive)", TAG)
+	} else {
+		zlog.Debugf("%s [TCP Tune] ⚠️ 当前连接不是 TCP，跳过优化", TAG)
 	}
 }
 
 // dialSocket is the unified entry point for creating all underlying sockets.
 // It handles timeouts and interface binding.
 func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (net.Conn, error) {
+	zlog.Debugf("%s [Dialer] 🎬 开始拨号 (network=%s, address=%s)", TAG, network, address)
+
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 
 	// Apply interface binding if specified in the config.
 	if cfg.BindInterface != "" {
+		zlog.Debugf("%s [Dialer] 🌐 尝试绑定到指定网卡: %s", TAG, cfg.BindInterface)
 		bindDevice(dialer, cfg.BindInterface)
+	} else {
+		zlog.Debugf("%s [Dialer] 🌐 未指定绑定网卡，将使用默认路由", TAG)
 	}
 
-	conn, err := dialer.DialContext(ctx, network, address)
+	// Apply Android VpnService Protect.
+	safeDialer := wrapAndroidProtect(dialer)
+
+	zlog.Debugf("%s [Dialer] 📞 开始执行 DialContext...", TAG)
+	conn, err := safeDialer.DialContext(ctx, network, address)
 	if err != nil {
 		zlog.Errorf("%s [Socket] ❌ 底层 %s 连接失败: %v", TAG, strings.ToUpper(network), err)
 		return nil, err

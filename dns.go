@@ -63,6 +63,7 @@ type LocalDnsServer struct {
 	singleflight *singleflight.Group
 
 	closeChan chan struct{}
+	closeOnce sync.Once
 }
 
 var (
@@ -98,7 +99,7 @@ func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshCli
 
 	if isDirect {
 		// 🟢 直连模式：无论是 TCP 还是 UDP，都直接使用标准库 Dial
-		rawConn, err = net.DialTimeout(network, addr, 5*time.Second)
+		rawConn, err = dialProtected(context.Background(), ProxyConfig{}, network, addr, 5*time.Second)
 	} else {
 		if sshClient == nil {
 			return nil, fmt.Errorf("ssh client disconnected")
@@ -645,28 +646,30 @@ func (l *LocalDnsServer) Start(addr string) error {
 }
 
 func (l *LocalDnsServer) Stop() {
-	close(l.closeChan)
-	if l.udpServer != nil {
-		l.udpServer.Shutdown()
-	}
-	if l.tcpServer != nil {
-		l.tcpServer.Shutdown()
-	}
-	l.tcpConnPools.Range(func(key, value interface{}) bool {
-		pool := value.(chan pooledDnsConn)
-		close(pool)
-		for pc := range pool {
-			pc.conn.Close()
+	l.closeOnce.Do(func() {
+		close(l.closeChan)
+		if l.udpServer != nil {
+			l.udpServer.Shutdown()
 		}
-		return true
-	})
-	l.dotConnPools.Range(func(key, value interface{}) bool {
-		pool := value.(chan pooledDnsConn)
-		close(pool)
-		for pc := range pool {
-			pc.conn.Close()
+		if l.tcpServer != nil {
+			l.tcpServer.Shutdown()
 		}
-		return true
+		l.tcpConnPools.Range(func(key, value interface{}) bool {
+			pool := value.(chan pooledDnsConn)
+			close(pool)
+			for pc := range pool {
+				pc.conn.Close()
+			}
+			return true
+		})
+		l.dotConnPools.Range(func(key, value interface{}) bool {
+			pool := value.(chan pooledDnsConn)
+			close(pool)
+			for pc := range pool {
+				pc.conn.Close()
+			}
+			return true
+		})
 	})
 }
 
