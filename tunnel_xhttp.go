@@ -563,10 +563,9 @@ func init() {
 
 		if isTLS {
 			// ==========================================
-			// 1. 优先探测 HTTP/3 (QUIC)
+			// 优先探测 HTTP/3 (QUIC)
 			// ==========================================
 			if slices.Contains(alpnList, "h3") {
-				// 💡 核心修改1：直接调用我们写好的全局复用器
 				// 这会自动处理网卡绑定、底层 Socket 懒加载和连接寿命管理
 				tr3, h3Err := getH3Transport(cfg)
 
@@ -587,26 +586,15 @@ func init() {
 			}
 
 			// ==========================================
-			// 2. TCP ALPN 探测 (h2 / http/1.1)
+			// TCP ALPN 探测 (h2 / http/1.1)
 			// ==========================================
 			if client == nil {
-				// 💡 核心修改2：创建一个带有网卡绑定能力的 TCP 拨号闭包
-				dialTCPWithBind := func(ctx context.Context, network, addr string) (net.Conn, error) {
-					dialer := &net.Dialer{Timeout: 10 * time.Second}
-					if cfg.BindInterface != "" {
-						bindDevice(dialer, cfg.BindInterface)
-					}
-					return dialer.DialContext(ctx, network, addr)
-				}
-
 				var tcpConn net.Conn
 				var err error
-				// 使用带绑卡的拨号器
-				tcpConn, err = dialTCPWithBind(parentCtx, "tcp", cfg.ProxyAddr)
+				tcpConn, err = dialTCP(parentCtx, cfg, cfg.ProxyAddr)
 				if err != nil {
 					return nil, fmt.Errorf("probe tcp failed: %w", err)
 				}
-				TuneTCPConn(tcpConn) // 保留你的 TCP 调优逻辑
 
 				// 剔除 h3，准备 uTLS 握手
 				tcpAlpns := slices.DeleteFunc(slices.Clone(alpnList), func(s string) bool { return s == "h3" })
@@ -660,11 +648,10 @@ func init() {
 					}
 
 					// 使用带绑卡的拨号器
-					tc, err := dialTCPWithBind(ctx, "tcp", cfg.ProxyAddr)
+					tc, err := dialTCP(parentCtx, cfg, cfg.ProxyAddr)
 					if err != nil {
 						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
-					TuneTCPConn(tc)
 
 					uc, np, err := handshakeUTLS(ctx, tc)
 					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
@@ -706,9 +693,8 @@ func init() {
 			}
 		} else {
 			// ==========================================
-			// 3. 纯 TCP 模式 (h2c 探测)
+			// 纯 TCP 模式 (h2c 探测)
 			// ==========================================
-			// 💡 核心修改3：为明文模式也加上绑卡拨号器
 			dialTCPWithBind := func(ctx context.Context, network, addr string) (net.Conn, error) {
 				dialer := &net.Dialer{Timeout: 10 * time.Second}
 				if cfg.BindInterface != "" {
