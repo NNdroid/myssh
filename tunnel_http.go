@@ -132,13 +132,13 @@ func init() {
 		}
 
 		zlog.Infof("%s [Tunnel] ✅ HTTP %s 隧道已建立", TAG, method)
-		
+
 		// 返回我们包装过的 BufferedConn，把含有残留 SSH 握手数据的 br 缝合进去
 		wrappedConn := &BufferedConn{
 			Conn: baseConn,
 			r:    br,
 		}
-		
+
 		return wrappedConn, nil
 	})
 }

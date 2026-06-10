@@ -33,6 +33,7 @@ type UdpgwConn struct {
 
 	readLock  sync.Mutex
 	writeLock sync.Mutex
+	lenBuf    [2]byte
 
 	uploadCounter   func(int64)
 	downloadCounter func(int64)
@@ -127,6 +128,9 @@ func (c *UdpgwConn) keepAliveLoop() {
 	// tun2proxy Keepalive 格式: [LEN: 3] [FLAG: 0x01] [CONN_ID: 1]
 	keepalivePkt := []byte{0x00, 0x03, UdpgwFlagKeepalive, 0x00, 0x01}
 
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
 	c.writeLock.Lock()
 	c.Conn.Write(keepalivePkt)
 	c.writeLock.Unlock()
@@ -134,9 +138,6 @@ func (c *UdpgwConn) keepAliveLoop() {
 	if Debug {
 		zlog.Debugf("%s [UDPGW-Daemon] 🚀 已发送初始 Keepalive (Flag: 0x01)，会话注册完毕", TAG)
 	}
-
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
 
 	for {
 		select {
@@ -196,14 +197,22 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 	c.readLock.Lock()
 	defer c.readLock.Unlock()
 
-	sizeBuf := make([]byte, 2)
+	bufPtr := udpBufPool.Get().(*[]byte)
+	bodyBuf := (*bufPtr)[:cap(*bufPtr)]
+	defer udpBufPool.Put(bufPtr)
+
 	for {
-		if _, err := io.ReadFull(c.Conn, sizeBuf); err != nil {
+		if _, err := io.ReadFull(c.Conn, c.lenBuf[:]); err != nil {
 			return 0, err
 		}
-		pLen := binary.BigEndian.Uint16(sizeBuf)
+		pLen := binary.BigEndian.Uint16(c.lenBuf[:])
 
-		body := make([]byte, pLen)
+		if int(pLen) > len(bodyBuf) {
+			zlog.Errorf("%s [UDPGW-Read] ❌ 数据包过大截断", TAG)
+			return 0, fmt.Errorf("packet too large: %d", pLen)
+		}
+
+		body := bodyBuf[:pLen]
 		if _, err := io.ReadFull(c.Conn, body); err != nil {
 			return 0, err
 		}

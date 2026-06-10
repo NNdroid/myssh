@@ -12,7 +12,7 @@ func bindDevice(dialer *net.Dialer, ifaceName string) {
 	if ifaceName == "" {
 		return
 	}
-	
+
 	dialer.Control = func(network, address string, c syscall.RawConn) error {
 		var operr error
 		err := c.Control(func(fd uintptr) {
@@ -24,6 +24,6 @@ func bindDevice(dialer *net.Dialer, ifaceName string) {
 		}
 		return operr
 	}
-	
+
 	zlog.Infof("%s [Tunnel] 🔒 已配置底层 Socket 绑定至指定接口: %s", TAG, ifaceName)
 }

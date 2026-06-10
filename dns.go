@@ -61,6 +61,8 @@ type LocalDnsServer struct {
 	cache        map[string]dnsCacheEntry
 	cacheMu      sync.RWMutex
 	singleflight *singleflight.Group
+
+	closeChan chan struct{}
 }
 
 var (
@@ -72,10 +74,11 @@ var (
 
 func NewLocalDnsServer(udpgwAddr string, udpgwVersion string) *LocalDnsServer {
 	l := &LocalDnsServer{
-		UdpgwAddr:       udpgwAddr,
-		UdpgwVersion:    udpgwVersion,
-		singleflight:    &singleflight.Group{},
-		cache:           make(map[string]dnsCacheEntry),
+		UdpgwAddr:    udpgwAddr,
+		UdpgwVersion: udpgwVersion,
+		singleflight: &singleflight.Group{},
+		cache:        make(map[string]dnsCacheEntry),
+		closeChan:    make(chan struct{}),
 	}
 	go l.cacheCleanupLoop()
 	localDnsServer = l
@@ -107,7 +110,7 @@ func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshCli
 			if l.UdpgwAddr == "" {
 				return nil, fmt.Errorf("proxy udp requires udpgw_addr to be configured")
 			}
-			
+
 			if l.UdpgwVersion == "badvpn" {
 				rawConn, err = DialBadvpnUdpgw(sshClient, l.UdpgwAddr, addr)
 			} else {
@@ -129,8 +132,15 @@ func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshCli
 
 func (l *LocalDnsServer) cacheCleanupLoop() {
 	ticker := time.NewTicker(CacheCleanupInterval)
-	for range ticker.C {
-		l.cleanupExpiredCache()
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			l.cleanupExpiredCache()
+		case <-l.closeChan:
+			zlog.Infof("%s [DNS-Server] 🛑 DNS 缓存清理守护协程已安全退出", TAG)
+			return
+		}
 	}
 }
 
@@ -411,7 +421,7 @@ func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, ss
 func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *http.Client {
 	l.dohMu.Lock()
 	defer l.dohMu.Unlock()
-	
+
 	// ==========================================
 	// 1. 直连 DoH Client
 	// ==========================================
@@ -423,7 +433,7 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 						return l.dialTracked(network, addr, true, nil, "DNS-DoH-Direct")
 					},
-					ForceAttemptHTTP2: true,
+					ForceAttemptHTTP2:   true,
 					MaxIdleConns:        100,
 					MaxIdleConnsPerHost: 10,
 					IdleConnTimeout:     30 * time.Second,
@@ -432,7 +442,7 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 		}
 		return l.directDoH
 	}
-	
+
 	// ==========================================
 	// 2. 代理 DoH Client
 	// ==========================================
@@ -444,7 +454,7 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return l.dialTracked(network, addr, false, sshClient, "DNS-DoH-Proxy")
 				},
-				ForceAttemptHTTP2: true,
+				ForceAttemptHTTP2:   true,
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 10,
 				IdleConnTimeout:     30 * time.Second,
@@ -635,12 +645,29 @@ func (l *LocalDnsServer) Start(addr string) error {
 }
 
 func (l *LocalDnsServer) Stop() {
+	close(l.closeChan)
 	if l.udpServer != nil {
 		l.udpServer.Shutdown()
 	}
 	if l.tcpServer != nil {
 		l.tcpServer.Shutdown()
 	}
+	l.tcpConnPools.Range(func(key, value interface{}) bool {
+		pool := value.(chan pooledDnsConn)
+		close(pool)
+		for pc := range pool {
+			pc.conn.Close()
+		}
+		return true
+	})
+	l.dotConnPools.Range(func(key, value interface{}) bool {
+		pool := value.(chan pooledDnsConn)
+		close(pool)
+		for pc := range pool {
+			pc.conn.Close()
+		}
+		return true
+	})
 }
 
 func (l *LocalDnsServer) printDnsResponse(source, server, domainName, qtypeStr string, reply *dns.Msg) {

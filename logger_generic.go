@@ -1,4 +1,5 @@
 //go:build !android
+
 package myssh
 
 import (
@@ -52,7 +53,7 @@ func InitLogger(logPath string, logLevelStr string) int {
 	consoleEncoderConfig := encoderConfig
 	consoleEncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	consoleEncoder := zapcore.NewConsoleEncoder(consoleEncoderConfig)
-	
+
 	// 标准输出 (Stdout)，Systemd 等守护进程会自动捕获这里的内容
 	consoleCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level)
 	cores = append(cores, consoleCore)
@@ -77,13 +78,13 @@ func InitLogger(logPath string, logLevelStr string) int {
 
 	// 将多个输出核心组合在一起
 	combinedCore := zapcore.NewTee(cores...)
-	
+
 	// 实例化 logger，开启调用者行号显示
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zlog = logger.Sugar()
 
 	zlog.Infof("[Logger] 通用日志系统初始化完成 | 级别: %s | 文件: %s", level.String(), logPath)
-	
+
 	return 0
 }
 

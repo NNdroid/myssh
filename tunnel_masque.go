@@ -95,7 +95,7 @@ func init() {
 			zlog.Errorf("%s [Tunnel] ❌ MASQUE TCP 握手失败: %v", TAG, err)
 			h3TransportCache.Delete(cfg.ProxyAddr)
 			return nil, err
-			
+
 		case resp := <-respChan:
 			// MASQUE 规范中，成功的 CONNECT 响应通常是 200 到 299
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -113,7 +113,7 @@ func init() {
 			}
 
 			return WrapWithPadding(rConn), nil
-			
+
 		case <-time.After(15 * time.Second):
 			cancel()
 			zlog.Errorf("%s [Tunnel] ❌ MASQUE 握手超时", TAG)

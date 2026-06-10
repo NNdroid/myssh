@@ -20,7 +20,7 @@ var globalConID uint32 = 0
 func nextConID() uint16 {
 	// 使用原子操作递增，防止并发冲突
 	id := atomic.AddUint32(&globalConID, 1)
-	
+
 	// 如果达到上限 (65535)，则绕回。
 	// 注意：badvpn-udpgw 通常不支持 0 作为有效 conid，所以绕回时加 1
 	if id > 65535 {
@@ -46,6 +46,7 @@ type BadvpnUdpgwConn struct {
 	conID      uint16
 
 	writeLock sync.Mutex
+	lenBuf    [2]byte
 	closed    chan struct{}
 	closeOnce sync.Once
 }
@@ -75,9 +76,9 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		zlog.Errorf("%s [UDPGW-Dial] ❌ SSH 建立 TCP 隧道失败 (%s): %v", TAG, udpgwServerAddr, err)
 		return nil, err
 	}
-	
+
 	// 获取一个唯一的 conID
-    uniqueID := nextConID()
+	uniqueID := nextConID()
 
 	c := &BadvpnUdpgwConn{
 		Conn:       underlyingConn,
@@ -87,10 +88,10 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		conID:      uniqueID, // 初始会话 ID
 		closed:     make(chan struct{}),
 	}
-	
+
 	if Debug {
-        zlog.Debugf("%s [UDPGW-Dial] 🆕 分配了新的 ConID: %d", TAG, uniqueID)
-    }
+		zlog.Debugf("%s [UDPGW-Dial] 🆕 分配了新的 ConID: %d", TAG, uniqueID)
+	}
 
 	go c.keepAliveLoop()
 	return c, nil
@@ -108,15 +109,14 @@ func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 	}
 
 	// Badvpn PacketProto 严格要求 2 字节小端序长度
-	header := make([]byte, 2)
-	binary.LittleEndian.PutUint16(header, uint16(length))
+	binary.LittleEndian.PutUint16(c.lenBuf[:], uint16(length))
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-writeFrame] 📤 发送帧 | 长度前缀: %X | 载荷长度: %d\n", TAG, header, length)
+		zlog.Debugf("%s [UDPGW-writeFrame] 📤 发送帧 | 长度前缀: %X | 载荷长度: %d\n", TAG, c.lenBuf[:], length)
 		zlog.Debugf("%s [UDPGW-writeFrame] 📤 帧内容(Hex): %s\n", TAG, hex.EncodeToString(payload))
 	}
 
-	if _, err := c.Conn.Write(header); err != nil {
+	if _, err := c.Conn.Write(c.lenBuf[:]); err != nil {
 		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 写入长度前缀失败: %v", TAG, err)
 		return err
 	}
@@ -131,14 +131,13 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	// 构造心跳包: Flags(1) + ConID(2 小端)
+	hb := make([]byte, 3)
+	hb[0] = UDPGW_CLIENT_FLAG_KEEPALIVE
+	// binary.LittleEndian.PutUint16(hb[1:], c.conID)
+	// ConID 固定为 0，与 C 语言版客户端对齐
+	binary.LittleEndian.PutUint16(hb[1:], 0)
 	for {
-		// 构造心跳包: Flags(1) + ConID(2 小端)
-		hb := make([]byte, 3)
-		hb[0] = UDPGW_CLIENT_FLAG_KEEPALIVE
-		// binary.LittleEndian.PutUint16(hb[1:], c.conID)
-		// ConID 固定为 0，与 C 语言版客户端对齐
-		binary.LittleEndian.PutUint16(hb[1:], 0)
-
 		if Debug {
 			zlog.Debugf("%s [UDPGW-keepAliveLoop] 💓 发送 Keepalive (ID: %d)\n", TAG, c.conID)
 		}
@@ -192,25 +191,28 @@ func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 }
 
 func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
+	bufPtr := udpBufPool.Get().(*[]byte)
+	bodyBuf := (*bufPtr)[:cap(*bufPtr)]
+	defer udpBufPool.Put(bufPtr)
+
 	for {
-		// 1. 严格读取 2 字节小端序长度
-		lenBuf := make([]byte, 2)
-		if _, err := io.ReadFull(c.Conn, lenBuf); err != nil {
+		// 严格读取 2 字节小端序长度
+		if _, err := io.ReadFull(c.Conn, c.lenBuf[:]); err != nil {
 			zlog.Errorf("%s [UDPGW-Read] ❌ 读取长度前缀失败: %v", TAG, err)
 			return 0, err
 		}
 
-		pLen := int(binary.LittleEndian.Uint16(lenBuf))
+		pLen := int(binary.LittleEndian.Uint16(c.lenBuf[:]))
 
 		// 防御性拦截（超大畸形包直接断开，防止 OOM）
-		if pLen > 0xFFFF {
+		if pLen > 0xFFFF || pLen > len(bodyBuf) {
 			err := fmt.Errorf("invalid packet length: %d", pLen)
 			zlog.Errorf("%s [UDPGW-Read] ❌ 畸形包拦截: %v", TAG, err)
 			return 0, err
 		}
 
-		// 2. 读出完整载荷
-		body := make([]byte, pLen)
+		// 读出完整载荷
+		body := bodyBuf[:pLen]
 		if _, err := io.ReadFull(c.Conn, body); err != nil {
 			zlog.Errorf("%s [UDPGW-Read] ❌ 读取包体载荷失败 (预期长度: %d): %v", TAG, pLen, err)
 			return 0, err

@@ -716,7 +716,7 @@ func init() {
 				}
 				return dialer.DialContext(ctx, network, addr)
 			}
-			
+
 			// 💡 注意：这里的 probeH2C 传入的是 cfg，以便它内部也能调用绑卡逻辑
 			if probeH2C(parentCtx, cfg) && slices.Contains(alpnList, "h2") {
 				zlog.Infof("%s [Tunnel] ⚡ 探测成功，启用 H2C (明文 HTTP/2) 引擎", TAG)

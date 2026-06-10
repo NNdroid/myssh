@@ -12,6 +12,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -21,14 +22,14 @@ var (
 	// 用于 TCP io.CopyBuffer 的 64KB 缓冲池
 	tcpBufPool = sync.Pool{
 		New: func() interface{} {
-			buf := make([]byte, 64*1024)
+			buf := make([]byte, 64*1024+1024)
 			return &buf
 		},
 	}
 	// 用于 UDP 读取的 64KB 缓冲池
 	udpBufPool = sync.Pool{
 		New: func() interface{} {
-			buf := make([]byte, 65536)
+			buf := make([]byte, 64*1024+1024)
 			return &buf
 		},
 	}
@@ -47,9 +48,10 @@ var (
 	}
 	// 填充池
 	padPool    []byte
-	padPoolLen = 64 * 1000
+	padPoolLen = 64 * 1024
 	// tcp
-	tcpOptimizeBufferSize = 4 * 1024 * 1024
+	tcpOptimizeBufferSize   = 4 * 1024 * 1024
+	tcpKeepaliveIntervalSec = 15
 )
 
 func init() {
@@ -62,14 +64,12 @@ func init() {
 }
 
 func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
-	// 1. 从池子里借一块内存
 	bufPtr := tcpBufPool.Get().(*[]byte)
 	buf := *bufPtr
 
-	// 2. 确保在函数退出时还给池子
 	defer tcpBufPool.Put(bufPtr)
 
-	// 3. 使用 CopyBuffer，并传入我们复用的内存块
+	// 使用 CopyBuffer，并传入我们复用的内存块
 	// 它会一直使用这块内存直到 src 读到 EOF 或出错
 	return io.CopyBuffer(dst, src, buf)
 }
@@ -137,8 +137,9 @@ func (c *DumpConn) Write(b []byte) (int, error) {
 }
 
 // TuneTCPConn 針對 TCP 連線進行底層 Socket 最佳化
-// 1. 關閉 Nagle 演算法 (SetNoDelay) 以保證極低延遲 (適用於 SSH/即時指令)
-// 2. 擴大作業系統讀寫緩衝區至 4MB，以適應跨國高 BDP (頻寬延遲乘積) 網路
+// 關閉 Nagle 演算法 (SetNoDelay) 以保證極低延遲 (適用於 SSH/即時指令)
+// 擴大作業系統讀寫緩衝區至 4MB，以適應跨國高 BDP (頻寬延遲乘積) 網路
+// 设置keepalive 为15s
 func TuneTCPConn(conn net.Conn) {
 	// 嘗試將 net.Conn 轉型為底層的 *net.TCPConn
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -157,6 +158,16 @@ func TuneTCPConn(conn net.Conn) {
 			zlog.Warnf("%s [TCP Tune] 無法設定 WriteBuffer: %v", TAG, err)
 		}
 
-		zlog.Debugf("%s [TCP Tune] 已成功套用 Socket 最佳化 (4MB Buffer, NoDelay)", TAG)
+		// 啟用 TCP Keep-Alive
+		if err := tcpConn.SetKeepAlive(true); err != nil {
+			zlog.Warnf("%s [TCP Tune] 無法啟用 KeepAlive: %v", TAG, err)
+		} else {
+			// 設定 KeepAlive 週期為 15 秒
+			if err := tcpConn.SetKeepAlivePeriod(time.Duration(tcpKeepaliveIntervalSec) * time.Second); err != nil {
+				zlog.Warnf("%s [TCP Tune] 無法設定 KeepAlive 週期: %v", TAG, err)
+			}
+		}
+
+		zlog.Debugf("%s [TCP Tune] 已成功套用 Socket 最佳化 (4MB Buffer, NoDelay, KeepAlive)", TAG)
 	}
 }

@@ -10,7 +10,7 @@ import (
 func bindDevice(dialer *net.Dialer, ifaceName string) {
 	if ifaceName != "" {
 		zlog.Warnf("%s [Tunnel] ⚠️ 当前操作系统不支持通过名称强绑定网卡 (%s)，将回退使用系统默认路由表", TAG, ifaceName)
-		
+
 		// 备用方案：在非 Linux 系统下，你可以尝试通过查找网卡的 IP 地址，然后绑定 IP
 		// iface, err := net.InterfaceByName(ifaceName)
 		// if err == nil {

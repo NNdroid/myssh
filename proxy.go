@@ -49,7 +49,7 @@ type ProxyConfig struct {
 	ServerCertificateFingerprint string `json:"server_certificate_finger_print"`
 	DnsAddr                      string `json:"dns_addr"`
 	UdpgwVersion                 string `json:"udpgw_version"`
-	BindInterface				 string `json:"bind_interface"`
+	BindInterface                string `json:"bind_interface"`
 }
 
 type GlobalConfig struct {
@@ -176,7 +176,7 @@ func dialTCP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, err
 		return nil, err
 	}
 	zlog.Infof("%s [Tunnel] ✅ 底层 TCP 连接建立成功", TAG)
-	
+
 	TuneTCPConn(conn)
 	return conn, nil
 }
@@ -194,7 +194,7 @@ func dialUDP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, err
 		return nil, err
 	}
 	zlog.Infof("%s [Tunnel] ✅ 底层 UDP Socket 准备完毕 (绑定接口: %s)", TAG, cfg.BindInterface)
-	
+
 	return conn, nil
 }
 
@@ -245,7 +245,7 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		//	targetConn = &DumpConn{Conn: targetConn, Prefix: "Client Local - Android"}
 		//}
 	}
-	
+
 	return targetConn, err
 }
 
@@ -331,8 +331,8 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		}
 
 		// --- Wrap the outbound connection ---
-	    remote = WrapConn(remote, target)
-	    // ------------------------------------
+		remote = WrapConn(remote, target)
+		// ------------------------------------
 
 		defer remote.Close()
 		rep := socks5.NewReply(socks5.RepSuccess, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
@@ -474,7 +474,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 			// --- Wrap the outbound connection ---
 			uc = WrapConn(rawConn, targetAddrStr)
-            // ------------------------------------
+			// ------------------------------------
 
 			if Debug {
 				zlog.Debugf("%s [ROUTER-Direct] 🟢 新建本地直连会话 -> %s", TAG, sessionKey)
@@ -532,7 +532,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		return nil
 	}
 
-	sessionKey := addr.String()
+	sessionKey := addr.String() + "<->" + targetAddrStr
 	var uConn net.Conn
 
 	if val, ok := udpgwMap.Load(sessionKey); ok {
