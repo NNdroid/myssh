@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net"
 	"os"
+	"sort"
 	"os/user"
 	"runtime"
 	"strconv"
@@ -25,16 +27,16 @@ import (
 
 // PrintAndroidUserInfo 打印当前 Go 进程在 Android 上的底层身份信息
 func PrintAndroidUserInfo() {
-	// 1. 获取最底层的真实 Linux UID 和 GID
+	// 获取最底层的真实 Linux UID 和 GID
 	realUid := os.Getuid()
 	realGid := os.Getgid()
 
-	// 2. 逆向推算 Android 的用户空间架构
+	// 逆向推算 Android 的用户空间架构
 	// Android UID 计算公式: UID = (UserID * 100000) + AppBaseID
 	androidUserId := realUid / 100000
 	appBaseId := realUid % 100000
 
-	// 3. 尝试获取标准的系统用户信息
+	// 尝试获取标准的系统用户信息
 	var username, homeDir string
 	u, err := user.Current()
 	if err != nil {
@@ -46,7 +48,7 @@ func PrintAndroidUserInfo() {
 		homeDir = u.HomeDir
 	}
 
-	// 4. 使用 zap 打印结构化日志
+	// 使用 zap 打印结构化日志
 	zlog.Info("========== GO PROCESS USER INFO ==========",
 		zap.Int("real_linux_uid", realUid),
 		zap.Int("real_linux_gid", realGid),
@@ -191,6 +193,7 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 type ConnInfo struct {
 	ID         int64     `json:"id"`
 	TargetAddr string    `json:"target_addr"`
+	TargetHost string    `json:"target_host"`
 	ProxyAddr  string    `json:"proxy_addr"`
 	StartTime  time.Time `json:"start_time"`
 	ReadBytes  uint64    `json:"read_bytes"`
@@ -202,6 +205,67 @@ func (c *ConnInfo) String() string {
 	duration := time.Since(c.StartTime).Round(time.Second)
 	return fmt.Sprintf("[ID:%d] Target:%s | Uptime:%s | ↑%d B | ↓%d B",
 		c.ID, c.TargetAddr, duration, atomic.LoadUint64(&c.WriteBytes), atomic.LoadUint64(&c.ReadBytes))
+}
+
+// ==========================================
+// 域名实时流量排行榜
+// ==========================================
+
+// domainStat is the internal struct for calculation
+type domainStat struct {
+	currentTxBytes uint64
+	currentRxBytes uint64
+}
+
+// DomainActivity represents the real-time activity of a single domain for JSON export.
+type DomainActivity struct {
+	Domain string `json:"domain"`
+	TxRate int64  `json:"tx_rate"`
+	RxRate int64  `json:"rx_rate"`
+}
+
+type domainStatsManager struct {
+	stats      sync.Map // key: string (domain), value: *domainStat
+	rankMu     sync.RWMutex
+	rankedList []DomainActivity
+}
+
+var globalDomainStatsManager = &domainStatsManager{}
+
+// calculateAndRank is called periodically to update the ranked list of active domains.
+func (dsm *domainStatsManager) calculateAndRank(elapsed time.Duration) {
+	var currentActivities []DomainActivity
+	dsm.stats.Range(func(key, value interface{}) bool {
+		domain := key.(string)
+		stat := value.(*domainStat)
+		tx := atomic.SwapUint64(&stat.currentTxBytes, 0)
+		rx := atomic.SwapUint64(&stat.currentRxBytes, 0)
+		txRate := bytesPerSecond(tx, elapsed)
+		rxRate := bytesPerSecond(rx, elapsed)
+		if txRate > 0 || rxRate > 0 {
+			currentActivities = append(currentActivities, DomainActivity{Domain: domain, TxRate: int64(txRate), RxRate: int64(rxRate)})
+		}
+		return true
+	})
+	sort.Slice(currentActivities, func(i, j int) bool { return (currentActivities[i].TxRate + currentActivities[i].RxRate) > (currentActivities[j].TxRate + currentActivities[j].RxRate) })
+	const topN = 20
+	if len(currentActivities) > topN {
+		currentActivities = currentActivities[:topN]
+	}
+	dsm.rankMu.Lock()
+	dsm.rankedList = currentActivities
+	dsm.rankMu.Unlock()
+}
+
+// reset clears all domain statistics and the ranked list.
+func (dsm *domainStatsManager) reset() {
+	dsm.stats.Range(func(key, value interface{}) bool {
+		dsm.stats.Delete(key)
+		return true
+	})
+	dsm.rankMu.Lock()
+	dsm.rankedList = nil
+	dsm.rankMu.Unlock()
 }
 
 // ==========================================
@@ -230,14 +294,61 @@ var (
 	currentRxRate uint64
 )
 
+const maxInt64AsUint64 = uint64(1<<63 - 1)
+
+func addrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
+func uint64ToInt64(v uint64) int64 {
+	if v > maxInt64AsUint64 {
+		return int64(maxInt64AsUint64)
+	}
+	return int64(v)
+}
+
+func trafficDelta(current, previous uint64) uint64 {
+	if current < previous {
+		return 0
+	}
+	return current - previous
+}
+
+func bytesPerSecond(delta uint64, elapsed time.Duration) uint64 {
+	if delta == 0 {
+		return 0
+	}
+	elapsedNs := elapsed.Nanoseconds()
+	if elapsedNs <= 0 {
+		return delta
+	}
+
+	divisor := uint64(elapsedNs)
+	hi, lo := bits.Mul64(delta, uint64(time.Second))
+	if hi >= divisor {
+		return ^uint64(0)
+	}
+
+	quotient, remainder := bits.Div64(hi, lo, divisor)
+	if remainder >= (divisor+1)/2 && quotient < ^uint64(0) {
+		quotient++
+	}
+	return quotient
+}
+
 // ==========================================
 // 内部网络连接包装器 (TrackedConn / TrackedPacketConn)
 // ==========================================
 
 type TrackedConn struct {
 	net.Conn
-	manager *trafficManager
-	info    *ConnInfo
+	manager   *trafficManager
+	info      *ConnInfo
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (tc *TrackedConn) Read(b []byte) (n int, err error) {
@@ -245,6 +356,11 @@ func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 	if n > 0 {
 		atomic.AddUint64(&tc.manager.RxTotal, uint64(n)) // 增加全局下行
 		atomic.AddUint64(&tc.info.ReadBytes, uint64(n))  // 增加本连接下行
+		if tc.info.TargetHost != "" {
+			val, _ := globalDomainStatsManager.stats.LoadOrStore(tc.info.TargetHost, &domainStat{})
+			stat := val.(*domainStat)
+			atomic.AddUint64(&stat.currentRxBytes, uint64(n))
+		}
 	}
 	return n, err
 }
@@ -254,20 +370,30 @@ func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 	if n > 0 {
 		atomic.AddUint64(&tc.manager.TxTotal, uint64(n)) // 增加全局上行
 		atomic.AddUint64(&tc.info.WriteBytes, uint64(n)) // 增加本连接上行
+		if tc.info.TargetHost != "" {
+			val, _ := globalDomainStatsManager.stats.LoadOrStore(tc.info.TargetHost, &domainStat{})
+			stat := val.(*domainStat)
+			atomic.AddUint64(&stat.currentTxBytes, uint64(n))
+		}
 	}
 	return n, err
 }
 
 func (tc *TrackedConn) Close() error {
-	atomic.AddInt64(&tc.manager.ActiveConns, -1)
-	tc.manager.activeMap.Delete(tc.info.ID)
-	return tc.Conn.Close()
+	tc.closeOnce.Do(func() {
+		atomic.AddInt64(&tc.manager.ActiveConns, -1)
+		tc.manager.activeMap.Delete(tc.info.ID)
+		tc.closeErr = tc.Conn.Close()
+	})
+	return tc.closeErr
 }
 
 type TrackedPacketConn struct {
 	net.PacketConn
-	manager *trafficManager
-	info    *ConnInfo
+	manager   *trafficManager
+	info      *ConnInfo
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (tc *TrackedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -289,9 +415,12 @@ func (tc *TrackedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error)
 }
 
 func (tc *TrackedPacketConn) Close() error {
-	atomic.AddInt64(&tc.manager.ActiveConns, -1)
-	tc.manager.activeMap.Delete(tc.info.ID)
-	return tc.PacketConn.Close()
+	tc.closeOnce.Do(func() {
+		atomic.AddInt64(&tc.manager.ActiveConns, -1)
+		tc.manager.activeMap.Delete(tc.info.ID)
+		tc.closeErr = tc.PacketConn.Close()
+	})
+	return tc.closeErr
 }
 
 // ==========================================
@@ -322,10 +451,20 @@ func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	atomic.AddInt64(&globalTrafficManager.ActiveConns, 1)
 	id := atomic.AddInt64(&globalTrafficManager.connIDCounter, 1)
 
+	var host string
+	h, _, err := net.SplitHostPort(targetAddr)
+	if err == nil {
+		host = h
+	} else {
+		if net.ParseIP(targetAddr) == nil {
+			host = targetAddr
+		}
+	}
 	info := &ConnInfo{
 		ID:         id,
 		TargetAddr: targetAddr,
-		ProxyAddr:  conn.RemoteAddr().String(),
+		TargetHost: host,
+		ProxyAddr:  addrString(conn.RemoteAddr()),
 		StartTime:  time.Now(),
 	}
 	globalTrafficManager.activeMap.Store(id, info)
@@ -343,10 +482,20 @@ func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 	atomic.AddInt64(&globalTrafficManager.ActiveConns, 1)
 	id := atomic.AddInt64(&globalTrafficManager.connIDCounter, 1)
 
+	var host string
+	h, _, err := net.SplitHostPort(sessionName)
+	if err == nil {
+		host = h
+	} else {
+		if net.ParseIP(sessionName) == nil {
+			host = sessionName
+		}
+	}
 	info := &ConnInfo{
 		ID:         id,
 		TargetAddr: sessionName,
-		ProxyAddr:  conn.LocalAddr().String(),
+		TargetHost: host,
+		ProxyAddr:  addrString(conn.LocalAddr()),
 		StartTime:  time.Now(),
 	}
 	globalTrafficManager.activeMap.Store(id, info)
@@ -365,6 +514,8 @@ func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 var (
 	trafficCb TrafficCallback
 	sysInfoCb SysInfoCallback
+	callbackMu sync.RWMutex
+	cpuStatsMu sync.Mutex
 )
 
 // TrafficStats 供外部获取流量数据的结构体 (新增了连接数)
@@ -395,16 +546,25 @@ type SysInfoCallback interface {
 	OnSysInfoUpdate(cpuPercent float64, memAllocMB float64, memSysMB float64, goroutines int)
 }
 
-func RegisterTrafficCallback(cb TrafficCallback) { trafficCb = cb }
-func RegisterSysInfoCallback(cb SysInfoCallback) { sysInfoCb = cb }
+func RegisterTrafficCallback(cb TrafficCallback) {
+	callbackMu.Lock()
+	trafficCb = cb
+	callbackMu.Unlock()
+}
+
+func RegisterSysInfoCallback(cb SysInfoCallback) {
+	callbackMu.Lock()
+	sysInfoCb = cb
+	callbackMu.Unlock()
+}
 
 // GetTrafficStats 供外部主动调用
 func GetTrafficStats() *TrafficStats {
 	return &TrafficStats{
-		TxRate:      int64(atomic.LoadUint64(&currentTxRate)),
-		RxRate:      int64(atomic.LoadUint64(&currentRxRate)),
-		TxTotal:     int64(atomic.LoadUint64(&globalTrafficManager.TxTotal)),
-		RxTotal:     int64(atomic.LoadUint64(&globalTrafficManager.RxTotal)),
+		TxRate:      uint64ToInt64(atomic.LoadUint64(&currentTxRate)),
+		RxRate:      uint64ToInt64(atomic.LoadUint64(&currentRxRate)),
+		TxTotal:     uint64ToInt64(atomic.LoadUint64(&globalTrafficManager.TxTotal)),
+		RxTotal:     uint64ToInt64(atomic.LoadUint64(&globalTrafficManager.RxTotal)),
 		ActiveConns: atomic.LoadInt64(&globalTrafficManager.ActiveConns),
 		TotalConns:  atomic.LoadInt64(&globalTrafficManager.TotalConns),
 	}
@@ -424,9 +584,20 @@ func GetSysStats() *SysStats {
 
 // GetActiveConnectionsJSON 返回当前活跃连接的 JSON 字符串 (完美解决 GoMobile 无法返回结构体切片的问题)
 func GetActiveConnectionsJSON() string {
-	var list []*ConnInfo
+	var list []ConnInfo
 	globalTrafficManager.activeMap.Range(func(key, value interface{}) bool {
-		list = append(list, value.(*ConnInfo))
+		info, ok := value.(*ConnInfo)
+		if !ok || info == nil {
+			return true
+		}
+		list = append(list, ConnInfo{
+			ID:         info.ID,
+			TargetAddr: info.TargetAddr,
+			ProxyAddr:  info.ProxyAddr,
+			StartTime:  info.StartTime,
+			ReadBytes:  atomic.LoadUint64(&info.ReadBytes),
+			WriteBytes: atomic.LoadUint64(&info.WriteBytes),
+		})
 		return true
 	})
 	if len(list) == 0 {
@@ -437,6 +608,55 @@ func GetActiveConnectionsJSON() string {
 		return "[]"
 	}
 	return string(data)
+}
+
+// GetDomainActivityJSON 返回按速度排名的顶级活动域的 JSON 字符串。
+func GetDomainActivityJSON() string {
+	globalDomainStatsManager.rankMu.RLock()
+	defer globalDomainStatsManager.rankMu.RUnlock()
+	if len(globalDomainStatsManager.rankedList) == 0 {
+		return "[]"
+	}
+	data, err := json.Marshal(globalDomainStatsManager.rankedList)
+	if err != nil {
+		zlog.Errorf("%s [Stats] ❌ 序列化域名活动排行榜失败: %v", TAG, err)
+		return "[]"
+	}
+	return string(data)
+}
+
+// ResetDomainStatsAndCache 供外部 (Android) 主动调用，清空路由缓存与域名活动排行榜数据
+func ResetDomainStatsAndCache() {
+	if globalRouter != nil {
+		globalRouter.ResetCacheAndStats()
+	}
+	globalDomainStatsManager.reset()
+	zlog.Infof("%s [Stats] ♻️ 域名统计排行榜与路由缓存已响应 UI 请求重置", TAG)
+}
+
+// RouterStats 供外部获取路由分流统计数据的结构体
+type RouterStats struct {
+	QueryCount    int64
+	CacheHitCount int64
+	HitRate       float64
+}
+
+// GetRouterStats 供外部 (Android) 主动调用，获取当前路由引擎的实时统计信息
+func GetRouterStats() *RouterStats {
+	if globalRouter == nil {
+		return &RouterStats{}
+	}
+
+	total, hits := globalRouter.GetStats()
+	var rate float64
+	if total > 0 {
+		rate = float64(hits) / float64(total) * 100.0
+	}
+	return &RouterStats{
+		QueryCount:    total,
+		CacheHitCount: hits,
+		HitRate:       rate,
+	}
 }
 
 // ==========================================
@@ -450,6 +670,9 @@ var (
 )
 
 func getCpuPercent() float64 {
+	cpuStatsMu.Lock()
+	defer cpuStatsMu.Unlock()
+
 	data, err := os.ReadFile("/proc/self/stat")
 	if err != nil {
 		return 0.0
@@ -483,7 +706,14 @@ func getCpuPercent() float64 {
 func init() {
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		lastSampleTime := time.Now()
 		for range ticker.C {
+			now := time.Now()
+			elapsed := now.Sub(lastSampleTime)
+			lastSampleTime = now
+
 			// 当前总流量和连接数
 			tTx := atomic.LoadUint64(&globalTrafficManager.TxTotal)
 			tRx := atomic.LoadUint64(&globalTrafficManager.RxTotal)
@@ -495,12 +725,14 @@ func init() {
 			lRx := atomic.SwapUint64(&lastRxTotal, tRx)
 
 			// 计算当前 1 秒内产生的流量速率
-			txRate := tTx - lTx
-			rxRate := tRx - lRx
+			txRate := bytesPerSecond(trafficDelta(tTx, lTx), elapsed)
+			rxRate := bytesPerSecond(trafficDelta(tRx, lRx), elapsed)
 
 			// 更新供主动查询使用的速率
 			atomic.StoreUint64(&currentTxRate, txRate)
 			atomic.StoreUint64(&currentRxRate, rxRate)
+
+			globalDomainStatsManager.calculateAndRank(elapsed)
 
 			// 触发回调给 Android
 			if trafficCb != nil {

@@ -4,25 +4,33 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"regexp"
-	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 
-	"github.com/v2fly/v2ray-core/v5/app/router/routercommon"
-	"github.com/yl2chen/cidranger"
-	"google.golang.org/protobuf/proto"
+	"github.com/cloudflare/ahocorasick"
+	"github.com/miekg/dns"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 type GeoRouter struct {
 	fullDomains   map[string]struct{}
 	subDomains    map[string]struct{}
 	keywordList   []string
+	keywordAC     *ahocorasick.Matcher
 	regexList     []*regexp.Regexp
-	regexCombined *regexp.Regexp // 合并后的正则表达式
+	regexGrouped  []*regexp.Regexp
 
-	ipRanger cidranger.Ranger
+	ipTrie *ipTrie
+	domainCache sync.Map // 路由结果 L1 并发缓存
+	cacheCount  int32    // L1 缓存条目计数器
+
+	queryCount    int64 // 总查询次数统计
+	cacheHitCount int64 // 缓存命中次数统计
 }
 
 func newGeoRouter() *GeoRouter {
@@ -31,7 +39,7 @@ func newGeoRouter() *GeoRouter {
 		subDomains:  make(map[string]struct{}),
 		keywordList: make([]string, 0),
 		regexList:   make([]*regexp.Regexp, 0),
-		ipRanger:    cidranger.NewPCTrieRanger(),
+		ipTrie:      newIPTrie(),
 	}
 }
 
@@ -48,36 +56,123 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		return fmt.Errorf("读取 geosite.dat 失败: %w", err)
 	}
 
-	var geoSiteList routercommon.GeoSiteList
-	if err := proto.Unmarshal(data, &geoSiteList); err != nil {
-		return fmt.Errorf("解析 protobuf 失败: %w", err)
-	}
-
 	tagMap := make(map[string]bool)
 	for _, t := range targetTags {
 		tagMap[strings.ToLower(t)] = true
 	}
 
 	foundCount := 0
+	keywordMap := make(map[string]struct{}) // 用于 Keyword 原位去重，大幅降低 AC 自动机内存消耗
 
-	for _, site := range geoSiteList.Entry {
-		if tagMap[strings.ToLower(site.CountryCode)] {
-			foundCount++
-			for _, domain := range site.Domain {
-				val := strings.ToLower(domain.Value)
-				switch domain.Type {
-				case routercommon.Domain_Plain:
-					r.keywordList = append(r.keywordList, val)
-				case routercommon.Domain_Regex:
-					if re, err := regexp.Compile(val); err == nil {
-						r.regexList = append(r.regexList, re)
+	// 使用 protowire 直接解析字节流
+	b := data
+	for len(b) > 0 {
+		num, typ, length := protowire.ConsumeTag(b)
+		if length < 0 {
+			break
+		}
+		b = b[length:]
+
+		if num == 1 && typ == protowire.BytesType { // GeoSiteList.entry
+			entryBytes, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				break
+			}
+			b = b[n:]
+
+			var countryCode string
+			var domains [][]byte
+			eb := entryBytes
+			for len(eb) > 0 {
+				enum, etyp, elen := protowire.ConsumeTag(eb)
+				if elen < 0 {
+					break
+				}
+				eb = eb[elen:]
+
+				if enum == 1 && etyp == protowire.BytesType { // GeoSite.country_code
+					v, en := protowire.ConsumeBytes(eb)
+					if en < 0 {
+						break
 					}
-				case routercommon.Domain_RootDomain:
-					r.subDomains[val] = struct{}{}
-				case routercommon.Domain_Full:
-					r.fullDomains[val] = struct{}{}
+					countryCode = string(v)
+					eb = eb[en:]
+				} else if enum == 2 && etyp == protowire.BytesType { // GeoSite.domain
+					v, en := protowire.ConsumeBytes(eb)
+					if en < 0 {
+						break
+					}
+					domains = append(domains, v)
+					eb = eb[en:]
+				} else {
+					en := protowire.ConsumeFieldValue(enum, etyp, eb)
+					if en < 0 {
+						break
+					}
+					eb = eb[en:]
 				}
 			}
+
+			if tagMap[strings.ToLower(countryCode)] {
+				foundCount++
+				for _, domBytes := range domains {
+					var dType int
+					var dValue string
+					db := domBytes
+					for len(db) > 0 {
+						dnum, dtyp, dlen := protowire.ConsumeTag(db)
+						if dlen < 0 {
+							break
+						}
+						db = db[dlen:]
+
+						if dnum == 1 && dtyp == protowire.VarintType { // Domain.type
+							v, dn := protowire.ConsumeVarint(db)
+							if dn < 0 {
+								break
+							}
+							dType = int(v)
+							db = db[dn:]
+						} else if dnum == 2 && dtyp == protowire.BytesType { // Domain.value
+							v, dn := protowire.ConsumeBytes(db)
+							if dn < 0 {
+								break
+							}
+							dValue = string(v)
+							db = db[dn:]
+						} else {
+							dn := protowire.ConsumeFieldValue(dnum, dtyp, db)
+							if dn < 0 {
+								break
+							}
+							db = db[dn:]
+						}
+					}
+
+					val := strings.ToLower(dValue)
+					switch dType {
+					case 0: // Plain
+						if _, exists := keywordMap[val]; !exists {
+							keywordMap[val] = struct{}{}
+							r.keywordList = append(r.keywordList, val)
+						}
+					case 1: // Regex
+						if re, err := regexp.Compile(val); err == nil {
+							r.regexList = append(r.regexList, re)
+						}
+					case 2: // RootDomain
+						r.subDomains[val] = struct{}{}
+					case 3: // Full
+						r.fullDomains[val] = struct{}{}
+					}
+				}
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				break
+			}
+			b = b[n:]
 		}
 	}
 
@@ -88,12 +183,16 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	// 合并正则表达式以提升性能
 	r.combineRegexPatterns()
 
-	// 清理动作
-	data = nil                               // 释放原始字节流引用
-	geoSiteList = routercommon.GeoSiteList{} // 释放解析后的临时大结构体引用
+	// 为 Keyword 规则构建 AC 自动机，彻底消灭 O(N) 循环检测瓶颈
+	if len(r.keywordList) > 0 {
+		r.keywordAC = ahocorasick.NewStringMatcher(r.keywordList)
+	}
 
-	// 强制触发 GC 并尝试将物理内存还给 Android 系统
-	runtime.GC()
+	// 清理动作
+	data = nil // 释放原始字节流引用
+	keywordMap = nil // 释放去重映射表
+
+	// 强制触发 GC，并立即将解析 Protobuf 产生的巨大临时内存还给 Android 系统
 	debug.FreeOSMemory()
 
 	zlog.Debugf("%s [Router] GeoSite 解析完毕，匹配到 %d 个规则簇", TAG, foundCount)
@@ -106,16 +205,30 @@ func (r *GeoRouter) combineRegexPatterns() {
 		return
 	}
 
-	patterns := make([]string, len(r.regexList))
-	for i, re := range r.regexList {
-		patterns[i] = "(" + re.String() + ")"
-	}
-	combined := strings.Join(patterns, "|")
+	const chunkSize = 100 // 每 100 个正则合并为一组，完美平衡 DFA 状态机体积和匹配速度
+	r.regexGrouped = make([]*regexp.Regexp, 0)
 
-	if regex, err := regexp.Compile(combined); err == nil {
-		r.regexCombined = regex
-		zlog.Debugf("%s [Router] 已合并 %d 个正则表达式为单一模式", TAG, len(r.regexList))
+	for i := 0; i < len(r.regexList); i += chunkSize {
+		end := i + chunkSize
+		if end > len(r.regexList) {
+			end = len(r.regexList)
+		}
+
+		patterns := make([]string, 0, end-i)
+		for _, re := range r.regexList[i:end] {
+			patterns = append(patterns, "("+re.String()+")")
+		}
+		combined := strings.Join(patterns, "|")
+
+		if regex, err := regexp.Compile(combined); err == nil {
+			r.regexGrouped = append(r.regexGrouped, regex)
+		} else {
+			// 兜底保障：如果某一组因为极其特殊的语法或超限导致合并失败，降级将它们单独存入组内
+			zlog.Warnf("%s [Router] 正则分块合并出现异常，已降级散装存储: %v", TAG, err)
+			r.regexGrouped = append(r.regexGrouped, r.regexList[i:end]...)
+		}
 	}
+	zlog.Debugf("%s [Router] %d 个正则表达式已优化为 %d 个匹配组", TAG, len(r.regexList), len(r.regexGrouped))
 }
 
 func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
@@ -131,11 +244,6 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 		return fmt.Errorf("读取 geoip.dat 失败: %w", err)
 	}
 
-	var geoIPList routercommon.GeoIPList
-	if err := proto.Unmarshal(data, &geoIPList); err != nil {
-		return fmt.Errorf("解析 protobuf 失败: %w", err)
-	}
-
 	tagMap := make(map[string]bool)
 	for _, t := range targetTags {
 		tagMap[strings.ToUpper(t)] = true
@@ -144,25 +252,105 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	foundCount := 0
 	ipInsertCount := 0
 
-	for _, ipGroup := range geoIPList.Entry {
-		if tagMap[strings.ToUpper(ipGroup.CountryCode)] {
-			foundCount++
-			for _, cidr := range ipGroup.Cidr {
-				ip := cidr.Ip
-				prefix := cidr.Prefix
+	// 使用 protowire 直接解析 GeoIP
+	b := data
+	for len(b) > 0 {
+		num, typ, length := protowire.ConsumeTag(b)
+		if length < 0 {
+			break
+		}
+		b = b[length:]
 
-				var ipNet *net.IPNet
-				if len(ip) == 4 { // IPv4
-					ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(int(prefix), 32)}
-				} else if len(ip) == 16 { // IPv6
-					ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(int(prefix), 128)}
-				} else {
-					continue
-				}
-
-				_ = r.ipRanger.Insert(cidranger.NewBasicRangerEntry(*ipNet))
-				ipInsertCount++
+		if num == 1 && typ == protowire.BytesType { // GeoIPList.entry
+			entryBytes, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				break
 			}
+			b = b[n:]
+
+			var countryCode string
+			var cidrs [][]byte
+
+			eb := entryBytes
+			for len(eb) > 0 {
+				enum, etyp, elen := protowire.ConsumeTag(eb)
+				if elen < 0 {
+					break
+				}
+				eb = eb[elen:]
+
+				if enum == 1 && etyp == protowire.BytesType { // GeoIP.country_code
+					v, en := protowire.ConsumeBytes(eb)
+					if en < 0 {
+						break
+					}
+					countryCode = string(v)
+					eb = eb[en:]
+				} else if enum == 2 && etyp == protowire.BytesType { // GeoIP.cidr
+					v, en := protowire.ConsumeBytes(eb)
+					if en < 0 {
+						break
+					}
+					cidrs = append(cidrs, v)
+					eb = eb[en:]
+				} else {
+					en := protowire.ConsumeFieldValue(enum, etyp, eb)
+					if en < 0 {
+						break
+					}
+					eb = eb[en:]
+				}
+			}
+
+			if tagMap[strings.ToUpper(countryCode)] {
+				foundCount++
+				for _, cidrBytes := range cidrs {
+					var ip []byte
+					var prefix uint32
+
+					cb := cidrBytes
+					for len(cb) > 0 {
+						cnum, ctyp, clen := protowire.ConsumeTag(cb)
+						if clen < 0 {
+							break
+						}
+						cb = cb[clen:]
+
+						if cnum == 1 && ctyp == protowire.BytesType { // CIDR.ip
+							v, cn := protowire.ConsumeBytes(cb)
+							if cn < 0 {
+								break
+							}
+							ip = v
+							cb = cb[cn:]
+						} else if cnum == 2 && ctyp == protowire.VarintType { // CIDR.prefix
+							v, cn := protowire.ConsumeVarint(cb)
+							if cn < 0 {
+								break
+							}
+							prefix = uint32(v)
+							cb = cb[cn:]
+						} else {
+							cn := protowire.ConsumeFieldValue(cnum, ctyp, cb)
+							if cn < 0 {
+								break
+							}
+							cb = cb[cn:]
+						}
+					}
+
+					if len(ip) == 4 || len(ip) == 16 {
+						r.ipTrie.Insert(ip, int(prefix))
+						ipInsertCount++
+					}
+				}
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				break
+			}
+			b = b[n:]
 		}
 	}
 
@@ -171,11 +359,9 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	}
 
 	// 清理动作
-	data = nil                           // 释放原始字节流引用
-	geoIPList = routercommon.GeoIPList{} // 释放解析后的临时大结构体引用
+	data = nil // 释放原始字节流引用
 
-	// 强制触发 GC 并尝试将物理内存还给 Android 系统
-	runtime.GC()
+	// 强制触发 GC，并立即将解析 Protobuf 产生的巨大临时内存还给 Android 系统
 	debug.FreeOSMemory()
 
 	zlog.Debugf("%s [Router] GeoIP 解析完毕，共将 %d 条 CIDR 网段载入 Radix 树", TAG, ipInsertCount)
@@ -192,9 +378,9 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		return RouteResult{IsDirect: false, DialHost: ""}
 	}
 
-	ip := net.ParseIP(host)
-	if ip != nil {
-		if r.MatchIP(ip) {
+	// 使用 Go 1.18+ 的 netip 零分配解析，替换老旧的 net.ParseIP
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if r.MatchNetIP(addr) {
 			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
 			return RouteResult{IsDirect: true, DialHost: host}
 		}
@@ -216,9 +402,11 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	// 查 GeoIP (IP 规则)
 	ips := GetCachedIPs(host)
 	if len(ips) == 0 {
-		localIPs, err := net.LookupIP(host)
-		if err == nil {
-			ips = localIPs
+		if ip4 := ResolveOne(host, dns.TypeA); ip4 != nil {
+			ips = append(ips, ip4)
+		}
+		if ip6 := ResolveOne(host, dns.TypeAAAA); ip6 != nil {
+			ips = append(ips, ip6)
 		}
 	}
 
@@ -238,39 +426,196 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 func (r *GeoRouter) MatchDomain(domain string) bool {
 	domain = strings.ToLower(domain)
 
+	// 查询 L1 缓存 (O(1) 绝对速度)
+	// 现代 App / 网页加载时，同一个域名会瞬间爆发几十个并发请求，缓存能直接截断状态机开销。
+	if val, ok := r.domainCache.Load(domain); ok {
+		atomic.AddInt64(&r.cacheHitCount, 1)
+		atomic.AddInt64(&r.queryCount, 1)
+		return val.(bool)
+	}
+
+	atomic.AddInt64(&r.queryCount, 1)
+	matched := r.doMatchDomain(domain)
+
+	// 当缓存唯一域名超过 10000 条时，直接重置清空。
+	// 这种“阈值粗暴清空”比维护 LRU 链表的代价小无数倍，且完美保留了读操作的无锁并发性能。
+	if atomic.AddInt32(&r.cacheCount, 1) > 10000 {
+		r.domainCache.Range(func(key, value interface{}) bool {
+			r.domainCache.Delete(key)
+			return true
+		})
+		atomic.StoreInt32(&r.cacheCount, 0)
+	}
+
+	r.domainCache.Store(domain, matched)
+	return matched
+}
+
+// ResetCacheAndStats 清空 L1 路由缓存及相关的查询统计计数
+func (r *GeoRouter) ResetCacheAndStats() {
+	r.domainCache.Range(func(key, value interface{}) bool {
+		r.domainCache.Delete(key)
+		return true
+	})
+	atomic.StoreInt32(&r.cacheCount, 0)
+	atomic.StoreInt64(&r.queryCount, 0)
+	atomic.StoreInt64(&r.cacheHitCount, 0)
+	zlog.Infof("%s [Router] ♻️ 路由缓存与查询统计数据已手动重置", TAG)
+}
+
+// GetStats 返回路由统计数据：(总查询数, 缓存命中数)
+func (r *GeoRouter) GetStats() (int64, int64) {
+	return atomic.LoadInt64(&r.queryCount), atomic.LoadInt64(&r.cacheHitCount)
+}
+
+func (r *GeoRouter) doMatchDomain(domain string) bool {
+
 	// Full 检查
 	if _, ok := r.fullDomains[domain]; ok {
 		return true
 	}
 
-	// Domain 检查
-	parts := strings.Split(domain, ".")
-	for i := 0; i < len(parts); i++ {
-		sub := strings.Join(parts[i:], ".")
+	// Domain 检查 (性能优化：零内存分配原位切割机制)
+	sub := domain
+	for {
 		if _, ok := r.subDomains[sub]; ok {
 			return true
 		}
+		idx := strings.IndexByte(sub, '.')
+		if idx < 0 {
+			break
+		}
+		sub = sub[idx+1:]
 	}
 
-	// Keyword 检查 - 按长度倒序优化匹配速度
-	for _, kw := range r.keywordList {
-		if strings.Contains(domain, kw) {
+	// Keyword 检查 (使用 AC 自动机实现 O(1) 复杂度极速匹配)
+	if r.keywordAC != nil {
+		// Match 返回匹配到的模式索引切片，只要长度大于 0 即说明命中关键词
+		if hits := r.keywordAC.Match([]byte(domain)); len(hits) > 0 {
 			return true
+		}
+	} else {
+		// 降级兜底方案
+		for _, kw := range r.keywordList {
+			if strings.Contains(domain, kw) {
+				return true
+			}
 		}
 	}
 
-	// 合并的正则表达式
-	if r.regexCombined != nil && r.regexCombined.MatchString(domain) {
-		return true
+	// 正则表达式匹配 (使用优化后的分块匹配组)
+	if len(r.regexGrouped) > 0 {
+		for _, re := range r.regexGrouped {
+			if re.MatchString(domain) {
+				return true
+			}
+		}
+	} else {
+		// 极端情况下的彻底兜底 (例如 combine 还没执行完)
+		for _, re := range r.regexList {
+			if re.MatchString(domain) {
+				return true
+			}
+		}
 	}
 
 	return false
 }
 
 func (r *GeoRouter) MatchIP(ip net.IP) bool {
-	contains, err := r.ipRanger.Contains(ip)
-	if err != nil {
-		return false
+	return r.ipTrie.Contains(ip)
+}
+
+// MatchNetIP 零内存分配的 IP 匹配
+func (r *GeoRouter) MatchNetIP(addr netip.Addr) bool {
+	if addr.Is4() {
+		// addr.As4() 会返回栈上的 [4]byte，[:] 切片引用栈内存，完美避开堆分配
+		a4 := addr.As4()
+		return r.ipTrie.ContainsBytes(a4[:], true)
 	}
-	return contains
+	a16 := addr.As16()
+	return r.ipTrie.ContainsBytes(a16[:], false)
+}
+
+// ==========================================
+// 内部实现：高性能 IP 前缀树 (CIDR Trie)
+// 用于完全取代外部依赖 cidranger
+// ==========================================
+
+type ipTrieNode struct {
+	left  *ipTrieNode // 0 节点
+	right *ipTrieNode // 1 节点
+	isEnd bool        // 是否是一个 CIDR 段的结尾
+}
+
+type ipTrie struct {
+	v4Root *ipTrieNode
+	v6Root *ipTrieNode
+}
+
+func newIPTrie() *ipTrie {
+	return &ipTrie{
+		v4Root: &ipTrieNode{},
+		v6Root: &ipTrieNode{},
+	}
+}
+
+func (t *ipTrie) Insert(ipBytes []byte, prefixLen int) {
+	var node *ipTrieNode
+	if len(ipBytes) == 4 {
+		node = t.v4Root
+	} else if len(ipBytes) == 16 {
+		node = t.v6Root
+	} else {
+		return
+	}
+
+	for i := 0; i < prefixLen; i++ {
+		bit := (ipBytes[i/8] >> (7 - (i % 8))) & 1
+		if bit == 0 {
+			if node.left == nil {
+				node.left = &ipTrieNode{}
+			}
+			node = node.left
+		} else {
+			if node.right == nil {
+				node.right = &ipTrieNode{}
+			}
+			node = node.right
+		}
+	}
+	node.isEnd = true
+}
+
+func (t *ipTrie) Contains(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		return t.ContainsBytes(ip4, true)
+	}
+	return t.ContainsBytes(ip.To16(), false)
+}
+
+// ContainsBytes 高性能、零分配的底层判断逻辑
+func (t *ipTrie) ContainsBytes(ipBytes []byte, isV4 bool) bool {
+	var node *ipTrieNode
+	if isV4 {
+		node = t.v4Root
+	} else {
+		node = t.v6Root
+	}
+
+	for i := 0; i < len(ipBytes)*8; i++ {
+		if node == nil {
+			return false
+		}
+		if node.isEnd {
+			return true // 命中了更短的前缀掩码 (例如匹配 10.0.0.0/8 成功)
+		}
+		bit := (ipBytes[i/8] >> (7 - (i % 8))) & 1
+		if bit == 0 {
+			node = node.left
+		} else {
+			node = node.right
+		}
+	}
+	return node != nil && node.isEnd
 }

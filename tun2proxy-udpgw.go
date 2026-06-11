@@ -33,7 +33,6 @@ type UdpgwConn struct {
 
 	readLock  sync.Mutex
 	writeLock sync.Mutex
-	lenBuf    [2]byte
 
 	uploadCounter   func(int64)
 	downloadCounter func(int64)
@@ -100,7 +99,7 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 			addrType = UdpgwAtypIPv4
 			addrData = ipv4
 		} else {
-			addrType = UdpgwAtypIPv6 // 🌟 恢复为 SOCKS5 标准 0x04
+			addrType = UdpgwAtypIPv6
 			addrData = targetIP.To16()
 		}
 	} else {
@@ -202,10 +201,11 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 	defer udpBufPool.Put(bufPtr)
 
 	for {
-		if _, err := io.ReadFull(c.Conn, c.lenBuf[:]); err != nil {
+		var lenBuf [2]byte
+		if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
 			return 0, err
 		}
-		pLen := binary.BigEndian.Uint16(c.lenBuf[:])
+		pLen := binary.BigEndian.Uint16(lenBuf[:])
 
 		if int(pLen) > len(bodyBuf) {
 			zlog.Errorf("%s [UDPGW-Read] ❌ 数据包过大截断", TAG)
@@ -234,6 +234,9 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			case UdpgwAtypIPv6:
 				offset += 16
 			case UdpgwAtypDomain:
+				if offset >= int(pLen) {
+					break // 防御性拦截：提前跳出，让下方的越界校验去处理丢包，防止 body[offset] 触发 Panic
+				}
 				offset += int(body[offset]) + 1
 			}
 			offset += 2 // 跳过 DST.PORT(2)
@@ -260,7 +263,8 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 
 		case UdpgwFlagError: // 0x20 远端错误
 			zlog.Errorf("%s [UDPGW-Read] ❌ 收到远端 UDPGW 报错 (Flag: 0x20)！可能目标不可达或解析失败", TAG)
-			continue
+			// 不要继续循环，这会导致调用者永久阻塞。立即返回错误，让上层清理会话。
+			return 0, fmt.Errorf("remote udpgw server reported error (flag 0x20)")
 
 		default:
 			if Debug {

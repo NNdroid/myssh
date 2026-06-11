@@ -754,6 +754,9 @@ func init() {
 		ctx, cancel := context.WithCancel(parentCtx)
 		virtualConn := newMeekVirtualConn(ctx, sessionID, localNetAddr, proxyNetAddr)
 
+		// 随机选择一套浏览器真实指纹（在同一个虚拟会话中保持一致，防 WAF 风控）
+		sessionHeaders := generateBrowserHeaders()
+
 		// 数据泵核心逻辑
 		go func() {
 			defer virtualConn.Close()
@@ -819,18 +822,25 @@ func init() {
 							bodyReader = http.NoBody
 						}
 						req, _ := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
-						req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 						req.Host = cfg.CustomHost
+
+						// 注入真实的浏览器特征伪装
+						for k, v := range sessionHeaders {
+							req.Header.Set(k, v)
+						}
 
 						// GET 防缓存
 						if len(upData) == 0 {
 							q := req.URL.Query()
 							q.Set("t", strconv.FormatInt(time.Now().UnixNano(), 36))
 							req.URL.RawQuery = q.Encode()
-							req.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+							// 伪装为浏览器的 Ajax/Fetch 请求
+							req.Header.Set("Accept", "*/*")
+							req.Header.Set("Cache-Control", "no-cache")
 						} else {
 							req.ContentLength = int64(len(upData))
 							req.Header.Set("Content-Type", "application/octet-stream")
+							req.Header.Set("Accept", "*/*")
 						}
 
 						// 注入控制头
@@ -1065,4 +1075,43 @@ func probeH2C(ctx context.Context, cfg ProxyConfig) bool {
 		return false
 	}
 	return buf[3] == 0x04 // SETTINGS frame type
+}
+
+// ==========================================
+// 浏览器指纹池 (规避 CDN / WAF 拦截)
+// ==========================================
+func generateBrowserHeaders() map[string]string {
+	profiles := []map[string]string{
+		{
+			"User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+			"Sec-Ch-Ua":          `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`,
+			"Sec-Ch-Ua-Mobile":   "?0",
+			"Sec-Ch-Ua-Platform": `"Windows"`,
+			"Accept-Language":    "zh-CN,zh;q=0.9,en;q=0.8",
+			"Sec-Fetch-Dest":     "empty",
+			"Sec-Fetch-Mode":     "cors",
+			"Sec-Fetch-Site":     "same-origin",
+		},
+		{
+			"User-Agent":         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+			"Sec-Ch-Ua":          `"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"`,
+			"Sec-Ch-Ua-Mobile":   "?0",
+			"Sec-Ch-Ua-Platform": `"macOS"`,
+			"Accept-Language":    "en-US,en;q=0.9",
+			"Sec-Fetch-Dest":     "empty",
+			"Sec-Fetch-Mode":     "cors",
+			"Sec-Fetch-Site":     "same-origin",
+		},
+		{
+			"User-Agent":         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+			"Sec-Ch-Ua":          `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`,
+			"Sec-Ch-Ua-Mobile":   "?1",
+			"Sec-Ch-Ua-Platform": `"Android"`,
+			"Accept-Language":    "zh-CN,zh;q=0.9",
+			"Sec-Fetch-Dest":     "empty",
+			"Sec-Fetch-Mode":     "cors",
+			"Sec-Fetch-Site":     "same-origin",
+		},
+	}
+	return profiles[mrand.IntN(len(profiles))]
 }

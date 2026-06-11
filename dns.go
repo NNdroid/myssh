@@ -75,11 +75,12 @@ var (
 
 func NewLocalDnsServer(udpgwAddr string, udpgwVersion string) *LocalDnsServer {
 	l := &LocalDnsServer{
-		UdpgwAddr:    udpgwAddr,
-		UdpgwVersion: udpgwVersion,
-		singleflight: &singleflight.Group{},
-		cache:        make(map[string]dnsCacheEntry),
-		closeChan:    make(chan struct{}),
+		UdpgwAddr:       udpgwAddr,
+		UdpgwVersion:    udpgwVersion,
+		singleflight:    &singleflight.Group{},
+		cache:           make(map[string]dnsCacheEntry),
+		closeChan:       make(chan struct{}),
+		directUdpClient: &dns.Client{Net: "udp", Timeout: 5 * time.Second},
 	}
 	go l.cacheCleanupLoop()
 	localDnsServer = l
@@ -166,7 +167,7 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 		isDirect = globalRouter.MatchDomain(cleanDomain)
 	}
 
-	// 1. 缓存快查
+	// 缓存快查
 	if cacheKey != "" {
 		l.cacheMu.RLock()
 		entry, found := l.cache[cacheKey]
@@ -184,18 +185,20 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 		}
 	}
 
-	// 🌟 定义结果封装以解决 serverUrl 作用域问题
+	// 定义结果封装以解决 serverUrl 作用域问题
 	type sfResult struct {
 		reply     *dns.Msg
 		serverUrl string
 	}
 
-	// 2. SingleFlight 请求合并
+	// SingleFlight 请求合并
 	v, err, shared := l.singleflight.Do(cacheKey, func() (interface{}, error) {
 		l.cacheMu.RLock()
 		if entry, found := l.cache[cacheKey]; found && time.Now().Before(entry.expiresAt) {
 			l.cacheMu.RUnlock()
-			return sfResult{reply: entry.msg, serverUrl: "Shared-Task"}, nil
+			// SingleFlight 内部命中缓存时，也必须动态计算并扣除已流失的 TTL
+			cachedReply := l.copyAndAdjustTTL(entry, requestMsg.Id)
+			return sfResult{reply: cachedReply, serverUrl: "Shared-Cache"}, nil
 		}
 		l.cacheMu.RUnlock()
 
@@ -286,7 +289,7 @@ func (l *LocalDnsServer) resolveUDP(req *dns.Msg, addr string, isDirect bool, ss
 		addr += ":53"
 	}
 
-	// 🌟 1. 一行代码搞定拨号、UDPGW 分流和流量追踪！
+	// 一行代码搞定拨号、UDPGW 分流和流量追踪！
 	trackedConn, err := l.dialTracked("udp", addr, isDirect, sshClient, "DNS-UDP")
 	if err != nil {
 		return nil, err
@@ -295,14 +298,14 @@ func (l *LocalDnsServer) resolveUDP(req *dns.Msg, addr string, isDirect bool, ss
 
 	trackedConn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// 🌟 2. 直连模式：依然可以使用 miekg/dns 的便捷方法
+	// 直连模式：依然可以使用 miekg/dns 的便捷方法
 	if isDirect {
 		dnsConn := &dns.Conn{Conn: trackedConn}
 		resp, _, err := l.directUdpClient.ExchangeWithConn(req, dnsConn)
 		return resp, err
 	}
 
-	// 🌟 3. 代理模式 (UDPGW)：底层是 TCP 承载的 UDP 报文，不能用 ExchangeWithConn，必须手动收发
+	// 代理模式 (UDPGW)：底层是 TCP 承载的 UDP 报文，不能用 ExchangeWithConn，必须手动收发
 	reqBytes, err := req.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("pack dns request failed: %v", err)
@@ -336,7 +339,7 @@ func (l *LocalDnsServer) resolveTCP(req *dns.Msg, addr string, isDirect bool, ss
 	}
 
 	start := time.Now()
-	// 🌟 接收 poolKey
+	// 接收 poolKey
 	tcpConn, poolKey, err := l.getTcpConnFromPool(addr, isDirect, sshClient, forceNew)
 	if err != nil {
 		return nil, err
@@ -350,7 +353,7 @@ func (l *LocalDnsServer) resolveTCP(req *dns.Msg, addr string, isDirect bool, ss
 
 	reply, err := tcpConn.ReadMsg()
 	if err == nil {
-		// 🌟 按 poolKey 精准归还
+		// 按 poolKey 精准归还
 		l.putTcpConnToPool(tcpConn, poolKey)
 		zlog.Debugf("%s [DNS-TCP] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
 	} else {
@@ -393,7 +396,7 @@ func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, ss
 	}
 
 	start := time.Now()
-	// 🌟 接收 poolKey
+	// 接收 poolKey
 	dotConn, poolKey, err := l.getDoTConnFromPool(addr, isDirect, sshClient, forceNew)
 	if err != nil {
 		return nil, err
@@ -407,7 +410,7 @@ func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, ss
 
 	reply, err := dotConn.ReadMsg()
 	if err == nil {
-		// 🌟 按 poolKey 精准归还
+		// 按 poolKey 精准归还
 		l.putDoTConnToPool(dotConn, poolKey)
 		zlog.Debugf("%s [DNS-DoT] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
 	} else {
@@ -424,7 +427,7 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 	defer l.dohMu.Unlock()
 
 	// ==========================================
-	// 1. 直连 DoH Client
+	// 直连 DoH Client
 	// ==========================================
 	if isDirect {
 		if l.directDoH == nil {
@@ -445,9 +448,12 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 	}
 
 	// ==========================================
-	// 2. 代理 DoH Client
+	// 代理 DoH Client
 	// ==========================================
 	if l.proxiedDoH == nil || sshClient != l.lastSshClient {
+		if l.proxiedDoH != nil {
+			l.proxiedDoH.CloseIdleConnections() // 关闭旧客户端的底层连接池，防止重连时发生泄露
+		}
 		l.lastSshClient = sshClient
 		l.proxiedDoH = &http.Client{
 			Timeout: 5 * time.Second,

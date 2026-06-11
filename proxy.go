@@ -262,6 +262,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		}
 	}
 
+	// 深拷贝地址和端口信息，防止 txthinking/socks5 底层复用 UDP 读缓冲
+	// 导致后台异步回包时发生切片指针篡改 (Data Race / 目标地址错乱)
+	dstAddrCopy := make([]byte, len(d.DstAddr))
+	copy(dstAddrCopy, d.DstAddr)
+	dstPortCopy := make([]byte, len(d.DstPort))
+	copy(dstPortCopy, d.DstPort)
+
 	var isDirect bool
 	var dialHost string
 
@@ -297,16 +304,20 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			uc = WrapConn(rawConn, targetAddrStr)
 			// ------------------------------------
 
-			if Debug {
-				zlog.Debugf("%s [ROUTER-Direct] 🟢 新建本地直连会话 -> %s", TAG, sessionKey)
-			}
-			udpNatMap.Store(sessionKey, uc)
-
-			wg.Add(1)
-			go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
-				defer wg.Done()
-				defer conn.Close()
-				defer udpNatMap.Delete(key)
+			// 使用 LoadOrStore 防止并发同一目标造成重拨泄漏
+			actual, loaded := udpNatMap.LoadOrStore(sessionKey, uc)
+			if loaded {
+				uc.Close() // 另一个协程抢先建好了，关掉当前多余的
+				uc = actual.(net.Conn)
+			} else {
+				if Debug {
+					zlog.Debugf("%s [ROUTER-Direct] 🟢 新建本地直连会话 -> %s", TAG, sessionKey)
+				}
+				wg.Add(1)
+				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
+					defer wg.Done()
+					defer conn.Close()
+					defer udpNatMap.Delete(key)
 
 				bufPtr := udpBufPool.Get().(*[]byte)
 				// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度，防止复用引发的 0 长度截断
@@ -327,7 +338,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					}
 					h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 				}
-			}(uc, sessionKey, d.Atyp, d.DstAddr, d.DstPort, addr)
+				}(uc, sessionKey, d.Atyp, dstAddrCopy, dstPortCopy, addr)
+			}
 		}
 
 		n, err := uc.Write(d.Data)
@@ -373,7 +385,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			return fmt.Errorf("ssh client not ready")
 		}
 
-		// 🌟 直接拨号目标地址，DialUdpgw 内部会自动处理域名解析和 IPv6 优先
+		// 直接拨号目标地址，DialUdpgw 内部会自动处理域名解析和 IPv6 优先
 		var err error
 		if h.UdpgwVersion == "badvpn" {
 			if Debug {
@@ -395,18 +407,23 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		// --- Wrap the UDPGW connection ---
 		uConn = WrapConn(uConn, fmt.Sprintf("UDPGW->%s", targetAddrStr))
 		// ---------------------------------
-		udpgwMap.Store(sessionKey, uConn)
-		if Debug {
-			zlog.Debugf("%s [ROUTER-Proxy] 🟢 新建代理会话 (UDPGW) -> 客户端: %s | 隧道目标: %s", TAG, sessionKey, targetAddrStr)
-		}
 
-		wg.Add(1)
-		go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
-			defer wg.Done()
-			defer conn.Close()
-			defer udpgwMap.Delete(key)
+		// 使用 LoadOrStore 防止并发引发双重代理
+		actual, loaded := udpgwMap.LoadOrStore(sessionKey, uConn)
+		if loaded {
+			uConn.Close()
+			uConn = actual.(net.Conn)
+		} else {
+			if Debug {
+				zlog.Debugf("%s [ROUTER-Proxy] 🟢 新建代理会话 (UDPGW) -> 客户端: %s | 隧道目标: %s", TAG, sessionKey, targetAddrStr)
+			}
+			wg.Add(1)
+			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
+				defer wg.Done()
+				defer conn.Close()
+				defer udpgwMap.Delete(key)
 
-			// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度
+			// 从内存池取出后，利用 cap 恢复其最大切片长度
 			bufPtr := udpBufPool.Get().(*[]byte)
 			buf := (*bufPtr)[:cap(*bufPtr)]
 			defer udpBufPool.Put(bufPtr)
@@ -426,10 +443,11 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				}
 				h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 			}
-		}(uConn, addr, sessionKey, d.Atyp, d.DstAddr, d.DstPort)
+			}(uConn, addr, sessionKey, d.Atyp, dstAddrCopy, dstPortCopy)
+		}
 	}
 
-	// 🌟 写入数据：UdpgwConn.Write 会自动进行 UDPGW 封包
+	// 写入数据：UdpgwConn.Write 会自动进行 UDPGW 封包
 	n, err := uConn.Write(d.Data)
 	if err != nil {
 		if Debug {
@@ -452,15 +470,20 @@ func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *ne
 	outBuf := *outBufPtr
 	defer udpBufPool.Put(outBufPtr)
 
+	var outPkt []byte
 	if outLen <= cap(outBuf) {
-		outPkt := outBuf[:outLen]
-		outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
-		outPkt[3] = atyp
-		copy(outPkt[4:], addr)
-		copy(outPkt[4+len(addr):], port)
-		copy(outPkt[4+len(addr)+2:], data)
-		s.UDPConn.WriteToUDP(outPkt, clientAddr)
+		outPkt = outBuf[:outLen]
+	} else {
+		// 兜底：极端情况下如果超大封包越过了内存池的最大容量，使用动态分配防止静默丢包
+		outPkt = make([]byte, outLen)
 	}
+
+	outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
+	outPkt[3] = atyp
+	copy(outPkt[4:], addr)
+	copy(outPkt[4+len(addr):], port)
+	copy(outPkt[4+len(addr)+2:], data)
+	s.UDPConn.WriteToUDP(outPkt, clientAddr)
 }
 
 // ----- 核心引擎调度 -----
@@ -525,7 +548,6 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 					client.Close()
 					return
 				}
-				// 🌟 打印耗时，使用 .Milliseconds() 获取 ms 数值
 				zlog.Infof("%s [AutoSSH] 💓 心跳正常 | 延迟: %dms", TAG, res.duration.Milliseconds())
 
 			case <-time.After(8 * time.Second):
@@ -745,7 +767,8 @@ func StopSshTProxy() {
 
 	udpSessionCount := 0
 	udpNatMap.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*net.UDPConn); ok {
+		// 修复了这里的类型断言：原本是 value.(*net.UDPConn)，但此时存放的是包装过的 TrackedConn
+		if conn, ok := value.(net.Conn); ok {
 			conn.Close()
 			udpSessionCount++
 		}
