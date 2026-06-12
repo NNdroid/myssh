@@ -111,7 +111,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		if client == nil {
 			if Debug {
-				zlog.Debugf("%s [SOCKS5-TCP] ⚠️ 隧道正在重连中，拒绝本次连接: %s", TAG, r.Address())
+				zlog.Debugf("%s [SOCKS5-TCP] ⚠️ Tunnel is reconnecting, rejecting connection: %s", TAG, r.Address())
 			}
 			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 			rep.WriteTo(c)
@@ -194,7 +194,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 🛡️ Panic 捕获兜底，防止单个 UDP 异常包干掉整个代理服务
 	defer func() {
 		if err := recover(); err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] 💥 发生严重崩溃 (Panic) -> 客户端: %s, 错误: %v", TAG, addr.String(), err)
+			zlog.Errorf("%s [SOCKS5-UDP] 💥 Severe crash (Panic) occurred -> Client: %s, Error: %v", TAG, addr.String(), err)
 		}
 	}()
 	dstPort := binary.BigEndian.Uint16(d.DstPort)
@@ -204,7 +204,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// ==========================================
 	if dstPort == 443 {
 		if Debug {
-			zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 拦截并静默丢弃 UDP 443 (QUIC) 数据包 -> 来源: %s", TAG, addr.String())
+			zlog.Debugf("%s [SOCKS5-UDP] 🛡️ Intercepted and silently dropped UDP 443 (QUIC) packet -> Source: %s", TAG, addr.String())
 		}
 		return nil
 	}
@@ -221,14 +221,14 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			targetHost = "unknown_domain"
 		}
 	default:
-		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ 未知地址类型: %v", TAG, d.Atyp)
+		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ Unknown address type: %v", TAG, d.Atyp)
 		return nil
 	}
 
 	targetAddrStr := net.JoinHostPort(targetHost, strconv.Itoa(int(dstPort)))
 
 	if Debug {
-		zlog.Debugf("%s [SOCKS5-UDP] 📨 收到上行数据 | 客户端: %s | 目标: %s | 长度: %d bytes", TAG, addr.String(), targetAddrStr, len(d.Data))
+		zlog.Debugf("%s [SOCKS5-UDP] 📨 Received uplink data | Client: %s | Target: %s | Length: %d bytes", TAG, addr.String(), targetAddrStr, len(d.Data))
 	}
 
 	// 劫持 DNS
@@ -238,11 +238,11 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 		if !isConfiguredDNS {
 			if Debug {
-				zlog.Debugf("%s [SOCKS5-UDP] 🔍 触发 DNS 劫持 -> 目标: %s", TAG, targetAddrStr)
+				zlog.Debugf("%s [SOCKS5-UDP] 🔍 Triggered DNS hijack -> Target: %s", TAG, targetAddrStr)
 			}
 			reqMsg := new(dns.Msg)
 			if err := reqMsg.Unpack(d.Data); err != nil {
-				zlog.Errorf("%s [SOCKS5-UDP] ❌ 解析原生 DNS 失败: %v", TAG, err)
+				zlog.Errorf("%s [SOCKS5-UDP] ❌ Failed to parse native DNS: %v", TAG, err)
 				return err
 			}
 
@@ -257,7 +257,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			}
 		} else {
 			if Debug {
-				zlog.Debugf("%s [SOCKS5-UDP] 🛡️ 目标为配置的 DNS 服务器 (%s)，跳过劫持，执行标准路由", TAG, targetAddrStr)
+				zlog.Debugf("%s [SOCKS5-UDP] 🛡️ Target is a configured DNS server (%s), skipping hijack and executing standard routing", TAG, targetAddrStr)
 			}
 		}
 	}
@@ -291,12 +291,12 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		if val, ok := udpNatMap.Load(sessionKey); ok {
 			uc = val.(net.Conn)
 			if Debug {
-				zlog.Debugf("%s [ROUTER-Direct] ♻️ 复用本地直连会话 -> %s", TAG, sessionKey)
+				zlog.Debugf("%s [ROUTER-Direct] ♻️ Reusing local direct session -> %s", TAG, sessionKey)
 			}
 		} else {
 			rawConn, err := dialProtected(context.Background(), ProxyConfig{}, "udp", targetAddrStr, 5*time.Second)
 			if err != nil {
-				zlog.Errorf("%s [ROUTER-Direct] ❌ 建立直连 UDP 失败: %v", TAG, err)
+				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP: %v", TAG, err)
 				return err
 			}
 
@@ -311,7 +311,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				uc = actual.(net.Conn)
 			} else {
 				if Debug {
-					zlog.Debugf("%s [ROUTER-Direct] 🟢 新建本地直连会话 -> %s", TAG, sessionKey)
+					zlog.Debugf("%s [ROUTER-Direct] 🟢 Created new local direct session -> %s", TAG, sessionKey)
 				}
 				wg.Add(1)
 				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
@@ -329,12 +329,12 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					n, err := conn.Read(buf)
 					if err != nil {
 						if Debug {
-							zlog.Debugf("%s [ROUTER-Direct] 🔴 直连下行读取结束 -> 会话: %s | 原因: %v", TAG, key, err)
+							zlog.Debugf("%s [ROUTER-Direct] 🔴 Direct downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
 						}
 						break
 					}
 					if Debug {
-						zlog.Debugf("%s [ROUTER-Direct] 📥 收到下行直连数据 -> 会话: %s | 长度: %d bytes", TAG, key, n)
+						zlog.Debugf("%s [ROUTER-Direct] 📥 Received downlink direct data -> Session: %s | Length: %d bytes", TAG, key, n)
 					}
 					h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 				}
@@ -345,11 +345,11 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		n, err := uc.Write(d.Data)
 		if err != nil {
 			if Debug {
-				zlog.Errorf("%s [ROUTER-Direct] ❌ 上行数据写入失败 -> %s: %v", TAG, sessionKey, err)
+				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to write uplink data -> %s: %v", TAG, sessionKey, err)
 			}
 		} else {
 			if Debug {
-				zlog.Debugf("%s [ROUTER-Direct] 📤 成功写入上行数据 -> %s | 长度: %d bytes", TAG, sessionKey, n)
+				zlog.Debugf("%s [ROUTER-Direct] 📤 Successfully wrote uplink data -> %s | Length: %d bytes", TAG, sessionKey, n)
 			}
 		}
 		return nil
@@ -360,7 +360,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// ==========================================
 	if h.UdpgwAddr == "" {
 		if Debug {
-			zlog.Warnf("%s [ROUTER-Proxy] ⚠️ 拦截 UDP 报文 -> 目标: %s | 原因: UDPGW 未配置", TAG, targetAddrStr)
+			zlog.Warnf("%s [ROUTER-Proxy] ⚠️ Intercepted UDP packet -> Target: %s | Reason: UDPGW is not configured", TAG, targetAddrStr)
 		}
 		return nil
 	}
@@ -371,7 +371,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	if val, ok := udpgwMap.Load(sessionKey); ok {
 		uConn = val.(net.Conn)
 		if Debug {
-			zlog.Debugf("%s [ROUTER-Proxy] ♻️ 复用代理会话 (UDPGW) -> 客户端: %s", TAG, sessionKey)
+			zlog.Debugf("%s [ROUTER-Proxy] ♻️ Reusing proxy session (UDPGW) -> Client: %s", TAG, sessionKey)
 		}
 	} else {
 		mu.Lock()
@@ -380,7 +380,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 		if client == nil {
 			if Debug {
-				zlog.Warnf("%s [ROUTER-Proxy] ⚠️ 拒绝 UDP 报文 -> 目标: %s | 原因: SSH 未连接", TAG, targetAddrStr)
+				zlog.Warnf("%s [ROUTER-Proxy] ⚠️ Rejected UDP packet -> Target: %s | Reason: SSH is not connected", TAG, targetAddrStr)
 			}
 			return fmt.Errorf("ssh client not ready")
 		}
@@ -389,18 +389,18 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		var err error
 		if h.UdpgwVersion == "badvpn" {
 			if Debug {
-				zlog.Debugf("%s [ROUTER-Proxy] 🚀 选用 Badvpn 协议建立UDPGW隧道", TAG)
+				zlog.Debugf("%s [ROUTER-Proxy] 🚀 Selected Badvpn protocol to establish UDPGW tunnel", TAG)
 			}
 			uConn, err = DialBadvpnUdpgw(client, h.UdpgwAddr, targetAddrStr)
 		} else {
 			// 默认走 Tun2Proxy
 			if Debug {
-				zlog.Debugf("%s [ROUTER-Proxy] 🚀 选用 Tun2Proxy 协议建立UDPGW隧道", TAG)
+				zlog.Debugf("%s [ROUTER-Proxy] 🚀 Selected Tun2Proxy protocol to establish UDPGW tunnel", TAG)
 			}
 			uConn, err = DialTun2proxyUdpgw(client, h.UdpgwAddr, targetAddrStr)
 		}
 		if err != nil {
-			zlog.Errorf("%s [ROUTER-Proxy] ❌ 建立 UDPGW 隧道失败 -> 目标: %s | 错误: %v", TAG, targetAddrStr, err)
+			zlog.Errorf("%s [ROUTER-Proxy] ❌ Failed to establish UDPGW tunnel -> Target: %s | Error: %v", TAG, targetAddrStr, err)
 			return err
 		}
 
@@ -415,7 +415,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			uConn = actual.(net.Conn)
 		} else {
 			if Debug {
-				zlog.Debugf("%s [ROUTER-Proxy] 🟢 新建代理会话 (UDPGW) -> 客户端: %s | 隧道目标: %s", TAG, sessionKey, targetAddrStr)
+				zlog.Debugf("%s [ROUTER-Proxy] 🟢 Created new proxy session (UDPGW) -> Client: %s | Tunnel target: %s", TAG, sessionKey, targetAddrStr)
 			}
 			wg.Add(1)
 			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
@@ -433,13 +433,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				n, err := conn.Read(buf)
 				if err != nil {
 					if Debug {
-						zlog.Debugf("%s [ROUTER-Proxy] 🔴 代理下行读取结束 -> 会话: %s | 原因: %v", TAG, key, err)
+						zlog.Debugf("%s [ROUTER-Proxy] 🔴 Proxy downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
 					}
 					break
 				}
 
 				if Debug {
-					zlog.Debugf("%s [ROUTER-Proxy] 📥 收到下行代理数据 -> 会话: %s | 净载荷: %d bytes", TAG, key, n)
+					zlog.Debugf("%s [ROUTER-Proxy] 📥 Received downlink proxy data -> Session: %s | Payload: %d bytes", TAG, key, n)
 				}
 				h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 			}
@@ -451,13 +451,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	n, err := uConn.Write(d.Data)
 	if err != nil {
 		if Debug {
-			zlog.Errorf("%s [ROUTER-Proxy] ❌ 写入代理数据失败 -> 会话: %s | 错误: %v", TAG, sessionKey, err)
+			zlog.Errorf("%s [ROUTER-Proxy] ❌ Failed to write proxy data -> Session: %s | Error: %v", TAG, sessionKey, err)
 		}
 		uConn.Close()
 		udpgwMap.Delete(sessionKey)
 	} else {
 		if Debug {
-			zlog.Debugf("%s [ROUTER-Proxy] 📤 成功写入代理数据 -> 会话: %s | 长度: %d bytes", TAG, sessionKey, n)
+			zlog.Debugf("%s [ROUTER-Proxy] 📤 Successfully wrote proxy data -> Session: %s | Length: %d bytes", TAG, sessionKey, n)
 		}
 	}
 	return err
@@ -489,9 +489,9 @@ func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *ne
 // ----- 核心引擎调度 -----
 
 func WgWait() {
-	zlog.Infof("%s [Core] 正在等待所有后台任务彻底退出...", TAG)
+	zlog.Infof("%s [Core] Waiting for all background tasks to exit completely...", TAG)
 	wg.Wait()
-	zlog.Infof("%s [Core] ✅ 所有后台任务已安全清理完毕，程序可安全退出", TAG)
+	zlog.Infof("%s [Core] ✅ All background tasks safely cleaned up, program can exit safely", TAG)
 }
 
 func killActiveProxyConnections() {
@@ -505,7 +505,7 @@ func killActiveProxyConnections() {
 		return true
 	})
 	if count > 0 {
-		zlog.Infof("%s [AutoSSH] 🧹 清理了 %d 个因断线残留的 TCP 代理会话", TAG, count)
+		zlog.Infof("%s [AutoSSH] 🧹 Cleaned up %d residual TCP proxy sessions due to disconnection", TAG, count)
 	}
 }
 
@@ -544,14 +544,14 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 
 			case res := <-resCh:
 				if res.err != nil {
-					zlog.Warnf("%s [AutoSSH] ⚠️ 心跳发送失败: %v (准备断开重建)", TAG, res.err)
+					zlog.Warnf("%s [AutoSSH] ⚠️ Failed to send heartbeat: %v (Preparing to disconnect and rebuild)", TAG, res.err)
 					client.Close()
 					return
 				}
-				zlog.Infof("%s [AutoSSH] 💓 心跳正常 | 延迟: %dms", TAG, res.duration.Milliseconds())
+				zlog.Infof("%s [AutoSSH] 💓 Heartbeat normal | Latency: %dms", TAG, res.duration.Milliseconds())
 
 			case <-time.After(8 * time.Second):
-				zlog.Warnf("%s [AutoSSH] ⚠️ 心跳响应严重超时 (疑似网络假死)，强行切断重建", TAG)
+				zlog.Warnf("%s [AutoSSH] ⚠️ Heartbeat response timed out severely (suspected network freeze), forcibly cutting off and rebuilding", TAG)
 				client.Close()
 				return
 			}
@@ -566,7 +566,7 @@ func StartSshTProxy2(configJson string) int {
 
 	var cfg ProxyConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
-		zlog.Errorf("%s [Core] ❌ 解析配置 JSON 失败: %v", TAG, err)
+		zlog.Errorf("%s [Core] ❌ Failed to parse config JSON: %v", TAG, err)
 		return -1
 	}
 
@@ -574,7 +574,7 @@ func StartSshTProxy2(configJson string) int {
 	ctx, engineCancel = context.WithCancel(context.Background())
 	engineCtx = ctx
 
-	zlog.Infof("%s [Core] ==================== 启动代理引擎 (AutoSSH模式) ====================", TAG)
+	zlog.Infof("%s [Core] ==================== Starting proxy engine (AutoSSH mode) ====================", TAG)
 
 	// 初始化 DNS 服务
 	NewLocalDnsServer(cfg.UdpgwAddr, cfg.UdpgwVersion)
@@ -586,7 +586,7 @@ func StartSshTProxy2(configJson string) int {
 
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
 	if err != nil {
-		zlog.Errorf("%s [SOCKS5] ❌ 创建 SOCKS5 服务器实例失败: %v", TAG, err)
+		zlog.Errorf("%s [SOCKS5] ❌ Failed to create SOCKS5 server instance: %v", TAG, err)
 		return -4
 	}
 
@@ -602,11 +602,11 @@ func StartSshTProxy2(configJson string) int {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		zlog.Infof("%s [SOCKS5] 🚀 SOCKS5 代理服务已启动: %s", TAG, cfg.LocalAddr)
+		zlog.Infof("%s [SOCKS5] 🚀 SOCKS5 proxy service started: %s", TAG, cfg.LocalAddr)
 		if err := srv.ListenAndServe(handler); err != nil && !strings.Contains(err.Error(), "closed network connection") {
-			zlog.Errorf("%s [SOCKS5] ❌ 服务异常退出: %v", TAG, err)
+			zlog.Errorf("%s [SOCKS5] ❌ Service exited abnormally: %v", TAG, err)
 		}
-		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 服务已完全停止", TAG)
+		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 service has completely stopped", TAG)
 	}()
 
 	wg.Add(1)
@@ -683,24 +683,24 @@ func StartSshTProxy2(configJson string) int {
 		for {
 			select {
 			case <-engineCtx.Done():
-				zlog.Infof("%s [AutoSSH] 接收到全局停止信号，守护进程退出", TAG)
+				zlog.Infof("%s [AutoSSH] Received global stop signal, daemon exiting", TAG)
 				return
 			default:
 			}
 
-			zlog.Infof("%s [AutoSSH] 🔄 正在尝试与远端建立隧道...", TAG)
+			zlog.Infof("%s [AutoSSH] 🔄 Attempting to establish tunnel with remote...", TAG)
 			conn, err := dialTunnel(engineCtx, cfg)
 			if err != nil {
-				zlog.Errorf("%s [AutoSSH] ❌ 隧道建立失败: %v", TAG, err)
+				zlog.Errorf("%s [AutoSSH] ❌ Tunnel establishment failed: %v", TAG, err)
 				time.Sleep(3 * time.Second)
 				continue
 			}
 
-			zlog.Infof("%s [AutoSSH] 正在进行SSH安全认证...", TAG)
+			zlog.Infof("%s [AutoSSH] Performing SSH security authentication...", TAG)
 			scc, chans, reqs, err := ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
 			if err != nil {
 				conn.Close()
-				zlog.Errorf("%s [AutoSSH] ❌ SSH握手失败: %v", TAG, err)
+				zlog.Errorf("%s [AutoSSH] ❌ SSH handshake failed: %v", TAG, err)
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -714,12 +714,12 @@ func StartSshTProxy2(configJson string) int {
 			mu.Lock()
 			sshClient = client
 			mu.Unlock()
-			zlog.Infof("%s [AutoSSH] ✅ SSH隧道建立成功，已接管全局流量！", TAG)
+			zlog.Infof("%s [AutoSSH] ✅ SSH tunnel established successfully, global traffic taken over!", TAG)
 
 			go maintainKeepAlive(engineCtx, client)
 
 			err = client.Wait()
-			zlog.Warnf("%s [AutoSSH] ⚠️ 隧道已断开 (%v)，准备自动重连...", TAG, err)
+			zlog.Warnf("%s [AutoSSH] ⚠️ Tunnel disconnected (%v), preparing to reconnect automatically...", TAG, err)
 
 			mu.Lock()
 			sshClient = nil
@@ -747,7 +747,7 @@ func StopSshTProxy() {
 		engineCancel = nil
 	}
 
-	zlog.Infof("%s [Core] 正在停止资源...", TAG)
+	zlog.Infof("%s [Core] Stopping resources...", TAG)
 
 	if localDnsServer != nil {
 		localDnsServer.Stop()
@@ -776,7 +776,7 @@ func StopSshTProxy() {
 		return true
 	})
 	if udpSessionCount > 0 {
-		zlog.Infof("%s [Core] 已强制断开 %d 个活跃的 UDP 会话", TAG, udpSessionCount)
+		zlog.Infof("%s [Core] Forcibly disconnected %d active UDP sessions", TAG, udpSessionCount)
 	}
 
 	udpgwSessionCount := 0
@@ -789,8 +789,8 @@ func StopSshTProxy() {
 		return true
 	})
 	if udpgwSessionCount > 0 {
-		zlog.Infof("%s [Core] 已强制断开 %d 个 UDPGW 代理会话", TAG, udpgwSessionCount)
+		zlog.Infof("%s [Core] Forcibly disconnected %d UDPGW proxy sessions", TAG, udpgwSessionCount)
 	}
 
-	zlog.Infof("%s [Core] 代理引擎停止指令发送完成", TAG)
+	zlog.Infof("%s [Core] Proxy engine stop command sent completely", TAG)
 }

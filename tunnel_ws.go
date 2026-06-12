@@ -19,7 +19,7 @@ func init() {
 		if isWSS {
 			scheme = "wss"
 		}
-		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 握手, 伪装 Host: %s", TAG, strings.ToUpper(scheme), cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 2. Preparing %s handshake, spoofed Host: %s", TAG, strings.ToUpper(scheme), cfg.CustomHost)
 
 		path := cfg.CustomPath
 		if path == "" {
@@ -42,7 +42,7 @@ func init() {
 			// 在 WS 握手中，标准通常使用 Proxy-Authorization 或 Authorization
 			// 大多数 CDN 或代理服务器（如 Nginx, Cloudflare）识别这个头
 			fakeHeaders.Set("Proxy-Authorization", "Basic "+encodedAuth)
-			zlog.Infof("%s [Tunnel] WS 握手注入认证信息 (User: %s)", TAG, cfg.ProxyAuthUser)
+			zlog.Infof("%s [Tunnel] Injected authentication info for WS handshake (User: %s)", TAG, cfg.ProxyAuthUser)
 		}
 
 		transport := &http.Transport{ForceAttemptHTTP2: false}
@@ -80,14 +80,14 @@ func init() {
 		if err != nil {
 			// 认证失败
 			if resp != nil && (resp.StatusCode == 401 || resp.StatusCode == 407) {
-				zlog.Errorf("%s [Tunnel] ❌ WebSocket 认证失败, 状态码: %d", TAG, resp.StatusCode)
+				zlog.Errorf("%s [Tunnel] ❌ WebSocket authentication failed, status code: %d", TAG, resp.StatusCode)
 			}
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ WebSocket 握手失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ WebSocket handshake failed: %v", TAG, err)
 			return nil, err
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ WebSocket 握手成功 (Status: %d), 协商协议: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
+		zlog.Infof("%s [Tunnel] ✅ WebSocket handshake successful (Status: %d), Negotiated protocol: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
 
 		return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 	}

@@ -174,7 +174,7 @@ func newMeekVirtualConn(ctx context.Context, sessionID string, local, remote net
 		local:     local,
 		remote:    remote,
 		readCond:  sync.NewCond(&sync.Mutex{}),
-		writeBuf:  newReliableBuffer(4 * 1024 * 1024),
+		writeBuf:  newReliableBuffer(16 * 1024 * 1024),
 		oooBuf:    make(map[uint64][]byte),
 	}
 }
@@ -241,7 +241,7 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 			// 序號太新了，先存進 map
 			// 序列号跨度过大（例如超过了 5MB 的数据量），视为无效包/恶意包，直接抛弃
 			// 假设你的一般包大小为 100KB，跨度超过 50 个包的距离就没必要缓存了
-			if seq-c.nextReadSeq > 5*1024*1024 {
+			if seq-c.nextReadSeq > 16*1024*1024 { // 🌟 配合发送窗口扩大，将乱序容忍跨度也提升到 16MB
 				return c.nextReadSeq // 丢弃不合理的未来包
 			}
 
@@ -554,7 +554,7 @@ func init() {
 			scheme, protoName = "https", "XHTTP"
 		}
 
-		zlog.Infof("%s [Tunnel] 准备握手%s, 伪装 Host: %s, 允许协议: %v", TAG, protoName, cfg.CustomHost, alpnList)
+		zlog.Infof("%s [Tunnel] Preparing %s handshake, Spoofed Host: %s, Allowed ALPNs: %v", TAG, protoName, cfg.CustomHost, alpnList)
 
 		path := cfg.CustomPath
 		if path == "" {
@@ -582,7 +582,7 @@ func init() {
 				tr3, h3Err := getH3Transport(cfg)
 
 				if h3Err == nil && tr3 != nil {
-					zlog.Infof("%s [Tunnel] ⚡ 探测成功: HTTP/3 (QUIC)，复用底层物理 UDP 链路", TAG)
+					zlog.Infof("%s [Tunnel] ⚡ Probe successful: HTTP/3 (QUIC), reusing underlying physical UDP link", TAG)
 					negotiatedProtocol = "h3"
 
 					client = &http.Client{
@@ -593,7 +593,7 @@ func init() {
 					// 💡 注意：因为 tr3 是全局按需复用的，所以这里不要再把它加入 cleanupFuncs 去 Close()
 					// 它的生命周期已经由 tunnel_h3.go 完美接管了
 				} else {
-					zlog.Warnf("%s [Tunnel] ⚠️ HTTP/3 (QUIC) 探测/获取失败，准备降级探测 TCP: %v", TAG, h3Err)
+					zlog.Warnf("%s [Tunnel] ⚠️ HTTP/3 (QUIC) probe/fetch failed, downgrading to TCP probe: %v", TAG, h3Err)
 				}
 			}
 
@@ -636,7 +636,7 @@ func init() {
 
 				var uConn *utls.UConn
 				uConn, negotiatedProtocol, err = handshakeUTLS(parentCtx, tcpConn)
-				zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, negotiatedProtocol)
+				zlog.Infof("%s [Tunnel] Detected TCP ALPN: %s", TAG, negotiatedProtocol)
 
 				if err != nil {
 					tcpConn.Close() // 握手失败时必须主动关闭底层 TCP 连接，防止 FD 泄露
@@ -666,7 +666,7 @@ func init() {
 					}
 
 					uc, np, err := handshakeUTLS(ctx, tc)
-					zlog.Infof("%s [Tunnel] 探测到 TCP ALPN: %s", TAG, np)
+					zlog.Infof("%s [Tunnel] Detected TCP ALPN: %s", TAG, np)
 
 					if err != nil {
 						tc.Close() // 握手失败时主动关闭
@@ -713,7 +713,7 @@ func init() {
 
 			// 💡 注意：这里的 probeH2C 传入的是 cfg，以便它内部也能调用绑卡逻辑
 			if probeH2C(parentCtx, cfg) && slices.Contains(alpnList, "h2") {
-				zlog.Infof("%s [Tunnel] ⚡ 探测成功，启用 H2C (明文 HTTP/2) 引擎", TAG)
+				zlog.Infof("%s [Tunnel] ⚡ Probe successful, enabling H2C (Cleartext HTTP/2) engine", TAG)
 				t2 := &http2.Transport{
 					AllowHTTP: true,
 					DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
@@ -725,7 +725,7 @@ func init() {
 					t2.CloseIdleConnections()
 				})
 			} else {
-				zlog.Infof("%s [Tunnel] 🐢 H2C 探测失败，平滑回退至纯 TCP HTTP/1.1 引擎", TAG)
+				zlog.Infof("%s [Tunnel] 🐢 H2C probe failed, smoothly falling back to pure TCP HTTP/1.1 engine", TAG)
 				t1 := &http.Transport{
 					DialContext:           dialTCPWithBind,
 					MaxIdleConns:          100,
@@ -765,7 +765,11 @@ func init() {
 			var ackedByServer, dispatchSeq uint64
 			var windowMu sync.Mutex
 			var consecutiveErrors, triggerRetry, emptyPollers int32
-			workerCount := 8
+
+			// 将 Worker 并发数提升至 32 (榨干 5G 与高速宽带)
+			// 配合 16MB 的滑动窗口，32 个并发足以在 200ms 高延迟下跑满 1000Mbps+ 带宽。
+			// 因为有下方 emptyPollers 的单轮询限制，空闲时这 32 个协程只会轻量休眠，毫无开销。
+			workerCount := 32
 			var wg sync.WaitGroup
 
 			for i := 0; i < workerCount; i++ {
@@ -876,7 +880,7 @@ func init() {
 							}
 
 							if ctx.Err() != nil {
-								zlog.Debug("🛑 [Pump] 收到 Context 取消信號，Worker 退出", zap.Int("worker", i))
+								zlog.Debug("🛑 [Pump] Received Context cancel signal, Worker exiting", zap.Int("worker", i))
 								break
 							}
 
@@ -896,7 +900,7 @@ func init() {
 							atomic.StoreInt32(&triggerRetry, 1)
 
 							if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
-								zlog.Errorf("%s [Tunnel] 连续网络通信失败，触发熔断，销毁隧道: %s", TAG, cfg.SshAddr)
+								zlog.Errorf("%s [Tunnel] Consecutive network communication failures, triggering circuit breaker, destroying tunnel: %s", TAG, cfg.SshAddr)
 								break
 							}
 
@@ -935,7 +939,7 @@ func init() {
 							resp.Body.Close()
 							bytesBufPool.Put(downBuf)
 
-							zlog.Errorf("%s [Tunnel] ❌ 收到异常 HTTP 状态码: %d, body: %s", TAG, resp.StatusCode, string(bodyErr))
+							zlog.Errorf("%s [Tunnel] ❌ Received abnormal HTTP status code: %d, body: %s", TAG, resp.StatusCode, string(bodyErr))
 
 							// 同样触发重传
 							windowMu.Lock()
@@ -944,7 +948,7 @@ func init() {
 							atomic.StoreInt32(&triggerRetry, 1)
 
 							if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
-								zlog.Errorf("%s [Tunnel] 连续异常，触发熔断", TAG)
+								zlog.Errorf("%s [Tunnel] Consecutive anomalies, triggering circuit breaker", TAG)
 								break
 							}
 
@@ -978,7 +982,7 @@ func init() {
 								xhttpBufPool.Put(upBufPtr)
 							}
 
-							zlog.Warnf("%s [Tunnel] 读取下行 Body 失败，触发安全重传: %v", TAG, errBody)
+							zlog.Warnf("%s [Tunnel] Failed to read downlink Body, triggering safe retransmission: %v", TAG, errBody)
 
 							windowMu.Lock()
 							dispatchSeq = atomic.LoadUint64(&ackedByServer)

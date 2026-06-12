@@ -15,7 +15,7 @@ func init() {
 
 	// TLS (利用 uTLS 消除指纹)
 	RegisterTunnel("tls", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		zlog.Infof("%s [Tunnel] 2. 准备进行 TLS (utls SNI Proxy) 握手, 伪装 SNI: %s", TAG, cfg.ServerName)
+		zlog.Infof("%s [Tunnel] 2. Preparing TLS (utls SNI Proxy) handshake, Spoofed SNI: %s", TAG, cfg.ServerName)
 
 		utlsConfig := &utls.Config{
 			ServerName:            cfg.ServerName,
@@ -25,11 +25,11 @@ func init() {
 
 		uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
 		if err := uConn.HandshakeContext(ctx); err != nil {
-			zlog.Errorf("%s [Tunnel] ❌ TLS 连接失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ TLS connection failed: %v", TAG, err)
 			return nil, err
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ TLS 握手成功", TAG)
+		zlog.Infof("%s [Tunnel] ✅ TLS handshake successful", TAG)
 
 		go func() {
 			<-ctx.Done()

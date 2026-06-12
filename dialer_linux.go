@@ -25,5 +25,11 @@ func bindDevice(dialer *net.Dialer, ifaceName string) {
 		return operr
 	}
 
-	zlog.Infof("%s [Tunnel] 🔒 已配置底层 Socket 绑定至指定接口: %s", TAG, ifaceName)
+	zlog.Infof("%s [Tunnel] 🔒 Underlying Socket configured to bind to specified interface: %s", TAG, ifaceName)
+}
+
+// wrapAndroidProtect is a no-op on Linux.
+func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
+	zlog.Debugf("[Protect] STUB: Compiled for Linux platform, Socket protection is disabled.")
+	return dialer
 }

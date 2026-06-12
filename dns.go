@@ -140,7 +140,7 @@ func (l *LocalDnsServer) cacheCleanupLoop() {
 		case <-ticker.C:
 			l.cleanupExpiredCache()
 		case <-l.closeChan:
-			zlog.Infof("%s [DNS-Server] 🛑 DNS 缓存清理守护协程已安全退出", TAG)
+			zlog.Infof("%s [DNS-Server] 🛑 DNS cache cleanup daemon safely exited", TAG)
 			return
 		}
 	}
@@ -198,7 +198,7 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 			l.cacheMu.RUnlock()
 			// SingleFlight 内部命中缓存时，也必须动态计算并扣除已流失的 TTL
 			cachedReply := l.copyAndAdjustTTL(entry, requestMsg.Id)
-			return sfResult{reply: cachedReply, serverUrl: "Shared-Cache"}, nil
+			return sfResult{reply: cachedReply, serverUrl: "Local Cache"}, nil
 		}
 		l.cacheMu.RUnlock()
 
@@ -221,7 +221,7 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 
 		for attempt := 1; attempt <= 3; attempt++ {
 			if attempt > 1 {
-				zlog.Warnf("%s [DNS] ⚠️ 第 %d 次重试解析: %s", TAG, attempt, domainName)
+				zlog.Warnf("%s [DNS] ⚠️ Retry parsing #%d: %s", TAG, attempt, domainName)
 			}
 
 			if strings.HasPrefix(serverUrl, "https://") || strings.HasPrefix(serverUrl, "doh://") {
@@ -243,7 +243,7 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 
 		if finalErr != nil || reply == nil {
 			if Debug {
-				zlog.Errorf("%s [DNS] ❌ 解析失败 [%s] -> %s: %v", TAG, serverUrl, domainName, finalErr)
+				zlog.Errorf("%s [DNS] ❌ Resolution failed [%s] -> %s: %v", TAG, serverUrl, domainName, finalErr)
 			}
 			return nil, finalErr
 		}
@@ -269,11 +269,11 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 	finalReply := result.reply.Copy()
 	finalReply.Id = requestMsg.Id
 
-	source := "远端代理 (Remote)"
+	source := "Remote Proxy"
 	if shared {
-		source = "并发队列 (SingleFlight)"
+		source = "Concurrent Queue (SingleFlight)"
 	} else if isDirect {
-		source = "直连解析 (Local)"
+		source = "Direct Resolution (Local)"
 	}
 	l.printDnsResponse(source, result.serverUrl, domainName, qtypeStr, finalReply)
 
@@ -355,7 +355,7 @@ func (l *LocalDnsServer) resolveTCP(req *dns.Msg, addr string, isDirect bool, ss
 	if err == nil {
 		// 按 poolKey 精准归还
 		l.putTcpConnToPool(tcpConn, poolKey)
-		zlog.Debugf("%s [DNS-TCP] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
+		zlog.Debugf("%s [DNS-TCP] ✅ Resolution completed | Latency: %dms", TAG, time.Since(start).Milliseconds())
 	} else {
 		tcpConn.Close()
 	}
@@ -412,7 +412,7 @@ func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, ss
 	if err == nil {
 		// 按 poolKey 精准归还
 		l.putDoTConnToPool(dotConn, poolKey)
-		zlog.Debugf("%s [DNS-DoT] ✅ 解析完成 | 耗时: %dms", TAG, time.Since(start).Milliseconds())
+		zlog.Debugf("%s [DNS-DoT] ✅ Resolution completed | Latency: %dms", TAG, time.Since(start).Milliseconds())
 	} else {
 		dotConn.Close()
 	}
@@ -616,7 +616,7 @@ func (l *LocalDnsServer) cleanupExpiredCache() {
 		}
 	}
 	if deleted > 0 {
-		zlog.Debugf("%s [Cache-GC] ♻️ 清理了 %d 条缓存，当前余量: %d", TAG, deleted, len(l.cache))
+		zlog.Debugf("%s [Cache-GC] ♻️ Cleaned up %d cache entries, remaining: %d", TAG, deleted, len(l.cache))
 	}
 }
 
@@ -647,7 +647,7 @@ func (l *LocalDnsServer) Start(addr string) error {
 			zlog.Errorf("TCP DNS Fail: %v", err)
 		}
 	}()
-	zlog.Infof("%s [DNS-Server] 🚀 本地 DNS 服务启动: %s", TAG, addr)
+	zlog.Infof("%s [DNS-Server] 🚀 Local DNS service started: %s", TAG, addr)
 	return nil
 }
 
@@ -684,20 +684,20 @@ func (l *LocalDnsServer) printDnsResponse(source, server, domainName, qtypeStr s
 		return
 	}
 	rcodeStr := dns.RcodeToString[reply.MsgHdr.Rcode]
-	zlog.Debugf("%s [DNS] ✅ 解析成功 | 来源=[%s] | 节点=[%s] | 域名=[%s] | 类型=[%s] | 状态=[%s] | 记录数=[%d]",
+	zlog.Debugf("%s [DNS] ✅ Resolution successful | Source=[%s] | Server=[%s] | Domain=[%s] | Type=[%s] | Status=[%s] | Records=[%d]",
 		TAG, source, server, domainName, qtypeStr, rcodeStr, len(reply.Answer))
 
 	for _, ans := range reply.Answer {
 		switch record := ans.(type) {
 		case *dns.A:
-			zlog.Debugf("%s [DNS] └─ [A记录] IP: %s (TTL: %d)", TAG, record.A.String(), record.Hdr.Ttl)
+			zlog.Debugf("%s [DNS] └─ [A record] IP: %s (TTL: %d)", TAG, record.A.String(), record.Hdr.Ttl)
 		case *dns.AAAA:
-			zlog.Debugf("%s [DNS] └─ [AAAA记录] IPv6: %s (TTL: %d)", TAG, record.AAAA.String(), record.Hdr.Ttl)
+			zlog.Debugf("%s [DNS] └─ [AAAA record] IPv6: %s (TTL: %d)", TAG, record.AAAA.String(), record.Hdr.Ttl)
 		case *dns.CNAME:
-			zlog.Debugf("%s [DNS] └─ [CNAME记录] 别名: %s (TTL: %d)", TAG, record.Target, record.Hdr.Ttl)
+			zlog.Debugf("%s [DNS] └─ [CNAME record] Alias: %s (TTL: %d)", TAG, record.Target, record.Hdr.Ttl)
 		default:
 			// 兜底支持所有其他记录类型 (MX, TXT, NS, SRV, etc.)
-			zlog.Debugf("%s [DNS] └─ [%s记录] %s (TTL: %d)",
+			zlog.Debugf("%s [DNS] └─ [%s record] %s (TTL: %d)",
 				TAG, dns.TypeToString[ans.Header().Rrtype], ans.String(), ans.Header().Ttl)
 		}
 	}

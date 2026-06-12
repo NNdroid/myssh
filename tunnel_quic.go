@@ -27,7 +27,7 @@ func (q *quicNetConn) Close() error {
 func init() {
 	RegisterTunnel("quic", "udp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 
-		zlog.Infof("%s [Tunnel] 2. 准备进行 QUIC (UDP) 握手, 目标: %s, 伪装 SNI: %s", TAG, cfg.ProxyAddr, cfg.ServerName)
+		zlog.Infof("%s [Tunnel] 2. Preparing QUIC (UDP) handshake, Target: %s, Spoofed SNI: %s", TAG, cfg.ProxyAddr, cfg.ServerName)
 
 		udpConn, ok := baseConn.(*net.UDPConn)
 		if !ok || udpConn == nil {
@@ -60,20 +60,20 @@ func init() {
 		conn, err := quic.DialEarly(dialCtx, udpConn, udpAddr, tlsConf, quicConfig)
 		if err != nil {
 			udpConn.Close() // 握手失败，清理底层的物理 Socket
-			zlog.Errorf("%s [Tunnel] ❌ QUIC 连接失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ QUIC connection failed: %v", TAG, err)
 			return nil, err
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ QUIC 握手成功，准备打开数据流(Stream)", TAG)
+		zlog.Infof("%s [Tunnel] ✅ QUIC handshake successful, preparing to open Stream", TAG)
 
 		stream, err := conn.OpenStreamSync(parentCtx)
 		if err != nil {
 			conn.CloseWithError(1, "stream open error")
-			zlog.Errorf("%s [Tunnel] ❌ QUIC Stream 打开失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ QUIC Stream open failed: %v", TAG, err)
 			return nil, err
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ QUIC Stream 打开成功，底层 UDP 通道已打通", TAG)
+		zlog.Infof("%s [Tunnel] ✅ QUIC Stream opened successfully, underlying UDP channel established", TAG)
 
 		return &quicNetConn{
 			Stream: stream,

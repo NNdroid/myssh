@@ -92,24 +92,24 @@ func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) fu
 		actualFingerprint := actualFPBuilder.String()
 
 		// 只要有握手，就打出这个日志
-		zlog.Infof("%s [Tunnel] 实际证书指纹: %s", TAG, actualFingerprint)
+		zlog.Infof("%s [Tunnel] Actual certificate fingerprint: %s", TAG, actualFingerprint)
 
 		if !verifyFingerprint {
 			return nil // 如果用户没有开启强制验证，则直接放行
 		}
 
-		zlog.Infof("%s [Tunnel] 期盼证书指纹: %s", TAG, expectedFingerprint)
+		zlog.Infof("%s [Tunnel] Expected certificate fingerprint: %s", TAG, expectedFingerprint)
 
 		// 标准化：转大写并移除冒号和空格
 		cleanExpected := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(expectedFingerprint, ":", ""), " ", ""))
 		cleanActual := strings.ReplaceAll(actualFingerprint, ":", "")
 
 		if cleanExpected != cleanActual {
-			zlog.Errorf("%s [Tunnel] ❌ 证书指纹不匹配！期望: %s, 实际: %s", TAG, expectedFingerprint, actualFingerprint)
+			zlog.Errorf("%s [Tunnel] ❌ Certificate fingerprint mismatch! Expected: %s, Actual: %s", TAG, expectedFingerprint, actualFingerprint)
 			return fmt.Errorf("fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFingerprint)
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ 证书指纹校验通过！", TAG)
+		zlog.Infof("%s [Tunnel] ✅ Certificate fingerprint verification passed!", TAG)
 		return nil
 	}
 }
@@ -122,7 +122,7 @@ type DumpConn struct {
 func (c *DumpConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
-		zlog.Debugf("\n--- [%s] ⬇️ 读取 %d 字节 ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
+		zlog.Debugf("\n--- [%s] ⬇️ Read %d bytes ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
 	}
 	return n, err
 }
@@ -130,7 +130,7 @@ func (c *DumpConn) Read(b []byte) (int, error) {
 func (c *DumpConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if n > 0 {
-		zlog.Debugf("\n--- [%s] ⬆️ 发送 %d 字节 ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
+		zlog.Debugf("\n--- [%s] ⬆️ Sent %d bytes ---\n%s\n", c.Prefix, n, hex.Dump(b[:n]))
 	}
 	return n, err
 }

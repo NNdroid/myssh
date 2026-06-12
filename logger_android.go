@@ -183,6 +183,6 @@ func InitLogger(logPath string, logLevelStr string) int {
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zlog = logger.Sugar()
 
-	zlog.Infof("[Logger] 日志系统初始化完成 (LogReceiver 模式)")
+	zlog.Infof("[Logger] Log system initialization completed (LogReceiver mode)")
 	return 0
 }

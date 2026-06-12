@@ -25,7 +25,7 @@ func init() {
 	RegisterTunnel("http", "tcp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		if strings.TrimSpace(cfg.HttpPayload) == "" {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 错误: HttpPayload 为空", TAG)
+			zlog.Errorf("%s [Tunnel] ❌ Error: HttpPayload is empty", TAG)
 			return nil, fmt.Errorf("HttpPayload is required")
 		}
 
@@ -51,7 +51,7 @@ func init() {
 					rawPayload = rawPayload[:firstLineEnd+1] + authHeader + rawPayload[firstLineEnd+1:]
 				}
 			}
-			zlog.Debugf("%s [Tunnel] 🔑 已注入认证信息 (User: %s)", TAG, cfg.ProxyAuthUser)
+			zlog.Debugf("%s [Tunnel] 🔑 Injected authentication info (User: %s)", TAG, cfg.ProxyAuthUser)
 		}
 
 		// 提取 Method 用于日志
@@ -64,36 +64,36 @@ func init() {
 		// ==========================================
 		// 🐛 DEBUG: 打印即将发送的完整 Payload (使用 %q 显式打印 \r\n 等不可见字符)
 		// ==========================================
-		zlog.Infof("%s [Tunnel] 🚀 准备发送请求 (Method: %s)", TAG, method)
-		zlog.Debugf("%s [Tunnel] ⬆️ 发送的完整 Payload 数据:\n%q", TAG, rawPayload)
+		zlog.Infof("%s [Tunnel] 🚀 Preparing to send request (Method: %s)", TAG, method)
+		zlog.Debugf("%s [Tunnel] ⬆️ Sent full Payload data:\n%q", TAG, rawPayload)
 
 		// 发送请求
 		n, err := baseConn.Write([]byte(rawPayload))
 		if err != nil {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 发送 Payload 失败: %v", TAG, err)
-			return nil, fmt.Errorf("发送 Payload 失败: %v", err)
+			zlog.Errorf("%s [Tunnel] ❌ Failed to send Payload: %v", TAG, err)
+			return nil, fmt.Errorf("failed to send Payload: %v", err)
 		}
-		zlog.Debugf("%s [Tunnel] ⬆️ 成功发送了 %d bytes", TAG, n)
+		zlog.Debugf("%s [Tunnel] ⬆️ Successfully sent %d bytes", TAG, n)
 
 		// 解析响应
 		br := bufio.NewReader(baseConn)
 		line, err := br.ReadString('\n')
 		if err != nil {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 读取响应行失败: %v", TAG, err)
-			return nil, fmt.Errorf("读取响应失败: %v", err)
+			zlog.Errorf("%s [Tunnel] ❌ Failed to read response line: %v", TAG, err)
+			return nil, fmt.Errorf("failed to read response: %v", err)
 		}
 
 		// ==========================================
 		// 🐛 DEBUG: 打印收到的第一行状态行
 		// ==========================================
-		zlog.Debugf("%s [Tunnel] ⬇️ 收到代理服务器响应行: %q", TAG, strings.TrimSpace(line))
+		zlog.Debugf("%s [Tunnel] ⬇️ Received proxy server response line: %q", TAG, strings.TrimSpace(line))
 
 		if !strings.HasPrefix(line, "HTTP/") {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 协议错误，非 HTTP 响应: %q", TAG, line)
-			return nil, fmt.Errorf("Invalid Protocol: %s", line)
+			zlog.Errorf("%s [Tunnel] ❌ Protocol error, non-HTTP response: %q", TAG, line)
+			return nil, fmt.Errorf("invalid protocol: %s", line)
 		}
 
 		var proto string
@@ -101,8 +101,8 @@ func init() {
 		_, err = fmt.Sscanf(line, "%s %d", &proto, &statusCode)
 		if err != nil {
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ 状态行解析错误: %v", TAG, err)
-			return nil, fmt.Errorf("状态行解析错误: %v", err)
+			zlog.Errorf("%s [Tunnel] ❌ Status line parsing error: %v", TAG, err)
+			return nil, fmt.Errorf("status line parsing error: %v", err)
 		}
 
 		// 状态校验

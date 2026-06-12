@@ -619,7 +619,7 @@ func GetDomainActivityJSON() string {
 	}
 	data, err := json.Marshal(globalDomainStatsManager.rankedList)
 	if err != nil {
-		zlog.Errorf("%s [Stats] ❌ 序列化域名活动排行榜失败: %v", TAG, err)
+		zlog.Errorf("%s [Stats] ❌ Failed to serialize domain activity ranking: %v", TAG, err)
 		return "[]"
 	}
 	return string(data)
@@ -631,7 +631,7 @@ func ResetDomainStatsAndCache() {
 		globalRouter.ResetCacheAndStats()
 	}
 	globalDomainStatsManager.reset()
-	zlog.Infof("%s [Stats] ♻️ 域名统计排行榜与路由缓存已响应 UI 请求重置", TAG)
+	zlog.Infof("%s [Stats] ♻️ Domain stats ranking and route cache have been reset per UI request", TAG)
 }
 
 // RouterStats 供外部获取路由分流统计数据的结构体
@@ -647,7 +647,7 @@ func GetRouterStats() *RouterStats {
 		return &RouterStats{}
 	}
 
-	total, hits := globalRouter.GetStats()
+	total, hits := globalRouter.getStats()
 	var rate float64
 	if total > 0 {
 		rate = float64(hits) / float64(total) * 100.0

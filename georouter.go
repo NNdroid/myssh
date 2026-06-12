@@ -53,7 +53,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return fmt.Errorf("读取 geosite.dat 失败: %w", err)
+		return fmt.Errorf("failed to read geosite.dat: %w", err)
 	}
 
 	tagMap := make(map[string]bool)
@@ -177,7 +177,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	}
 
 	if foundCount == 0 && len(targetTags) > 0 {
-		return fmt.Errorf("未在 geosite 中找到任何指定的标签: %v", targetTags)
+		return fmt.Errorf("no specified tags found in geosite: %v", targetTags)
 	}
 
 	// 合并正则表达式以提升性能
@@ -195,7 +195,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	// 强制触发 GC，并立即将解析 Protobuf 产生的巨大临时内存还给 Android 系统
 	debug.FreeOSMemory()
 
-	zlog.Debugf("%s [Router] GeoSite 解析完毕，匹配到 %d 个规则簇", TAG, foundCount)
+	zlog.Debugf("%s [Router] GeoSite parsing completed, matched %d rule clusters", TAG, foundCount)
 	return nil
 }
 
@@ -224,11 +224,11 @@ func (r *GeoRouter) combineRegexPatterns() {
 			r.regexGrouped = append(r.regexGrouped, regex)
 		} else {
 			// 兜底保障：如果某一组因为极其特殊的语法或超限导致合并失败，降级将它们单独存入组内
-			zlog.Warnf("%s [Router] 正则分块合并出现异常，已降级散装存储: %v", TAG, err)
+			zlog.Warnf("%s [Router] Regex chunk merge exception, degraded to loose storage: %v", TAG, err)
 			r.regexGrouped = append(r.regexGrouped, r.regexList[i:end]...)
 		}
 	}
-	zlog.Debugf("%s [Router] %d 个正则表达式已优化为 %d 个匹配组", TAG, len(r.regexList), len(r.regexGrouped))
+	zlog.Debugf("%s [Router] %d regular expressions optimized into %d matching groups", TAG, len(r.regexList), len(r.regexGrouped))
 }
 
 func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
@@ -241,7 +241,7 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return fmt.Errorf("读取 geoip.dat 失败: %w", err)
+		return fmt.Errorf("failed to read geoip.dat: %w", err)
 	}
 
 	tagMap := make(map[string]bool)
@@ -355,7 +355,7 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	}
 
 	if foundCount == 0 && len(targetTags) > 0 {
-		return fmt.Errorf("未在 geoip 中找到任何指定的标签: %v", targetTags)
+		return fmt.Errorf("no specified tags found in geoip: %v", targetTags)
 	}
 
 	// 清理动作
@@ -364,7 +364,7 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 	// 强制触发 GC，并立即将解析 Protobuf 产生的巨大临时内存还给 Android 系统
 	debug.FreeOSMemory()
 
-	zlog.Debugf("%s [Router] GeoIP 解析完毕，共将 %d 条 CIDR 网段载入 Radix 树", TAG, ipInsertCount)
+	zlog.Debugf("%s [Router] GeoIP parsing completed, loaded %d CIDR subnets into Radix tree", TAG, ipInsertCount)
 	return nil
 }
 
@@ -381,10 +381,10 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	// 使用 Go 1.18+ 的 netip 零分配解析，替换老旧的 net.ParseIP
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if r.MatchNetIP(addr) {
-			zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 命中 GeoIP，走直连", TAG, host)
+			zlog.Debugf("%s [Router] Direct IP access [%s] -> Hit GeoIP, routing direct", TAG, host)
 			return RouteResult{IsDirect: true, DialHost: host}
 		}
-		zlog.Debugf("%s [Router] 直接 IP 访问 [%s] -> 未命中 GeoIP，走代理", TAG, host)
+		zlog.Debugf("%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
 		return RouteResult{IsDirect: false, DialHost: host}
 	}
 
@@ -392,10 +392,10 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	if r.MatchDomain(host) {
 		ips := GetCachedIPs(host)
 		if len(ips) > 0 {
-			zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 使用缓存 IP (%s) 走直连", TAG, host, ips[0].String())
+			zlog.Debugf("%s [Router] Domain [%s] hit GeoSite -> Using cached IP (%s) for direct routing", TAG, host, ips[0].String())
 			return RouteResult{IsDirect: true, DialHost: ips[0].String()}
 		}
-		zlog.Debugf("%s [Router] 域名 [%s] 命中 GeoSite -> 无缓存 IP，保留域名走直连", TAG, host)
+		zlog.Debugf("%s [Router] Domain [%s] hit GeoSite -> No cached IP, keeping domain for direct routing", TAG, host)
 		return RouteResult{IsDirect: true, DialHost: host}
 	}
 
@@ -412,13 +412,13 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	for _, resolvedIP := range ips {
 		if r.MatchIP(resolvedIP) {
-			zlog.Debugf("%s [Router] 域名 [%s] 解析的 IP (%s) 命中 GeoIP -> 走直连", TAG, host, resolvedIP.String())
+			zlog.Debugf("%s [Router] Domain [%s] resolved IP (%s) hit GeoIP -> routing direct", TAG, host, resolvedIP.String())
 			return RouteResult{IsDirect: true, DialHost: resolvedIP.String()}
 		}
 	}
 
 	// 走代理 (未命中直连规则)
-	zlog.Debugf("%s [Router] 域名 [%s] 未命中任何直连规则 -> 走代理", TAG, host)
+	zlog.Debugf("%s [Router] Domain [%s] missed all direct rules -> routing proxy", TAG, host)
 	return RouteResult{IsDirect: false, DialHost: host}
 }
 
@@ -460,11 +460,11 @@ func (r *GeoRouter) ResetCacheAndStats() {
 	atomic.StoreInt32(&r.cacheCount, 0)
 	atomic.StoreInt64(&r.queryCount, 0)
 	atomic.StoreInt64(&r.cacheHitCount, 0)
-	zlog.Infof("%s [Router] ♻️ 路由缓存与查询统计数据已手动重置", TAG)
+	zlog.Infof("%s [Router] ♻️ Route cache and query stats manually reset", TAG)
 }
 
-// GetStats 返回路由统计数据：(总查询数, 缓存命中数)
-func (r *GeoRouter) GetStats() (int64, int64) {
+// getStats 返回路由统计数据：(总查询数, 缓存命中数)，小写以避免 gomobile 导出报错
+func (r *GeoRouter) getStats() (int64, int64) {
 	return atomic.LoadInt64(&r.queryCount), atomic.LoadInt64(&r.cacheHitCount)
 }
 

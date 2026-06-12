@@ -83,7 +83,7 @@ func InitLogger(logPath string, logLevelStr string) int {
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zlog = logger.Sugar()
 
-	zlog.Infof("[Logger] 通用日志系统初始化完成 | 级别: %s | 文件: %s", level.String(), logPath)
+	zlog.Infof("[Logger] Generic log system initialization completed | Level: %s | File: %s", level.String(), logPath)
 
 	return 0
 }

@@ -15,7 +15,7 @@ import (
 )
 
 // ==========================================
-// 1. HTTP/2 双向流转 net.Conn 适配器
+// HTTP/2 双向流转 net.Conn 适配器
 // ==========================================
 type streamConn struct {
 	net.Conn
@@ -55,7 +55,7 @@ func (s *streamConn) Close() error {
 }
 
 // ==========================================
-// 2. gRPC 数据帧封装器
+// gRPC 数据帧封装器
 // ==========================================
 type grpcWriter struct {
 	w io.Writer
@@ -65,7 +65,7 @@ func (g *grpcWriter) Write(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	// 🌟在栈上分配 5 字节固定头部，避免堆分配
+	// 在栈上分配 5 字节固定头部，避免堆分配
 	var header [5]byte
 	binary.BigEndian.PutUint32(header[1:5], uint32(len(p)))
 
@@ -111,7 +111,7 @@ func (g *grpcConn) Read(b []byte) (n int, err error)  { return g.gr.Read(b) }
 func (g *grpcConn) Write(b []byte) (n int, err error) { return g.gw.Write(b) }
 
 // ==========================================
-// 3. 核心握手逻辑与注册
+// 核心握手逻辑与注册
 // ==========================================
 func init() {
 	// 提取 H2 和 gRPC 通用的握手逻辑
@@ -131,7 +131,7 @@ func init() {
 			}
 		}
 
-		zlog.Infof("%s [Tunnel] 2. 准备进行 %s 隧道握手, 伪装 Host: %s", TAG, protoName, cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 2. Preparing %s tunnel handshake, spoofed Host: %s", TAG, protoName, cfg.CustomHost)
 
 		path := cfg.CustomPath
 		if path == "" {
@@ -160,7 +160,7 @@ func init() {
 			req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
 		}
 
-		// 🌟 注入 gRPC 标准头部
+		// 注入 gRPC 标准头部
 		if isGRPC {
 			req.Header.Set("Content-Type", "application/grpc")
 			req.Header.Set("TE", "trailers")
@@ -206,17 +206,17 @@ func init() {
 		case err := <-errChan:
 			baseConn.Close()
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ %s 握手请求失败: %v", TAG, protoName, err)
+			zlog.Errorf("%s [Tunnel] ❌ %s handshake request failed: %v", TAG, protoName, err)
 			return nil, err
 		case resp := <-respChan:
 			if resp.StatusCode != http.StatusOK {
 				resp.Body.Close()
 				cancel()
 				baseConn.Close()
-				zlog.Errorf("%s [Tunnel] ❌ %s 服务端拒绝, 状态码: %d", TAG, protoName, resp.StatusCode)
+				zlog.Errorf("%s [Tunnel] ❌ %s server rejected, status code: %d", TAG, protoName, resp.StatusCode)
 				return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
 			}
-			zlog.Infof("%s [Tunnel] ✅ %s 隧道握手成功", TAG, protoName)
+			zlog.Infof("%s [Tunnel] ✅ %s tunnel handshake successful", TAG, protoName)
 
 			// 组装底层的 HTTP/2 流连接
 			sConn := &streamConn{
@@ -228,7 +228,7 @@ func init() {
 
 			var rConn net.Conn = sConn
 
-			// 🌟 如果是 gRPC，给这个连接套上数据帧封包器
+			// 如果是 gRPC，给这个连接套上数据帧封包器
 			if isGRPC {
 				rConn = &grpcConn{
 					Conn: sConn,
@@ -242,7 +242,7 @@ func init() {
 		case <-time.After(15 * time.Second):
 			cancel()
 			baseConn.Close()
-			zlog.Errorf("%s [Tunnel] ❌ %s 握手超时", TAG, protoName)
+			zlog.Errorf("%s [Tunnel] ❌ %s handshake timeout", TAG, protoName)
 			return nil, fmt.Errorf("%s handshake timeout", protoName)
 		}
 	}

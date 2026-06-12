@@ -46,7 +46,7 @@ type GlobalConfig struct {
 
 func LoadGlobalConfigFromJson(configJson string) int {
 	if err := json.Unmarshal([]byte(configJson), &globalConfig); err != nil {
-		zlog.Errorf("%s [Config] ❌ 解析全局配置 JSON 失败: %v\n传入的JSON内容: %s", TAG, err, configJson)
+		zlog.Errorf("%s [Config] ❌ Failed to parse global config JSON: %v\nInput JSON content: %s", TAG, err, configJson)
 		return -2
 	}
 	return loadGlobalConfig(globalConfig)
@@ -69,28 +69,28 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 		cfg.GeoIPFilePath = "geoip.dat"
 	}
 
-	zlog.Infof("%s [Config] ✅ 已应用全局配置: LocalDNS=[%s], RemoteDNS=[%s]", TAG, cfg.LocalDnsServer, cfg.RemoteDnsServer)
+	zlog.Infof("%s [Config] ✅ Global config applied: LocalDNS=[%s], RemoteDNS=[%s]", TAG, cfg.LocalDnsServer, cfg.RemoteDnsServer)
 
 	globalRouter = newGeoRouter()
 
 	if _, err := os.Stat(cfg.GeoSiteFilePath); err == nil {
 		if err := globalRouter.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
-			zlog.Errorf("%s [Config] ❌ 加载 GeoSite 失败: %v", TAG, err)
+			zlog.Errorf("%s [Config] ❌ Failed to load GeoSite: %v", TAG, err)
 		} else {
-			zlog.Infof("%s [Config] ✅ GeoSite 加载成功", TAG)
+			zlog.Infof("%s [Config] ✅ GeoSite loaded successfully", TAG)
 		}
 	} else if os.IsNotExist(err) {
-		zlog.Warnf("%s [Config] ⚠️ 未找到 GeoSite 文件 (%s)，域名直连分流已禁用", TAG, cfg.GeoSiteFilePath)
+		zlog.Warnf("%s [Config] ⚠️ GeoSite file not found (%s), direct domain routing disabled", TAG, cfg.GeoSiteFilePath)
 	}
 
 	if _, err := os.Stat(cfg.GeoIPFilePath); err == nil {
 		if err := globalRouter.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
-			zlog.Errorf("%s [Config] ❌ 加载 GeoIP 失败: %v", TAG, err)
+			zlog.Errorf("%s [Config] ❌ Failed to load GeoIP: %v", TAG, err)
 		} else {
-			zlog.Infof("%s [Config] ✅ GeoIP 加载成功", TAG)
+			zlog.Infof("%s [Config] ✅ GeoIP loaded successfully", TAG)
 		}
 	} else if os.IsNotExist(err) {
-		zlog.Warnf("%s [Config] ⚠️ 未找到 GeoIP 文件 (%s)，IP直连分流已禁用", TAG, cfg.GeoIPFilePath)
+		zlog.Warnf("%s [Config] ⚠️ GeoIP file not found (%s), direct IP routing disabled", TAG, cfg.GeoIPFilePath)
 	}
 
 	return 0

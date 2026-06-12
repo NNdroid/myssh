@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySSHd Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- 全局 Toast 提示容器 -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- ==================== 登录面板 (JWT) ==================== -->
+    <div id="login-overlay" class="modal" style="display: flex; z-index: 10000;">
+        <div class="modal-content card" style="max-width: 360px; padding: 30px;">
+            <div style="text-align: center; margin-bottom: 24px;">
+                <span style="font-size: 3rem;">⚡</span>
+                <h2 style="margin-top: 10px; font-weight: 600;" data-i18n="panel_title">Stun-Go Console</h2>
+            </div>
+            <form id="login-form" style="display: flex; flex-direction: column; gap: 16px;">
+                <input type="text" id="login-user" class="form-control" data-i18n-placeholder="label_proxy_auth_user" placeholder="Username" required>
+                <input type="password" id="login-pass" class="form-control" data-i18n-placeholder="label_proxy_auth_pass" placeholder="Password" required>
+                <button type="submit" class="btn btn-outline accent" style="width: 100%; margin-top: 8px;" data-i18n="btn_login">Login</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- 主体 UI 容器 (在授权成功前隐藏) -->
+    <div id="main-ui" style="display: none;">
+    <nav class="navbar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span data-i18n="panel_title">MySSH Web Panel</span>
+        </div>
+        <!-- 新增：Tab 导航栏 -->
+        <div class="nav-buttons">
+            <button class="nav-tab active" data-panel="dashboard" data-i18n="nav_dashboard">Dashboard & Logs</button>
+            <button class="nav-tab" data-panel="nodes" data-i18n="nav_nodes">Node Management</button>
+            <button class="nav-tab" data-panel="settings" data-i18n="nav_settings">Global Settings</button>
+        </div>
+        <div class="nav-controls">
+            <select id="lang-selector" class="lang-select"></select>
+        </div>
+    </nav>
+
+    <main class="container">
+        <!-- ==================== 面板 1：极客仪表盘 ==================== -->
+        <div id="dashboard-panel" class="panel-section active">
+            <!-- 核心代理状态 -->
+            <div class="status-banner card">
+                <div class="status-indicator" id="status-indicator"></div>
+                <div class="status-info">
+                    <h2 id="status-text" data-i18n="status_disconnected">Stopped</h2>
+                    <p id="status-node" class="text-muted">-</p>
+                </div>
+                <button id="start-btn" class="btn accent" data-i18n="btn_start_proxy">Start Proxy</button>
+                <button id="stop-btn" class="btn danger" style="display:none;" data-i18n="btn_stop_proxy">Stop Proxy</button>
+            </div>
+
+            <!-- 仪表盘统计区 -->
+            <section class="dashboard-grid">
+                <div class="card">
+                    <h3 class="card-title" data-i18n="card.system">System Resources</h3>
+                    <div class="stat-row"><span data-i18n="stat.cpu">CPU</span><strong class="highlight" id="sysCpu">0.0%</strong></div>
+                    <div class="stat-row"><span data-i18n="stat.mem">Mem</span><strong id="sysMem">0/0 MB</strong></div>
+                    <div class="stat-row"><span data-i18n="stat.goroutine">Goroutines</span><strong id="sysGoroutine">0</strong></div>
+                </div>
+                <div class="card">
+                    <h3 class="card-title" data-i18n="card.traffic">Traffic Monitor</h3>
+                    <div class="stat-row"><span data-i18n="stat.rate">Rate</span><strong class="highlight accent" id="trafRate">0/0</strong></div>
+                    <div class="stat-row"><span data-i18n="stat.total">Total</span><strong id="trafTotal">0/0</strong></div>
+                    <div class="stat-row"><span data-i18n="stat.connections">Conns</span><strong id="trafConns">0/0</strong></div>
+                </div>
+                <div class="card domain-card">
+                    <h3 class="card-title" data-i18n="card.domains">Top Domains</h3>
+                    <ul class="domain-list" id="domainList"></ul>
+                </div>
+            </section>
+
+            <!-- 实时日志终端 -->
+            <section class="terminal-section">
+                <div class="terminal-header">
+                    <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+                    <span class="term-title" data-i18n="title_logs">Live Console</span>
+                    <button id="clear-log-btn" class="btn danger btn-sm" data-i18n="btn_clear_log">Clear</button>
+                </div>
+                <pre id="logs" class="terminal-body" data-i18n="text_log_loading"></pre>
+            </section>
+        </div>
+
+        <!-- ==================== 面板 2：节点管理 ==================== -->
+        <div id="nodes-panel" class="panel-section">
+            <div class="panel-header">
+                <h2 data-i18n="title_node_list">Node List</h2>
+                <div class="actions">
+                    <input type="file" id="import-file-input" accept=".json" style="display: none;">
+                    <button id="import-btn" class="btn" data-i18n="btn_import">Import</button>
+                    <button id="export-btn" class="btn" data-i18n="btn_export">Export</button>
+                    <button id="add-node-btn" class="btn accent" data-i18n="btn_add_node">+ Add</button>
+                </div>
+            </div>
+            <div id="node-list" class="node-list-grid">
+                <!-- Node items will be injected here by script.js -->
+            </div>
+        </div>
+
+        <!-- ==================== 面板 3：全局设置 ==================== -->
+        <div id="settings-panel" class="panel-section">
+            <h2 data-i18n="title_global_settings" style="margin-bottom: 20px; color: var(--accent-blue);">Global Settings</h2>
+            <form id="settings-form" class="card form-grid">
+                <div class="form-group">
+                    <label data-i18n="label_local_addr">Local SOCKS5 Address</label>
+                    <input type="text" name="local_addr" data-i18n-placeholder="ph_local_addr" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_dns_addr">Local DNS Address</label>
+                    <input type="text" name="dns_addr" data-i18n-placeholder="ph_dns_addr" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_local_dns">Local DNS</label>
+                    <input type="text" name="local_dns_server" data-i18n-placeholder="ph_local_dns" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_remote_dns">Remote DNS</label>
+                    <input type="text" name="remote_dns_server" data-i18n-placeholder="ph_remote_dns" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_geosite">GeoSite Path</label>
+                    <input type="text" name="geosite_filepath" data-i18n-placeholder="ph_geosite" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_geoip">GeoIP Path</label>
+                    <input type="text" name="geoip_filepath" data-i18n-placeholder="ph_geoip" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_udpgw_addr">UDPGW Address</label>
+                    <input type="text" name="udpgw_addr" data-i18n-placeholder="ph_udpgw_addr" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="label_udpgw_version">UDPGW Version</label>
+                    <input type="text" name="udpgw_version" data-i18n-placeholder="ph_udpgw_version" class="form-control">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label data-i18n="label_direct_site">Direct Domain Tags</label>
+                    <input type="text" name="direct_site_tags" data-i18n-placeholder="ph_direct_site" class="form-control">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label data-i18n="label_direct_ip">Direct IP Tags</label>
+                    <input type="text" name="direct_ip_tags" data-i18n-placeholder="ph_direct_ip" class="form-control">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1; margin-top: 10px;">
+                    <button type="submit" class="btn accent" style="width: 100%;" data-i18n="btn_save_settings">Save Settings</button>
+                </div>
+            </form>
+        </div>
+    </main>
+
+    <!-- ==================== 模态框：节点编辑 ==================== -->
+    <div id="node-modal" class="modal">
+        <div class="modal-content card">
+            <div class="modal-header">
+                <h2 id="modal-title" data-i18n="title_add_node">Add Node</h2>
+                <button id="close-modal-btn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="node-form">
+                    <h3 class="section-title" data-i18n="section_basic_config">Basic Config</h3>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label data-i18n="label_node_alias">Alias</label>
+                            <input type="text" name="name" required class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="label_ssh_addr">SSH Address</label>
+                            <input type="text" name="sshAddr" required class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="label_ssh_user">SSH Username</label>
+                            <input type="text" name="user" required class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="label_auth_type">Auth Type</label>
+                            <select name="authType" id="authType" class="form-control">
+                                <option value="password" data-i18n="opt_password">Password</option>
+                                <option value="key" data-i18n="opt_key">Private Key</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-auth="password">
+                            <label data-i18n="label_ssh_pass">SSH Password</label>
+                            <input type="password" name="pass" class="form-control">
+                        </div>
+                        <div class="form-group" data-auth="key" style="display:none; grid-column: 1/-1;">
+                            <label data-i18n="label_ssh_key">Private Key</label>
+                            <textarea name="privateKey" class="form-control" rows="3"></textarea>
+                        </div>
+                         <div class="form-group" data-auth="key" style="display:none;">
+                            <label data-i18n="label_key_pass">Key Passphrase</label>
+                            <input type="password" name="keyPass" class="form-control">
+                        </div>
+                    </div>
+
+                    <h3 class="section-title" data-i18n="section_tunnel_settings">Tunnel Settings</h3>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label data-i18n="label_tunnel_type">Tunnel Type</label>
+                            <select name="tunnelType" id="tunnelType" class="form-control">
+                                <option value="base">Base SSH</option>
+                                <option value="tls">TLS</option>
+                                <option value="ws">WebSocket</option>
+                                <option value="wss">WebSocket + TLS</option>
+                                <option value="http">HTTP Payload</option>
+                                <option value="h2c">HTTP/2 Cleartext</option>
+                                <option value="h2">HTTP/2 TLS</option>
+                                <option value="quic">QUIC</option>
+                                <option value="grpc">gRPC</option>
+                                <option value="grpcc">gRPC (Cleartext)</option>
+                                <option value="masque">MASQUE (HTTP/3)</option>
+                                <option value="wt">WebTransport</option>
+                                <option value="xhttpc">XHTTP Cleartext</option>
+                                <option value="xhttp">XHTTP TLS</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-visibility-key="proxyAddr">
+                            <label data-i18n="label_proxy_addr">Proxy Address</label>
+                            <input type="text" name="proxyAddr" class="form-control">
+                        </div>
+                        <div class="form-group" data-visibility-key="customHost">
+                            <label data-i18n="label_custom_host">Custom Host / SNI</label>
+                            <input type="text" name="customHost" class="form-control">
+                        </div>
+                        <div class="form-group" data-visibility-key="serverName">
+                            <label data-i18n="label_server_name">Server Name (SNI)</label>
+                            <input type="text" name="serverName" class="form-control">
+                        </div>
+                        <div class="form-group" data-visibility-key="httpPayload" style="grid-column: 1/-1;">
+                            <label data-i18n="label_http_payload">HTTP Payload</label>
+                            <textarea name="httpPayload" class="form-control" rows="3"></textarea>
+                        </div>
+                        <div class="form-group" data-visibility-key="customPath" style="grid-column: 1/-1;">
+                            <label data-i18n="label_custom_path">Custom Path</label>
+                            <input type="text" name="customPath" class="form-control">
+                        </div>
+                        <div class="checkbox-group" data-visibility-key="enableCustomPath" style="grid-column: 1/-1;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="enableCustomPath" id="enableCustomPath">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_enable_custom_path">Enable Custom Path</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <h3 class="section-title" data-i18n="section_proxy">Upstream Proxy</h3>
+                     <div class="form-grid">
+                        <div class="checkbox-group" data-visibility-key="proxyAuth" style="grid-column: 1/-1;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="proxyAuthRequired" id="proxyAuthRequired">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_proxy_auth_req">Proxy Authentication</span>
+                            </label>
+                            <div data-visibility-key="proxyAuthUserPass" style="display:none; padding-left: 30px; margin-top: 10px;">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label data-i18n="label_proxy_auth_user">Proxy Username</label>
+                                        <input type="text" name="proxyAuthUser" class="form-control">
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="label_proxy_auth_pass">Proxy Password</label>
+                                        <input type="password" name="proxyAuthPass" class="form-control">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-group" data-visibility-key="proxyAuthToken" style="display:none; padding-left: 30px; margin-top: 10px;">
+                                <label data-i18n="label_proxy_auth_token">Proxy Token</label>
+                                <input type="text" name="proxyAuthToken" class="form-control">
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3 class="section-title" data-i18n="section_others">Others</h3>
+                    <div class="form-grid">
+                        <div class="form-group" style="grid-column: 1/-1;">
+                            <label data-i18n="label_bind_interface">Bind Interface</label>
+                            <input type="text" name="bindInterface" class="form-control">
+                        </div>
+                        <div class="checkbox-group" data-visibility-key="verifySshFingerprint" style="grid-column: 1/-1;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="verifyFingerprint" id="verifyFingerprint">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_verify_ssh_fp">Verify SSH Fingerprint</span>
+                            </label>
+                            <div class="form-group" data-visibility-key="serverFingerprint" style="display:none; padding-left: 30px; margin-top: 10px;">
+                                <label data-i18n="label_ssh_fp_content">SSH Fingerprint Content</label>
+                                <input type="text" name="serverFingerprint" class="form-control">
+                            </div>
+                        </div>
+                        <div class="checkbox-group" data-visibility-key="verifyCertFingerprint" style="grid-column: 1/-1;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="verifyCertFingerprint" id="verifyCertFingerprint">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_verify_cert_fp">Verify Cert Fingerprint</span>
+                            </label>
+                            <div class="form-group" data-visibility-key="serverCertFingerprint" style="display:none; padding-left: 30px; margin-top: 10px;">
+                                <label data-i18n="label_cert_fp_content">Certificate Fingerprint Content</label>
+                                <input type="text" name="serverCertFingerprint" class="form-control">
+                            </div>
+                        </div>
+                        <div class="checkbox-group" data-visibility-key="dnsOverride" style="grid-column: 1/-1;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="dnsOverride" id="dnsOverride">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_dns_override">DNS & UDPGW Override</span>
+                            </label>
+                            <div data-visibility-key="dnsOverrideFields" style="display:none; padding-left: 30px; margin-top: 10px;">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label data-i18n="label_remote_dns">Remote DNS</label>
+                                        <input type="text" name="remoteDns" class="form-control">
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="label_local_dns">Local DNS</label>
+                                        <input type="text" name="localDns" class="form-control">
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="label_udpgw_addr">UDPGW Address</label>
+                                        <input type="text" name="udpgwAddr" class="form-control">
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="label_udpgw_version">UDPGW Version</label>
+                                        <select name="udpgwVersion" class="form-control">
+                                            <option value="tun2proxy">tun2proxy</option>
+                                            <option value="badvpn">badvpn</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="checkbox-group" data-visibility-key="routingOverride" style="grid-column: 1/-1;">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="routingOverride" id="routingOverride">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_routing_override">Routing Override</span>
+                            </label>
+                            <div data-visibility-key="routingOverrideFields" style="display:none; padding-left: 30px; margin-top: 10px;">
+                                <div class="form-grid">
+                                    <div class="form-group" style="grid-column: 1/-1;">
+                                        <label data-i18n="label_geosite_direct">Geosite Direct Tags</label>
+                                        <input type="text" name="geositeDirect" class="form-control">
+                                    </div>
+                                    <div class="form-group" style="grid-column: 1/-1;">
+                                        <label data-i18n="label_geoip_direct">GeoIP Direct Tags</label>
+                                        <input type="text" name="geoipDirect" class="form-control">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="submit" form="node-form" class="btn accent" style="width: 100%;" data-i18n="btn_save_node">Save</button>
+            </div>
+        </div>
+    </div>
+    </div> <!-- /main-ui 结束 -->
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

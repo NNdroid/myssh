@@ -57,13 +57,13 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 	}
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Dial] 📞 拨号目标: %s -> 服务端: %s\n", TAG, remoteTarget, udpgwServerAddr)
+		zlog.Debugf("%s [UDPGW-Dial] 📞 Dialing target: %s -> Server: %s\n", TAG, remoteTarget, udpgwServerAddr)
 	}
 
 	// udpgw.c 不处理域名，必须预先解析为 IP
 	addr, err := net.ResolveUDPAddr("udp", remoteTarget)
 	if err != nil {
-		zlog.Errorf("%s [UDPGW-Dial] ❌ 解析目标地址失败 (%s): %v", TAG, remoteTarget, err)
+		zlog.Errorf("%s [UDPGW-Dial] ❌ Failed to resolve target address (%s): %v", TAG, remoteTarget, err)
 		return nil, fmt.Errorf("resolve error: %w", err)
 	}
 	if Debug {
@@ -72,8 +72,8 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 
 	underlyingConn, err := sshClient.Dial("tcp", udpgwServerAddr)
 	if err != nil {
-		zlog.Errorf("%s [UDPGW-Dial] ❌ SSH 建立 TCP 隧道失败 (%s): %v", TAG, udpgwServerAddr, err)
-		return nil, err
+		zlog.Errorf("%s [UDPGW-Dial] ❌ SSH failed to establish TCP tunnel, unable to connect to UDPGW server (%s): %v", TAG, udpgwServerAddr, err)
+		return nil, fmt.Errorf("ssh dial udpgw server (%s) failed: %w", udpgwServerAddr, err)
 	}
 
 	// 获取一个唯一的 conID
@@ -89,7 +89,7 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 	}
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Dial] 🆕 分配了新的 ConID: %d", TAG, uniqueID)
+		zlog.Debugf("%s [UDPGW-Dial] 🆕 Allocated new ConID: %d", TAG, uniqueID)
 	}
 
 	go c.keepAliveLoop()
@@ -103,7 +103,7 @@ func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 	length := len(payload)
 	if length > 0xFFFF {
 		err := fmt.Errorf("payload too large: %d bytes", length)
-		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 载荷过大: %v", TAG, err)
+		zlog.Errorf("%s [UDPGW-writeFrame] ❌ Payload too large: %v", TAG, err)
 		return err
 	}
 
@@ -112,16 +112,16 @@ func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 	binary.LittleEndian.PutUint16(lenBuf[:], uint16(length))
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-writeFrame] 📤 发送帧 | 长度前缀: %X | 载荷长度: %d\n", TAG, lenBuf[:], length)
-		zlog.Debugf("%s [UDPGW-writeFrame] 📤 帧内容(Hex): %s\n", TAG, hex.EncodeToString(payload))
+		zlog.Debugf("%s [UDPGW-writeFrame] 📤 Sending frame | Length prefix: %X | Payload length: %d\n", TAG, lenBuf[:], length)
+		zlog.Debugf("%s [UDPGW-writeFrame] 📤 Frame content (Hex): %s\n", TAG, hex.EncodeToString(payload))
 	}
 
 	if _, err := c.Conn.Write(lenBuf[:]); err != nil {
-		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 写入长度前缀失败: %v", TAG, err)
+		zlog.Errorf("%s [UDPGW-writeFrame] ❌ Failed to write length prefix: %v", TAG, err)
 		return err
 	}
 	if _, err := c.Conn.Write(payload); err != nil {
-		zlog.Errorf("%s [UDPGW-writeFrame] ❌ 写入数据载荷失败: %v", TAG, err)
+		zlog.Errorf("%s [UDPGW-writeFrame] ❌ Failed to write data payload: %v", TAG, err)
 		return err
 	}
 	return nil
@@ -137,10 +137,10 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 	binary.LittleEndian.PutUint16(hb[1:], c.conID)
 	for {
 		if Debug {
-			zlog.Debugf("%s [UDPGW-keepAliveLoop] 💓 发送 Keepalive (ID: %d)\n", TAG, c.conID)
+			zlog.Debugf("%s [UDPGW-keepAliveLoop] 💓 Sending Keepalive (ID: %d)\n", TAG, c.conID)
 		}
 		if err := c.writeFrame(hb); err != nil {
-			zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Keepalive 写入失败: %v\n", TAG, err)
+			zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Failed to write Keepalive: %v\n", TAG, err)
 			return
 		}
 
@@ -178,11 +178,11 @@ func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 	copy(packet[3+addrLen+2:], b)
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Write] 📝 写入数据 | 目标: %s:%d | 长度: %d\n", TAG, c.targetIP, c.targetPort, len(b))
+		zlog.Debugf("%s [UDPGW-Write] 📝 Writing data | Target: %s:%d | Length: %d\n", TAG, c.targetIP, c.targetPort, len(b))
 	}
 
 	if err := c.writeFrame(packet); err != nil {
-		zlog.Errorf("%s [UDPGW-Write] ❌ 发送 UDP 数据帧失败: %v", TAG, err)
+		zlog.Errorf("%s [UDPGW-Write] ❌ Failed to send UDP data frame: %v", TAG, err)
 		return 0, err
 	}
 	return len(b), nil
@@ -197,7 +197,7 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 		var lenBuf [2]byte
 		// 严格读取 2 字节小端序长度
 		if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
-			zlog.Errorf("%s [UDPGW-Read] ❌ 读取长度前缀失败: %v", TAG, err)
+			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read length prefix: %v", TAG, err)
 			return 0, err
 		}
 
@@ -206,19 +206,19 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 		// 防御性拦截（超大畸形包直接断开，防止 OOM）
 		if pLen > 0xFFFF || pLen > len(bodyBuf) {
 			err := fmt.Errorf("invalid packet length: %d", pLen)
-			zlog.Errorf("%s [UDPGW-Read] ❌ 畸形包拦截: %v", TAG, err)
+			zlog.Errorf("%s [UDPGW-Read] ❌ Intercepted malformed packet: %v", TAG, err)
 			return 0, err
 		}
 
 		// 读出完整载荷
 		body := bodyBuf[:pLen]
 		if _, err := io.ReadFull(c.Conn, body); err != nil {
-			zlog.Errorf("%s [UDPGW-Read] ❌ 读取包体载荷失败 (预期长度: %d): %v", TAG, pLen, err)
+			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet payload (Expected length: %d): %v", TAG, pLen, err)
 			return 0, err
 		}
 
 		if Debug {
-			zlog.Debugf("%s [UDPGW-Read] 📥 收到回帧 | 长度: %d | Hex: %s\n", TAG, pLen, hex.EncodeToString(body))
+			zlog.Debugf("%s [UDPGW-Read] 📥 Received return frame | Length: %d | Hex: %s\n", TAG, pLen, hex.EncodeToString(body))
 		}
 
 		if pLen < 3 {
@@ -228,7 +228,7 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 		flags := body[0]
 		if flags&UDPGW_CLIENT_FLAG_KEEPALIVE != 0 {
 			if Debug {
-				zlog.Debugf("%s [UDPGW-Read] 💓 收到服务端心跳回包\n", TAG)
+				zlog.Debugf("%s [UDPGW-Read] 💓 Received server heartbeat response\n", TAG)
 			}
 			continue
 		}
@@ -245,7 +245,7 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 
 		n := copy(b, body[offset:])
 		if Debug {
-			zlog.Debugf("%s [UDPGW-Read] ✅ 提取 UDP Payload: %d bytes\n", TAG, n)
+			zlog.Debugf("%s [UDPGW-Read] ✅ Extracted UDP Payload: %d bytes\n", TAG, n)
 		}
 		return n, nil
 	}

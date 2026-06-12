@@ -48,7 +48,7 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 	}
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Dial] 📞 开始拨号 | 服务端: %s | 目标: %s", TAG, udpgwServerAddr, remoteTarget)
+		zlog.Debugf("%s [UDPGW-Dial] 📞 Starting dial | Server: %s | Target: %s", TAG, udpgwServerAddr, remoteTarget)
 	}
 
 	host, portStr, err := net.SplitHostPort(remoteTarget)
@@ -80,11 +80,11 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 
 	underlyingConn, err := sshClient.Dial("tcp", udpgwServerAddr)
 	if err != nil {
-		return nil, fmt.Errorf("dial udpgw server failed: %w", err)
+		return nil, fmt.Errorf("dial udpgw server failed (%s): %w", udpgwServerAddr, err)
 	}
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Dial] 🟢 底层 TCP 隧道建立成功", TAG)
+		zlog.Debugf("%s [UDPGW-Dial] 🟢 Underlying TCP tunnel established successfully", TAG)
 	}
 
 	portValue, _ := strconv.Atoi(portStr)
@@ -104,6 +104,11 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		}
 	} else {
 		addrType = UdpgwAtypDomain
+		// 防御性拦截：SOCKS5 标准中域名的长度字段仅有 1 字节，超长域名会引发 byte() 强转溢出
+		if len(host) > 255 {
+			underlyingConn.Close()
+			return nil, fmt.Errorf("domain name too long: %d bytes", len(host))
+		}
 		addrData = append([]byte{byte(len(host))}, []byte(host)...)
 	}
 
@@ -135,7 +140,7 @@ func (c *UdpgwConn) keepAliveLoop() {
 	c.writeLock.Unlock()
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Daemon] 🚀 已发送初始 Keepalive (Flag: 0x01)，会话注册完毕", TAG)
+		zlog.Debugf("%s [UDPGW-Daemon] 🚀 Initial Keepalive sent (Flag: 0x01), session registration complete", TAG)
 	}
 
 	for {
@@ -178,12 +183,12 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	copy(packet[6+len(c.targetAddressData)+2:], payload)
 
 	if _, err := c.Conn.Write(packet); err != nil {
-		zlog.Errorf("%s [UDPGW-Write] ❌ 写入隧道失败: %v", TAG, err)
+		zlog.Errorf("%s [UDPGW-Write] ❌ Failed to write to tunnel: %v", TAG, err)
 		return 0, err
 	}
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Write] 📤 上行数据发送 | 净载荷: %d bytes, 包装总长: %d bytes, ATYP: 0x%02X", TAG, dataLen, totalSize, c.addressType)
+		zlog.Debugf("%s [UDPGW-Write] 📤 Uplink data sent | Payload: %d bytes, Packed length: %d bytes, ATYP: 0x%02X", TAG, dataLen, totalSize, c.addressType)
 	}
 
 	if c.uploadCounter != nil {
@@ -208,8 +213,12 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 		pLen := binary.BigEndian.Uint16(lenBuf[:])
 
 		if int(pLen) > len(bodyBuf) {
-			zlog.Errorf("%s [UDPGW-Read] ❌ 数据包过大截断", TAG)
+			zlog.Errorf("%s [UDPGW-Read] ❌ Packet too large, truncated", TAG)
 			return 0, fmt.Errorf("packet too large: %d", pLen)
+		}
+		
+		if pLen == 0 {
+			continue // 防御性拦截：空包直接丢弃，防止下方 body[0] 触发 index out of range 崩溃
 		}
 
 		body := bodyBuf[:pLen]
@@ -242,13 +251,13 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			offset += 2 // 跳过 DST.PORT(2)
 
 			if offset > int(pLen) {
-				zlog.Errorf("%s [UDPGW-Read] ❌ 数据包越界截断，安全丢弃", TAG)
+				zlog.Errorf("%s [UDPGW-Read] ❌ Packet out of bounds, safely discarded", TAG)
 				continue
 			}
 
 			n := copy(b, body[offset:])
 			if Debug {
-				zlog.Debugf("%s [UDPGW-Read] 📥 成功解包数据 | 净载荷: %d bytes", TAG, n)
+				zlog.Debugf("%s [UDPGW-Read] 📥 Successfully unpacked data | Payload: %d bytes", TAG, n)
 			}
 			if c.downloadCounter != nil {
 				c.downloadCounter(int64(pLen + 2))
@@ -257,18 +266,18 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 
 		case UdpgwFlagKeepalive: // 0x01 心跳回包
 			if Debug {
-				zlog.Debugf("%s [UDPGW-Read] 💓 收到远端 Keepalive 应答", TAG)
+				zlog.Debugf("%s [UDPGW-Read] 💓 Received remote Keepalive response", TAG)
 			}
 			continue
 
 		case UdpgwFlagError: // 0x20 远端错误
-			zlog.Errorf("%s [UDPGW-Read] ❌ 收到远端 UDPGW 报错 (Flag: 0x20)！可能目标不可达或解析失败", TAG)
+			zlog.Errorf("%s [UDPGW-Read] ❌ Received remote UDPGW error (Flag: 0x20)! Target may be unreachable or resolution failed", TAG)
 			// 不要继续循环，这会导致调用者永久阻塞。立即返回错误，让上层清理会话。
 			return 0, fmt.Errorf("remote udpgw server reported error (flag 0x20)")
 
 		default:
 			if Debug {
-				zlog.Warnf("%s [UDPGW-Read] ⚠️ 收到未知标识符包 (Flag: 0x%02X)", TAG, flag)
+				zlog.Warnf("%s [UDPGW-Read] ⚠️ Received packet with unknown flag (Flag: 0x%02X)", TAG, flag)
 			}
 			continue
 		}

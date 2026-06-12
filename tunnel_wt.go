@@ -32,7 +32,7 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 		return val.(*webtransport.Session), nil
 	}
 
-	zlog.Infof("%s [Tunnel-WT] ⚡ 缓存未命中，正在建立底层 WebTransport 全新会话...", TAG)
+	zlog.Infof("%s [Tunnel-WT] ⚡ Cache miss, establishing brand new underlying WebTransport session...", TAG)
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -100,7 +100,7 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 		return nil, err
 	}
 
-	zlog.Infof("%s [Tunnel-WT] ✅ 底层 WebTransport 会话建立成功！", TAG)
+	zlog.Infof("%s [Tunnel-WT] ✅ Underlying WebTransport session established successfully!", TAG)
 
 	wtSessionCache.Store(cfg.ProxyAddr, session)
 	return session, nil
@@ -135,19 +135,19 @@ func init() {
 
 		session, err := getWTSession(cfg, reqUrl)
 		if err != nil {
-			zlog.Errorf("%s [Tunnel] ❌ WebTransport 会话获取失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ Failed to get WebTransport session: %v", TAG, err)
 			return nil, err
 		}
 
 		stream, err := session.OpenStreamSync(parentCtx)
 		if err != nil {
-			zlog.Warnf("%s [Tunnel] ⚠️ 发现 WebTransport 僵尸会话，正在清理并重试...", TAG)
+			zlog.Warnf("%s [Tunnel] ⚠️ Detected WebTransport zombie session, cleaning up and retrying...", TAG)
 			wtSessionCache.Delete(cfg.ProxyAddr)
 			session.CloseWithError(1, "stream open failed due to dead session")
 			return nil, fmt.Errorf("open stream failed: %w", err)
 		}
 
-		zlog.Debugf("%s [Tunnel] ⚡ 已分配新的 WT 虚拟流通道", TAG)
+		zlog.Debugf("%s [Tunnel] ⚡ Allocated new WT virtual stream channel", TAG)
 
 		rConn := &wtConn{
 			Stream:     stream,

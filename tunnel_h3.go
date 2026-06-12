@@ -37,7 +37,7 @@ func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 		return rt.(*http3.Transport), nil
 	}
 
-	zlog.Infof("%s [Tunnel-H3] 🔄 缓存未命中，开始建立全新的物理 UDP 连接和 QUIC 握手...", TAG)
+	zlog.Infof("%s [Tunnel-H3] 🔄 Cache miss, starting to establish brand new physical UDP connection and QUIC handshake...", TAG)
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -95,7 +95,7 @@ func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 	}
 
 	h3TransportCache.Store(proxyAddr, rt)
-	zlog.Infof("%s [Tunnel-H3] ✅ 底层 QUIC 物理隧道建立成功并已缓存", TAG)
+	zlog.Infof("%s [Tunnel-H3] ✅ Underlying QUIC physical tunnel established successfully and cached", TAG)
 
 	return rt, nil
 }
@@ -136,7 +136,7 @@ func init() {
 	os.Setenv("QUIC_GO_DISABLE_ECN", "true")
 
 	RegisterTunnel("h3", "custom", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		zlog.Infof("%s [Tunnel] 2. 准备进行 HTTP/3 隧道握手, 伪装 Host: %s", TAG, cfg.CustomHost)
+		zlog.Infof("%s [Tunnel] 2. Preparing HTTP/3 tunnel handshake, spoofed Host: %s", TAG, cfg.CustomHost)
 
 		path := cfg.CustomPath
 		if path == "" {
@@ -190,16 +190,16 @@ func init() {
 		select {
 		case err := <-errChan:
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 握手请求失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 handshake request failed: %v", TAG, err)
 			h3TransportCache.Delete(cfg.ProxyAddr)
 			return nil, err
 		case resp := <-respChan:
 			if resp.StatusCode != http.StatusOK {
 				cancel()
-				zlog.Errorf("%s [Tunnel] ❌ HTTP/3 服务端拒绝, 状态码: %d", TAG, resp.StatusCode)
+				zlog.Errorf("%s [Tunnel] ❌ HTTP/3 server rejected, status code: %d", TAG, resp.StatusCode)
 				return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
 			}
-			zlog.Infof("%s [Tunnel] ✅ HTTP/3 隧道握手成功，数据流就绪", TAG)
+			zlog.Infof("%s [Tunnel] ✅ HTTP/3 tunnel handshake successful, data stream ready", TAG)
 
 			rConn := &h3Conn{
 				remoteAddr: cfg.ProxyAddr,
@@ -212,7 +212,7 @@ func init() {
 
 		case <-time.After(15 * time.Second):
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 握手超时", TAG)
+			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 handshake timeout", TAG)
 			h3TransportCache.Delete(cfg.ProxyAddr)
 			return nil, fmt.Errorf("h3 handshake timeout")
 		}

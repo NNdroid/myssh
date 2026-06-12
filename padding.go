@@ -165,7 +165,7 @@ func (pr *PaddingReader) Read(p []byte) (n int, err error) {
 	}
 	n, err = pr.r.Read(p[:toRead])
 	if err != nil && err != io.EOF {
-		zlog.Debugf("[PaddingReader] 读取真实数据异常: %v", err)
+		zlog.Debugf("[PaddingReader] Exception reading actual data: %v", err)
 	}
 	pr.leftData -= uint32(n)
 	return n, err

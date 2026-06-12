@@ -14,12 +14,12 @@ import (
 func init() {
 	RegisterTunnel("masque", "custom", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 
-		zlog.Infof("%s [Tunnel] 2. 准备进行 MASQUE (CONNECT-TCP) 隧道握手, 目标: %s", TAG, cfg.SshAddr)
+		zlog.Infof("%s [Tunnel] 2. Preparing MASQUE (CONNECT-TCP) tunnel handshake, Target: %s", TAG, cfg.SshAddr)
 
 		// 解析目标地址，处理 IPv6 的方括号问题
 		host, port, err := net.SplitHostPort(cfg.SshAddr)
 		if err != nil {
-			zlog.Warnf("%s [Tunnel] ⚠️ SSH 地址解析失败，尝试默认端口 22: %v", TAG, err)
+			zlog.Warnf("%s [Tunnel] ⚠️ Failed to resolve SSH address, trying default port 22: %v", TAG, err)
 			host = cfg.SshAddr
 			port = "22"
 		}
@@ -40,7 +40,7 @@ func init() {
 
 		rt, err := getH3Transport(cfg)
 		if err != nil {
-			zlog.Errorf("%s [Tunnel] ❌ 获取 MASQUE 传输层失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ Failed to get MASQUE transport layer: %v", TAG, err)
 			return nil, err
 		}
 
@@ -92,7 +92,7 @@ func init() {
 		select {
 		case err := <-errChan:
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ MASQUE TCP 握手失败: %v", TAG, err)
+			zlog.Errorf("%s [Tunnel] ❌ MASQUE TCP handshake failed: %v", TAG, err)
 			h3TransportCache.Delete(cfg.ProxyAddr)
 			return nil, err
 
@@ -100,10 +100,10 @@ func init() {
 			// MASQUE 规范中，成功的 CONNECT 响应通常是 200 到 299
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				cancel()
-				zlog.Errorf("%s [Tunnel] ❌ MASQUE 服务端拒绝, 状态码: %d", TAG, resp.StatusCode)
+				zlog.Errorf("%s [Tunnel] ❌ MASQUE server rejected, status code: %d", TAG, resp.StatusCode)
 				return nil, fmt.Errorf("masque proxy returned status %d", resp.StatusCode)
 			}
-			zlog.Infof("%s [Tunnel] ✅ MASQUE TCP 隧道握手成功，底层双向流已建立", TAG)
+			zlog.Infof("%s [Tunnel] ✅ MASQUE TCP tunnel handshake successful, underlying bidirectional stream established", TAG)
 
 			rConn := &h3Conn{
 				remoteAddr: cfg.ProxyAddr,
@@ -116,7 +116,7 @@ func init() {
 
 		case <-time.After(15 * time.Second):
 			cancel()
-			zlog.Errorf("%s [Tunnel] ❌ MASQUE 握手超时", TAG)
+			zlog.Errorf("%s [Tunnel] ❌ MASQUE handshake timeout", TAG)
 			h3TransportCache.Delete(cfg.ProxyAddr)
 			return nil, fmt.Errorf("masque handshake timeout")
 		}
