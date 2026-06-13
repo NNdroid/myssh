@@ -109,12 +109,12 @@ func init() {
 		if !cfg.DisableStatusCheck {
 			if statusCode == 401 || statusCode == 407 {
 				baseConn.Close()
-				zlog.Errorf("%s [Tunnel] ❌ 代理认证失败 [Status: %d]", TAG, statusCode)
+				zlog.Errorf("%s [Tunnel] ❌ Proxy authentication failed [Status: %d]", TAG, statusCode)
 				return nil, fmt.Errorf("Proxy Auth Failed: %d", statusCode)
 			}
 			if statusCode < 200 || statusCode >= 300 {
 				baseConn.Close()
-				zlog.Errorf("%s [Tunnel] ❌ 代理服务器拒绝连接 [Status: %d]", TAG, statusCode)
+				zlog.Errorf("%s [Tunnel] ❌ Proxy server rejected connection [Status: %d]", TAG, statusCode)
 				return nil, fmt.Errorf("HTTP Refused: %d", statusCode)
 			}
 		}
@@ -122,7 +122,7 @@ func init() {
 		// ==========================================
 		// 🐛 DEBUG: 打印所有返回的 Headers，直到遇到空行
 		// ==========================================
-		zlog.Debugf("%s [Tunnel] ⬇️ 开始读取响应 Header...", TAG)
+		zlog.Debugf("%s [Tunnel] ⬇️ Start reading the response header...", TAG)
 		// 消耗头部直到空行
 		for {
 			l, err := br.ReadString('\n')
@@ -131,7 +131,7 @@ func init() {
 			}
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ HTTP %s 隧道已建立", TAG, method)
+		zlog.Infof("%s [Tunnel] ✅ HTTP %s tunnel established", TAG, method)
 
 		// 返回我们包装过的 BufferedConn，把含有残留 SSH 握手数据的 br 缝合进去
 		wrappedConn := &BufferedConn{

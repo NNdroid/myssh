@@ -18,14 +18,14 @@ import (
 )
 
 type GeoRouter struct {
-	fullDomains   map[string]struct{}
-	subDomains    map[string]struct{}
-	keywordList   []string
-	keywordAC     *ahocorasick.Matcher
-	regexList     []*regexp.Regexp
-	regexGrouped  []*regexp.Regexp
+	fullDomains  map[string]struct{}
+	subDomains   map[string]struct{}
+	keywordList  []string
+	keywordAC    *ahocorasick.Matcher
+	regexList    []*regexp.Regexp
+	regexGrouped []*regexp.Regexp
 
-	ipTrie *ipTrie
+	ipTrie      *ipTrie
 	domainCache sync.Map // 路由结果 L1 并发缓存
 	cacheCount  int32    // L1 缓存条目计数器
 
@@ -189,7 +189,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	}
 
 	// 清理动作
-	data = nil // 释放原始字节流引用
+	data = nil       // 释放原始字节流引用
 	keywordMap = nil // 释放去重映射表
 
 	// 强制触发 GC，并立即将解析 Protobuf 产生的巨大临时内存还给 Android 系统
@@ -439,12 +439,14 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 
 	// 当缓存唯一域名超过 10000 条时，直接重置清空。
 	// 这种“阈值粗暴清空”比维护 LRU 链表的代价小无数倍，且完美保留了读操作的无锁并发性能。
-	if atomic.AddInt32(&r.cacheCount, 1) > 10000 {
-		r.domainCache.Range(func(key, value interface{}) bool {
-			r.domainCache.Delete(key)
-			return true
-		})
-		atomic.StoreInt32(&r.cacheCount, 0)
+	if atomic.AddInt32(&r.cacheCount, 1) == 10000 {
+		go func() {
+			r.domainCache.Range(func(key, value interface{}) bool {
+				r.domainCache.Delete(key)
+				return true
+			})
+			atomic.StoreInt32(&r.cacheCount, 0)
+		}()
 	}
 
 	r.domainCache.Store(domain, matched)

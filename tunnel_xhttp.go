@@ -22,7 +22,6 @@ import (
 	"time"
 
 	utls "github.com/refraction-networking/utls"
-	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
 
@@ -89,8 +88,8 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen 
 			rb.data = rb.data[skip:]
 			rb.baseOffset = remoteAck
 			freed = true // 标记清理了内存
-			// 【惰性緊縮】：如果底層陣列膨脹超過 4MB 且空間浪費過半，才真正釋放記憶體
-			if cap(rb.data) > rb.maxSize && len(rb.data) < cap(rb.data)/2 {
+			// 【惰性緊縮】：如果底層陣列膨脹超過 2MB 且空間浪費過半，才真正釋放記憶體
+			if cap(rb.data) > 2*1024*1024 && len(rb.data) < cap(rb.data)/2 {
 				newData := make([]byte, len(rb.data))
 				copy(newData, rb.data)
 				rb.data = newData
@@ -150,6 +149,10 @@ func (rb *reliableBuffer) Close() {
 // ==========================================
 // Meek 虚拟连接 (集成可靠传输)
 // ==========================================
+type retryChunk struct {
+	seq  uint64
+	data []byte
+}
 
 type meekVirtualConn struct {
 	ctx       context.Context
@@ -162,9 +165,15 @@ type meekVirtualConn struct {
 	nextReadSeq uint64            // 我方期待收到的下一个 Seq
 	oooBuf      map[uint64][]byte // 乱序缓存
 
-	writeBuf *reliableBuffer // 替换原有的 bytes.Buffer 和 mutex
+	writeBuf *reliableBuffer
+
+	// 局部重传队列与保护锁
+	retryMu sync.Mutex
+	retryQ  []retryChunk
 
 	closed bool
+
+	onWriteSignal func() // 写入唤醒回调
 }
 
 func newMeekVirtualConn(ctx context.Context, sessionID string, local, remote net.Addr) *meekVirtualConn {
@@ -212,7 +221,12 @@ func (c *meekVirtualConn) Write(p []byte) (int, error) {
 	if c.closed {
 		return 0, io.ErrClosedPipe
 	}
-	return c.writeBuf.Write(p)
+	n, err := c.writeBuf.Write(p)
+	// 一旦有新数据写入缓冲，立刻尝试唤醒或孵化协程去发送
+	if c.onWriteSignal != nil {
+		c.onWriteSignal()
+	}
+	return n, err
 }
 
 // PutReadData 乱序重组
@@ -711,7 +725,7 @@ func init() {
 				return dialProtected(ctx, cfg, network, addr, 10*time.Second)
 			}
 
-			// 💡 注意：这里的 probeH2C 传入的是 cfg，以便它内部也能调用绑卡逻辑
+			// 这里的 probeH2C 传入的是 cfg，以便它内部也能调用绑卡逻辑
 			if probeH2C(parentCtx, cfg) && slices.Contains(alpnList, "h2") {
 				zlog.Infof("%s [Tunnel] ⚡ Probe successful, enabling H2C (Cleartext HTTP/2) engine", TAG)
 				t2 := &http2.Transport{
@@ -764,268 +778,311 @@ func init() {
 
 			var ackedByServer, dispatchSeq uint64
 			var windowMu sync.Mutex
-			var consecutiveErrors, triggerRetry, emptyPollers int32
+			var consecutiveErrors, triggerRetry int32
 
-			// 将 Worker 并发数提升至 32 (榨干 5G 与高速宽带)
-			// 配合 16MB 的滑动窗口，32 个并发足以在 200ms 高延迟下跑满 1000Mbps+ 带宽。
-			// 因为有下方 emptyPollers 的单轮询限制，空闲时这 32 个协程只会轻量休眠，毫无开销。
-			workerCount := 32
+			// 动态协程池配置
+			const minWorkers = 1
+			const maxWorkers = 32
+			var activeWorkers int32
+			var lastRxTime int64 // 记录下行数据的最后活跃时间
 			var wg sync.WaitGroup
 
-			for i := 0; i < workerCount; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					idleTimer := time.NewTimer(50 * time.Millisecond)
-					if !idleTimer.Stop() {
-						<-idleTimer.C // 抽干初始化的时间
+			var workerLoop func()
+			trySpawnWorker := func() {
+				for {
+					curr := atomic.LoadInt32(&activeWorkers)
+					if curr >= maxWorkers {
+						return
 					}
-					for !virtualConn.closed && ctx.Err() == nil {
-						// 抢占任务：从写缓冲中划走一段数据
+					if atomic.CompareAndSwapInt32(&activeWorkers, curr, curr+1) {
+						wg.Add(1)
+						go workerLoop()
+						return
+					}
+				}
+			}
+
+			workerLoop = func() {
+				defer wg.Done()
+				defer atomic.AddInt32(&activeWorkers, -1)
+
+				idleTimer := time.NewTimer(50 * time.Millisecond)
+				if !idleTimer.Stop() {
+					<-idleTimer.C
+				}
+
+				for !virtualConn.closed && ctx.Err() == nil {
+					var upData []byte
+					var currentSeq uint64
+					var upBufPtr *[]byte
+					var isRetry bool
+
+					virtualConn.retryMu.Lock()
+					if len(virtualConn.retryQ) > 0 {
+						chunk := virtualConn.retryQ[0]
+						virtualConn.retryQ = virtualConn.retryQ[1:]
+						upData = chunk.data
+						currentSeq = chunk.seq
+						isRetry = true
+					}
+					virtualConn.retryMu.Unlock()
+
+					if !isRetry {
 						windowMu.Lock()
 						currAck := atomic.LoadUint64(&ackedByServer)
-						// 如果派发游标落后（重传重置），强制对齐
 						if dispatchSeq < currAck {
 							dispatchSeq = currAck
 						}
 
-						// GetSlice 实现了核心的滑动窗口
-						upData, currentSeq, upBufPtr := virtualConn.writeBuf.GetSlice(currAck, dispatchSeq, xhttpMaxsendBufSize)
+						upData, currentSeq, upBufPtr = virtualConn.writeBuf.GetSlice(currAck, dispatchSeq, xhttpMaxsendBufSize)
 
-						// 空载限流策略
 						if len(upData) == 0 {
-							// 如果没有上行数据，只允许最多 1 个 Worker 去服务端进行长轮询
-							if atomic.LoadInt32(&emptyPollers) >= 1 {
-								windowMu.Unlock()
-								// 用 select 替代单纯的 Sleep，一旦隧道被关闭，能瞬间退出而不是傻等
-								idleTimer.Reset(100 * time.Millisecond)
-								select {
-								case <-idleTimer.C:
-									// 等待完成
-								case <-ctx.Done():
-									idleTimer.Stop() // 清理资源
-									return
-								}
-								continue
+							// 恢复下行数据的“突发模式”。如果 2 秒内刚收到过下行数据，
+							// 保留最多 16 个探子并发拉取，保证网页加载速度极快！
+							allowedPollers := int32(minWorkers)
+							if time.Now().UnixMilli()-atomic.LoadInt64(&lastRxTime) < 2000 {
+								allowedPollers = 16
 							}
-							atomic.AddInt32(&emptyPollers, 1) // 登记为一个空载探子
-							dispatchSeq = currentSeq          // 对齐游标
+
+							// 如果兄弟太多，才自尽释放内存
+							if atomic.LoadInt32(&activeWorkers) > allowedPollers {
+								windowMu.Unlock()
+								return
+							}
+
+							dispatchSeq = currentSeq
+							windowMu.Unlock()
 						} else {
 							dispatchSeq = currentSeq + uint64(len(upData))
+							windowMu.Unlock()
 						}
-						windowMu.Unlock()
+					}
 
-						// 构造请求
-						var method string
-						var bodyReader io.Reader
-						if len(upData) > 0 {
-							method = http.MethodPost
-							bodyReader = bytes.NewReader(upData)
-						} else {
-							method = http.MethodGet
-							bodyReader = http.NoBody
+					var method string
+					var bodyReader io.Reader
+					var reqTimeout time.Duration
+					if len(upData) > 0 {
+						method = http.MethodPost
+						bodyReader = bytes.NewReader(upData)
+						reqTimeout = 15 * time.Second // 略微放宽，防止弱网上行直接被杀
+					} else {
+						method = http.MethodGet
+						bodyReader = http.NoBody
+						reqTimeout = 30 * time.Second
+					}
+
+					reqCtx, reqCancel := context.WithTimeout(ctx, reqTimeout)
+					req, err := http.NewRequestWithContext(reqCtx, method, reqURL, bodyReader)
+					if err != nil {
+						reqCancel()
+						zlog.Errorf("%s [Tunnel] Failed to create HTTP request (Seq: %d): %v", TAG, currentSeq, err)
+						if upBufPtr != nil {
+							xhttpBufPool.Put(upBufPtr)
 						}
-						req, _ := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
-						req.Host = cfg.CustomHost
+						return
+					}
+					req.Host = cfg.CustomHost
 
-						// 注入真实的浏览器特征伪装
-						for k, v := range sessionHeaders {
-							req.Header.Set(k, v)
-						}
+					for k, v := range sessionHeaders {
+						req.Header.Set(k, v)
+					}
 
-						// GET 防缓存
-						if len(upData) == 0 {
-							q := req.URL.Query()
-							q.Set("t", strconv.FormatInt(time.Now().UnixNano(), 36))
-							req.URL.RawQuery = q.Encode()
-							// 伪装为浏览器的 Ajax/Fetch 请求
-							req.Header.Set("Accept", "*/*")
-							req.Header.Set("Cache-Control", "no-cache")
-						} else {
-							req.ContentLength = int64(len(upData))
-							req.Header.Set("Content-Type", "application/octet-stream")
-							req.Header.Set("Accept", "*/*")
-						}
-
-						// 注入控制头
-						req.Header.Set("Host", cfg.CustomHost)
-						req.Header.Set("X-Target", cfg.SshAddr)
-						req.Header.Set("X-Network", "tcp")
-						req.Header.Set("X-Session-ID", sessionID)
-						// 注入 Seq 和 Ack 校验头
-						req.Header.Set("X-Seq", strconv.FormatUint(currentSeq, 10))
-						req.Header.Set("X-Ack", strconv.FormatUint(atomic.LoadUint64(&virtualConn.nextReadSeq), 10))
+					if len(upData) == 0 {
+						q := req.URL.Query()
+						q.Set("t", strconv.FormatInt(time.Now().UnixNano(), 36))
+						req.URL.RawQuery = q.Encode()
+						req.Header.Set("Accept", "*/*")
+						req.Header.Set("Cache-Control", "no-cache")
+					} else {
+						req.ContentLength = int64(len(upData))
 						req.Header.Set("Content-Type", "application/octet-stream")
+						req.Header.Set("Accept", "*/*")
+					}
 
-						if cfg.ProxyAuthRequired {
-							req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
-						}
+					req.Header.Set("Host", cfg.CustomHost)
+					req.Header.Set("X-Target", cfg.SshAddr)
+					req.Header.Set("X-Network", "tcp")
+					req.Header.Set("X-Session-ID", sessionID)
+					req.Header.Set("X-Seq", strconv.FormatUint(currentSeq, 10))
+					req.Header.Set("X-Ack", strconv.FormatUint(atomic.LoadUint64(&virtualConn.nextReadSeq), 10))
 
-						// 消费并清除重传信号
-						if atomic.CompareAndSwapInt32(&triggerRetry, 1, 0) {
-							req.Header.Set("X-Retry", "1")
-						}
+					if cfg.ProxyAuthRequired {
+						req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
+					}
 
-						resp, err := client.Do(req)
+					if atomic.CompareAndSwapInt32(&triggerRetry, 1, 0) {
+						req.Header.Set("X-Retry", "1")
+					}
 
-						// 请求结束，注销空载探子身份
-						if len(upData) == 0 {
-							atomic.AddInt32(&emptyPollers, -1)
-						}
+					resp, err := client.Do(req)
 
-						if err != nil {
-							// 归还pool
-							if upBufPtr != nil {
-								xhttpBufPool.Put(upBufPtr) // 假设 xhttpBufPool 在全局可用
-							}
-
-							if ctx.Err() != nil {
-								zlog.Debug("🛑 [Pump] Received Context cancel signal, Worker exiting", zap.Int("worker", i))
-								break
-							}
-
-							zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)
-
-							// 若上下文被取消，直接退出
-							if errors.Is(err, context.Canceled) {
-								break
-							}
-
-							// 【并发核心策略】：一旦出错，重置派发游标到已确认点，触发重传
-							windowMu.Lock()
-							dispatchSeq = atomic.LoadUint64(&ackedByServer)
-							windowMu.Unlock()
-
-							// 激活重传求救信号，通知服务端也回退下行游标
-							atomic.StoreInt32(&triggerRetry, 1)
-
-							if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
-								zlog.Errorf("%s [Tunnel] Consecutive network communication failures, triggering circuit breaker, destroying tunnel: %s", TAG, cfg.SshAddr)
-								break
-							}
-
-							idleTimer.Reset(300 * time.Millisecond)
-							select {
-							case <-idleTimer.C:
-								// 等待完成
-							case <-ctx.Done():
-								idleTimer.Stop() // 清理资源
-								return
-							}
-							continue
-						}
-
-						// 2. 处理响应头的 Ack，推进清理线
-						if sAckStr := resp.Header.Get("X-Ack"); sAckStr != "" {
-							sAck, _ := strconv.ParseUint(sAckStr, 10, 64)
-							for {
-								old := atomic.LoadUint64(&ackedByServer)
-								if sAck <= old || atomic.CompareAndSwapUint64(&ackedByServer, old, sAck) {
-									break
-								}
+					handleRetryEnqueue := func() {
+						if len(upData) > 0 {
+							currAck := atomic.LoadUint64(&ackedByServer)
+							if currentSeq >= currAck {
+								virtualConn.retryMu.Lock()
+								virtualConn.retryQ = append(virtualConn.retryQ, retryChunk{seq: currentSeq, data: upData})
+								slices.SortFunc(virtualConn.retryQ, func(a, b retryChunk) int {
+									if a.seq < b.seq {
+										return -1
+									}
+									if a.seq > b.seq {
+										return 1
+									}
+									return 0
+								})
+								virtualConn.retryMu.Unlock()
+								upBufPtr = nil
 							}
 						}
+						atomic.StoreInt32(&triggerRetry, 1)
+					}
 
-						// 拦截非 200 OK 的异常状态码！
-						if resp.StatusCode != http.StatusOK {
+					// 错误分支 1
+					if err != nil {
+						reqCancel() // 出现错误时，手动清理上下文
+						if ctx.Err() != nil {
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr)
 							}
-
-							downBuf := bytesBufPool.Get().(*bytes.Buffer) // 假设 bytesBufPool 全局可用
-							downBuf.Reset()
-							downBuf.ReadFrom(resp.Body)
-							bodyErr := downBuf.Bytes()
-							resp.Body.Close()
-							bytesBufPool.Put(downBuf)
-
-							zlog.Errorf("%s [Tunnel] ❌ Received abnormal HTTP status code: %d, body: %s", TAG, resp.StatusCode, string(bodyErr))
-
-							// 同样触发重传
-							windowMu.Lock()
-							dispatchSeq = atomic.LoadUint64(&ackedByServer)
-							windowMu.Unlock()
-							atomic.StoreInt32(&triggerRetry, 1)
-
-							if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
-								zlog.Errorf("%s [Tunnel] Consecutive anomalies, triggering circuit breaker", TAG)
-								break
-							}
-
-							idleTimer.Reset(1 * time.Second)
-							select {
-							case <-idleTimer.C:
-								// 等待完成
-							case <-ctx.Done():
-								idleTimer.Stop() // 清理资源
-								return
-							}
-							continue
+							break
 						}
-
-						atomic.StoreInt32(&consecutiveErrors, 0)
-
-						// 3. 处理 Body (下行数据)
-						sSeqStr := resp.Header.Get("X-Seq")
-						sSeq, _ := strconv.ParseUint(sSeqStr, 10, 64)
-
-						downBuf := bytesBufPool.Get().(*bytes.Buffer)
-						downBuf.Reset()
-						_, errBody := downBuf.ReadFrom(resp.Body) // 严格检查 body 错误
-						downData := downBuf.Bytes()
-						resp.Body.Close()
-
-						// 严格校验下行数据的完整性
-						if errBody != nil {
-							bytesBufPool.Put(downBuf)
+						zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)
+						if errors.Is(err, context.Canceled) {
 							if upBufPtr != nil {
 								xhttpBufPool.Put(upBufPtr)
 							}
-
-							zlog.Warnf("%s [Tunnel] Failed to read downlink Body, triggering safe retransmission: %v", TAG, errBody)
-
-							windowMu.Lock()
-							dispatchSeq = atomic.LoadUint64(&ackedByServer)
-							windowMu.Unlock()
-							atomic.StoreInt32(&triggerRetry, 1)
-
-							idleTimer.Reset(300 * time.Millisecond)
-							select {
-							case <-idleTimer.C:
-								// 等待完成
-							case <-ctx.Done():
-								idleTimer.Stop() // 清理资源
-								return
-							}
-							continue
+							break
 						}
-
-						// 将校验通过的数据注入读缓冲 (PutReadData 支持乱序)
-						if len(downData) > 0 || sSeqStr != "" {
-							virtualConn.PutReadData(sSeq, downData)
-						}
-
-						// 归还 pool
-						bytesBufPool.Put(downBuf)
+						handleRetryEnqueue()
 						if upBufPtr != nil {
 							xhttpBufPool.Put(upBufPtr)
 						}
 
-						// 智能退避：如果双向都没有数据流动，才进行休眠
-						if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
+						if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
+							break
+						}
+						idleTimer.Reset(300 * time.Millisecond)
+						select {
+						case <-idleTimer.C:
+						case <-ctx.Done():
+							idleTimer.Stop()
+							return
+						}
+						continue
+					}
 
-							idleTimer.Reset(50 * time.Millisecond)
-							select {
-							case <-idleTimer.C:
-								// 等待完成
-							case <-ctx.Done():
-								idleTimer.Stop() // 清理资源
-								return
+					if sAckStr := resp.Header.Get("X-Ack"); sAckStr != "" {
+						sAck, _ := strconv.ParseUint(sAckStr, 10, 64)
+						for {
+							old := atomic.LoadUint64(&ackedByServer)
+							if sAck <= old || atomic.CompareAndSwapUint64(&ackedByServer, old, sAck) {
+								break
 							}
 						}
 					}
-				}()
+
+					// 错误分支 2
+					if resp.StatusCode != http.StatusOK {
+						downBuf := bytesBufPool.Get().(*bytes.Buffer)
+						downBuf.Reset()
+						downBuf.ReadFrom(resp.Body)
+						resp.Body.Close()
+						bytesBufPool.Put(downBuf)
+
+						reqCancel() // 响应不正常，清理上下文
+
+						handleRetryEnqueue()
+						if upBufPtr != nil {
+							xhttpBufPool.Put(upBufPtr)
+						}
+						if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
+							break
+						}
+						idleTimer.Reset(1 * time.Second)
+						select {
+						case <-idleTimer.C:
+						case <-ctx.Done():
+							idleTimer.Stop()
+							return
+						}
+						continue
+					}
+
+					atomic.StoreInt32(&consecutiveErrors, 0)
+
+					sSeqStr := resp.Header.Get("X-Seq")
+					sSeq, _ := strconv.ParseUint(sSeqStr, 10, 64)
+
+					// 安全地读完 Body 之后，再去释放上下文！
+					downBuf := bytesBufPool.Get().(*bytes.Buffer)
+					downBuf.Reset()
+					_, errBody := downBuf.ReadFrom(resp.Body)
+					downData := downBuf.Bytes()
+					resp.Body.Close()
+
+					reqCancel() // ✅ 网页数据已经稳妥保存在内存中了，现在可以安全释放 Context 了！
+
+					// 错误分支 3
+					if errBody != nil {
+						bytesBufPool.Put(downBuf)
+						handleRetryEnqueue()
+						if upBufPtr != nil {
+							xhttpBufPool.Put(upBufPtr)
+						}
+						idleTimer.Reset(300 * time.Millisecond)
+						select {
+						case <-idleTimer.C:
+						case <-ctx.Done():
+							idleTimer.Stop()
+							return
+						}
+						continue
+					}
+
+					if len(downData) > 0 || sSeqStr != "" {
+						if len(downData) > 0 {
+							atomic.StoreInt64(&lastRxTime, time.Now().UnixMilli()) // 🌟 更新活跃时间，触发并发模式
+						}
+						virtualConn.PutReadData(sSeq, downData)
+					}
+
+					bytesBufPool.Put(downBuf)
+					if upBufPtr != nil {
+						xhttpBufPool.Put(upBufPtr)
+					}
+
+					// 根据业务压力动态招募矿工
+					if len(downData) > 0 {
+						for i := 0; i < maxWorkers; i++ {
+							trySpawnWorker()
+						}
+					} else if virtualConn.writeBuf.Len() > xhttpMaxsendBufSize {
+						trySpawnWorker()
+						trySpawnWorker()
+					}
+
+					if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
+						idleTimer.Reset(50 * time.Millisecond)
+						select {
+						case <-idleTimer.C:
+						case <-ctx.Done():
+							idleTimer.Stop()
+							return
+						}
+					}
+				}
 			}
+
+			virtualConn.onWriteSignal = func() {
+				trySpawnWorker()
+				trySpawnWorker()
+			}
+
+			for i := 0; i < minWorkers; i++ {
+				trySpawnWorker()
+			}
+
 			wg.Wait()
 		}()
 

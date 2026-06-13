@@ -85,9 +85,9 @@ func BenchmarkMatchDomain_MissAll(b *testing.B) {
 func BenchmarkMatchDomain_L1Cache(b *testing.B) {
 	r := setupTestRouter()
 	// 提前执行一次，将结果预热进 domainCache 中
-	r.MatchDomain("api.video.youtube.com") 
+	r.MatchDomain("api.video.youtube.com")
 	b.ResetTimer()
-	
+
 	// b.RunParallel 可以测试在高并发协程下的 sync.Map 读取性能
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -103,7 +103,7 @@ func BenchmarkMatchDomain_L1Cache(b *testing.B) {
 func BenchmarkShouldDirect_IPRoute(b *testing.B) {
 	r := setupTestRouter()
 	// 屏蔽日志以防止拖慢基准测试
-	Debug = false 
+	Debug = false
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		r.ShouldDirect("8.8.8.8") // 测试纯 IP 字符串查 CIDR 前缀树性能
