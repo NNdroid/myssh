@@ -125,14 +125,26 @@ func (lc *logCache) resetCache() {
 	lc.lastFetch = time.Time{}
 }
 
-func StartWebServer(port int, logPath string, dbPath string, webUser, webPass string) {
+func StartWebServer(port int, logPath string, workDir string, webUser, webPass string) {
 	if webServer != nil {
 		log.Printf("%s [WebServer] Web admin panel is already running, please do not start again", TAG)
 		return
 	}
 
+	// Ensure workDir exists
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		log.Printf("%s [WebServer] ❌ Failed to create work directory: %v", TAG, err)
+		return
+	}
+
+	// Download rule files to workDir
+	if err := myssh.DownloadRuleFiles(workDir); err != nil {
+		log.Printf("%s [WebServer] ❌ Failed to download rule files: %v", TAG, err)
+		return
+	}
+
 	// Initialize Database
-	if err := InitDB(filepath.Join(dbPath, "myssh.db")); err != nil {
+	if err := InitDB(filepath.Join(workDir, "mysshd.db")); err != nil {
 		log.Printf("%s [WebServer] ❌ Failed to initialize database: %v", TAG, err)
 		return
 	}
@@ -153,7 +165,7 @@ func StartWebServer(port int, logPath string, dbPath string, webUser, webPass st
 	staticFS, _ := fs.Sub(webFS, "html/static")
 	router.StaticFS("/static", http.FS(staticFS))
 
-	// 🌟 Create an authorized group
+	// Create an authorized group
 	authorized := router.Group("/")
 
 	// Unprotected route for the single-page application
@@ -166,7 +178,7 @@ func StartWebServer(port int, logPath string, dbPath string, webUser, webPass st
 	if webUser != "" && webPass != "" {
 		log.Printf("%s [WebServer] 🔒 JWT Authentication is ENABLED for the web panel.", TAG)
 
-		// 1. 开放的登录接口 (发放 JWT)
+		// 开放的登录接口 (发放 JWT)
 		router.POST("/api/v1/login", func(c *gin.Context) {
 			var req struct {
 				Username string `json:"username"`
@@ -192,7 +204,7 @@ func StartWebServer(port int, logPath string, dbPath string, webUser, webPass st
 			}
 		})
 
-		// 2. JWT 拦截中间件
+		// JWT 拦截中间件
 		authorized.Use(func(c *gin.Context) {
 			authHeader := c.GetHeader("Authorization")
 			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
@@ -213,7 +225,7 @@ func StartWebServer(port int, logPath string, dbPath string, webUser, webPass st
 		})
 	}
 
-	// 🌟 Protect all API routes
+	// Protect all API routes
 	apiV1 := authorized.Group("/api/v1")
 	{
 		// --- Dashboard Stats ---
@@ -224,14 +236,24 @@ func StartWebServer(port int, logPath string, dbPath string, webUser, webPass st
 			var topDomains []myssh.DomainActivity
 			json.Unmarshal([]byte(domainActivityJSON), &topDomains)
 
+			proxyMu.Lock()
+			currentRunning := proxyRunning
+			currentNode := proxyRunningNode
+			proxyMu.Unlock()
+
 			c.JSON(http.StatusOK, gin.H{
 				"sys_cpu":       fmt.Sprintf("%.1f%%", sysStats.CpuPercent),
 				"sys_mem":       fmt.Sprintf("%.0f/%.0f MB", sysStats.MemAllocMB, sysStats.MemSysMB),
 				"sys_goroutine": sysStats.Goroutines,
-				"traf_rate":     fmt.Sprintf("%.2f/%.2f KB/s", float64(trafficStats.TxRate)/1024, float64(trafficStats.RxRate)/1024),
-				"traf_total":    fmt.Sprintf("%.2f/%.2f MB", float64(trafficStats.TxTotal)/1024/1024, float64(trafficStats.RxTotal)/1024/1024),
-				"traf_conns":    fmt.Sprintf("%d/%d", trafficStats.ActiveConns, trafficStats.TotalConns),
+				"tx_rate":       trafficStats.TxRate,
+				"rx_rate":       trafficStats.RxRate,
+				"tx_total":      trafficStats.TxTotal,
+				"rx_total":      trafficStats.RxTotal,
+				"active_conns":  trafficStats.ActiveConns,
+				"total_conns":   trafficStats.TotalConns,
 				"top_domains":   topDomains,
+				"running":       currentRunning,
+				"running_node":  currentNode,
 			})
 		})
 
@@ -359,6 +381,31 @@ func StartWebServer(port int, logPath string, dbPath string, webUser, webPass st
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build global config: " + err.Error()})
 				return
+			}
+			// 如果不是绝对路径，先从workDir中查找，如果找不到再使用原路径，确保在web环境下也能正确加载规则文件 包含GeoSite和GeoIP
+			var gConfig myssh.GlobalConfig
+			if err := json.Unmarshal([]byte(globalConfigJson), &gConfig); err == nil {
+				if gConfig.GeoSiteFilePath != "" && !filepath.IsAbs(gConfig.GeoSiteFilePath) {
+					possiblePath := filepath.Join(workDir, gConfig.GeoSiteFilePath)
+					if _, err := os.Stat(possiblePath); err == nil {
+						gConfig.GeoSiteFilePath = possiblePath
+					}
+				}
+				if _, err := os.Stat(gConfig.GeoSiteFilePath); err != nil {
+					log.Printf("%s [WebServer] ❌ GeoSite file not found at %s", TAG, gConfig.GeoSiteFilePath)
+				}
+				if gConfig.GeoIPFilePath != "" && !filepath.IsAbs(gConfig.GeoIPFilePath) {
+					possiblePath := filepath.Join(workDir, gConfig.GeoIPFilePath)
+					if _, err := os.Stat(possiblePath); err == nil {
+						gConfig.GeoIPFilePath = possiblePath
+					}
+				}
+				if _, err := os.Stat(gConfig.GeoIPFilePath); err != nil {
+					log.Printf("%s [WebServer] ❌ GeoIP file not found at %s", TAG, gConfig.GeoIPFilePath)
+				}
+				if b, err := json.Marshal(gConfig); err == nil {
+					globalConfigJson = string(b)
+				}
 			}
 			myssh.LoadGlobalConfigFromJson(globalConfigJson)
 
@@ -532,7 +579,7 @@ func min(a, b float64) float64 {
 func main() {
 	port := flag.Int("port", 8080, "Port for the web server")
 	logPath := flag.String("log", "mysshd.log", "Path to the log file")
-	dbPath := flag.String("db", "./mysshd.db", "Path to the database directory")
+	workDir := flag.String("workDir", "./", "Directory for working files and database")
 	logLevel := flag.String("level", "info", "Log level (debug, info, warn, error)")
 	webUser := flag.String("user", "admin", "Web admin username (optional)")
 	webPass := flag.String("pass", "admin", "Web admin password (optional)")
@@ -543,7 +590,7 @@ func main() {
 
 	log.Printf("%s Starting web server on port %d", TAG, *port)
 
-	StartWebServer(*port, *logPath, *dbPath, *webUser, *webPass)
+	StartWebServer(*port, *logPath, *workDir, *webUser, *webPass)
 
 	wg.Wait()
 }

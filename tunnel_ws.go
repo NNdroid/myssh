@@ -30,9 +30,8 @@ func init() {
 
 		// Header
 		fakeHeaders := http.Header{
-			"Host":                     []string{cfg.CustomHost},
-			"User-Agent":               []string{"Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36"},
-			"Sec-WebSocket-Extensions": []string{"permessage-deflate; client_max_window_bits"},
+			"Host":       []string{cfg.CustomHost},
+			"User-Agent": []string{"Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36"},
 		}
 
 		// 用户认证逻辑
@@ -52,6 +51,7 @@ func init() {
 				utlsConfig := &utls.Config{
 					ServerName:            cfg.ServerName,
 					InsecureSkipVerify:    true,
+					NextProtos:            []string{"http/1.1"},
 					VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 				}
 				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
@@ -67,10 +67,11 @@ func init() {
 		}
 
 		opts := &websocket.DialOptions{
-			HTTPClient:   &http.Client{Transport: transport},
-			HTTPHeader:   fakeHeaders,
-			Subprotocols: []string{"binary"},
-			Host:         cfg.CustomHost,
+			HTTPClient:      &http.Client{Transport: transport},
+			HTTPHeader:      fakeHeaders,
+			Subprotocols:    []string{"binary"},
+			Host:            cfg.CustomHost,
+			CompressionMode: websocket.CompressionContextTakeover,
 		}
 
 		dialCtx, cancel := context.WithTimeout(parentCtx, 10*time.Second)
@@ -88,7 +89,7 @@ func init() {
 		}
 
 		zlog.Infof("%s [Tunnel] ✅ WebSocket handshake successful (Status: %d), Negotiated protocol: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
-
+		wsConn.SetReadLimit(-1)
 		return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 	}
 

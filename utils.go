@@ -11,9 +11,9 @@ import (
 	"math/bits"
 	"net"
 	"os"
-	"sort"
 	"os/user"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,7 +247,9 @@ func (dsm *domainStatsManager) calculateAndRank(elapsed time.Duration) {
 		}
 		return true
 	})
-	sort.Slice(currentActivities, func(i, j int) bool { return (currentActivities[i].TxRate + currentActivities[i].RxRate) > (currentActivities[j].TxRate + currentActivities[j].RxRate) })
+	sort.Slice(currentActivities, func(i, j int) bool {
+		return (currentActivities[i].TxRate + currentActivities[i].RxRate) > (currentActivities[j].TxRate + currentActivities[j].RxRate)
+	})
 	const topN = 20
 	if len(currentActivities) > topN {
 		currentActivities = currentActivities[:topN]
@@ -512,8 +514,8 @@ func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 // ==========================================
 
 var (
-	trafficCb TrafficCallback
-	sysInfoCb SysInfoCallback
+	trafficCb  TrafficCallback
+	sysInfoCb  SysInfoCallback
 	callbackMu sync.RWMutex
 	cpuStatsMu sync.Mutex
 )

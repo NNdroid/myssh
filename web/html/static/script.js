@@ -151,9 +151,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (el('sysMem')) el('sysMem').textContent = sys_mem || '0/0 MB';
             if (el('sysGoroutine')) el('sysGoroutine').textContent = sys_goroutine || '0';
 
-            if (el('trafRate')) el('trafRate').textContent = traf_rate || '0/0 KB/s';
-            if (el('trafTotal')) el('trafTotal').textContent = traf_total || '0/0 MB';
-            if (el('trafConns')) el('trafConns').textContent = traf_conns || '0/0';
+            const formatBytes = (bytes) => (bytes / 1024).toFixed(1);
+            const formatMB = (bytes) => (bytes / 1024 / 1024).toFixed(2);
+
+            if (el('trafRateTx')) el('trafRateTx').textContent = formatBytes(state.status.tx_rate || 0) + ' KB/s';
+            if (el('trafRateRx')) el('trafRateRx').textContent = formatBytes(state.status.rx_rate || 0) + ' KB/s';
+            if (el('trafTotalTx')) el('trafTotalTx').textContent = formatMB(state.status.tx_total || 0) + ' MB';
+            if (el('trafTotalRx')) el('trafTotalRx').textContent = formatMB(state.status.rx_total || 0) + ' MB';
+            if (el('trafConnsActive')) el('trafConnsActive').textContent = `${state.status.active_conns || 0} / ${state.status.total_conns || 0}`;
 
             // --- 新增：渲染热门域名 ---
             const domainListEl = el('domainList');
@@ -164,9 +169,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     top_domains.forEach(d => {
                         const li = document.createElement('li');
-                        const txMB = (d.tx_rate / 1024).toFixed(1);
-                        const rxMB = (d.rx_rate / 1024).toFixed(1);
-                        li.innerHTML = `<span class="domain-name">${d.domain}</span><span class="domain-rates">↑${txMB} ↓${rxMB} KB/s</span>`;
+                        const txKB = formatBytes(d.tx_rate);
+                        const rxKB = formatBytes(d.rx_rate);
+                        li.innerHTML = `
+                            <div style="display:flex; justify-content:space-between; width:100%; margin-bottom: 4px;">
+                                <span class="domain-name" style="font-weight: 500;">${d.domain}</span>
+                                <span class="domain-rates" style="font-size: 0.85em; opacity: 0.8;">
+                                    <span style="color: var(--accent-blue);">↑${txKB}</span> / <span style="color: var(--danger);">↓${rxKB}</span> KB/s
+                                </span>
+                            </div>
+                            <div class="progress-bar" style="width:100%; background:rgba(255,255,255,0.1); height:4px; border-radius:2px; overflow:hidden; display:flex;">
+                                <div style="background:var(--accent-blue); width:${(d.tx_rate / (d.tx_rate + d.rx_rate + 1) * 100)}%;"></div>
+                                <div style="background:var(--danger); width:${(d.rx_rate / (d.tx_rate + d.rx_rate + 1) * 100)}%;"></div>
+                            </div>
+                        `;
                         domainListEl.appendChild(li);
                     });
                 }
@@ -182,15 +198,24 @@ document.addEventListener('DOMContentLoaded', () => {
             state.nodes.forEach(node => {
                 const item = document.createElement('div');
                 item.className = 'node-item';
+                item.dataset.id = node.id;
+                if (state.selectedNodeId === node.id) {
+                    item.classList.add('selected');
+                }
                 item.innerHTML = `
                     <div class="node-item-info">
                         <h4>${node.name} <span class="node-tag">${node.tunnelType || 'base'}</span></h4>
                         <p>${node.user}@${node.sshAddr}</p>
                     </div>
                     <div class="node-actions">
-                        <button class="primary" data-action="start" data-id="${node.id}">${i18n.t('btn_start_proxy')}</button>
-                        <button data-action="edit" data-id="${node.id}">${i18n.t('title_edit_node')}</button>
-                        <button class="danger" data-action="delete" data-id="${node.id}">${i18n.t('btn_delete')}</button>
+                        <button class="btn btn-sm" data-action="edit" data-id="${node.id}" title="${i18n.t('btn_edit')}" style="display:inline-flex; align-items:center; gap:4px;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                            ${i18n.t('btn_edit')}
+                        </button>
+                        <button class="btn btn-sm danger" data-action="delete" data-id="${node.id}" title="${i18n.t('btn_delete')}" style="display:inline-flex; align-items:center; gap:4px;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                            ${i18n.t('btn_delete')}
+                        </button>
                     </div>
                 `;
                 list.appendChild(item);
@@ -340,16 +365,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         showToast(`${i18n.t('alert_delete_failed')}: ${res.error}`, 'error');
                     }
                 }
-            } else if (action === 'start') {
-                 setControlsLocked(true);
-                 const res = await api.post('/start', { node_id: id });
-                 if (res.message) {
-                     showToast(i18n.t('alert_starting_proxy'), 'info');
-                     await actions.fetchStatus();
-                 } else {
-                     showToast(`${i18n.t('alert_start_failed')}: ${res.error}`, 'error');
-                 }
-                 setControlsLocked(false);
             }
         },
         saveNode: async (e) => {
@@ -417,7 +432,19 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         },
         startProxy: async () => {
-            showToast(i18n.t('alert_select_node_to_start'), 'error');
+            if (!state.selectedNodeId) {
+                showToast(i18n.t('alert_select_node_to_start'), 'error');
+                return;
+            }
+            setControlsLocked(true);
+            const res = await api.post('/start', { node_id: state.selectedNodeId });
+            if (res.message) {
+                showToast(i18n.t('alert_starting_proxy'), 'info');
+                await actions.fetchStatus();
+            } else {
+                showToast(`${i18n.t('alert_start_failed')}: ${res.error}`, 'error');
+            }
+            setControlsLocked(false);
         },
     };
 

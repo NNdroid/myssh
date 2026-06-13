@@ -216,7 +216,7 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			zlog.Errorf("%s [UDPGW-Read] ❌ Packet too large, truncated", TAG)
 			return 0, fmt.Errorf("packet too large: %d", pLen)
 		}
-		
+
 		if pLen == 0 {
 			continue // 防御性拦截：空包直接丢弃，防止下方 body[0] 触发 index out of range 崩溃
 		}

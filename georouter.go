@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -17,15 +19,105 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-type GeoRouter struct {
-	fullDomains   map[string]struct{}
-	subDomains    map[string]struct{}
-	keywordList   []string
-	keywordAC     *ahocorasick.Matcher
-	regexList     []*regexp.Regexp
-	regexGrouped  []*regexp.Regexp
+const (
+	GEOIP_URL   = "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+	GEOSITE_URL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+)
 
-	ipTrie *ipTrie
+// DownloadRuleFiles downloads geoip.dat and geosite.dat to the specified directory.
+func DownloadRuleFiles(destDir string) error {
+	// Check and create the destination directory (MkdirAll returns nil if it already exists).
+	// 0755 permissions: owner has read, write, execute; others have read, execute.
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Download geoip.dat
+	geoipPath := filepath.Join(destDir, "geoip.dat")
+	zlog.Debugf("Downloading geoip.dat...")
+	if err := downloadFile(GEOIP_URL, geoipPath); err != nil {
+		return fmt.Errorf("failed to download geoip.dat: %w", err)
+	}
+	zlog.Debugf("geoip.dat downloaded and updated successfully!")
+
+	// Download geosite.dat
+	geositePath := filepath.Join(destDir, "geosite.dat")
+	zlog.Debugf("Downloading geosite.dat...")
+	if err := downloadFile(GEOSITE_URL, geositePath); err != nil {
+		return fmt.Errorf("failed to download geosite.dat: %w", err)
+	}
+	zlog.Debugf("geosite.dat downloaded and updated successfully!")
+
+	return nil
+}
+
+// downloadFile contains the core download logic: download to a temporary file first,
+// then overwrite the original file upon success.
+func downloadFile(url string, destPath string) error {
+	// Create an HTTP GET request
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("HTTP GET request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check the HTTP status code
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("request failed with status code: %d", resp.StatusCode)
+	}
+
+	// Define the temporary file path
+	tempPath := destPath + ".tmp"
+	zlog.Debugf("Creating temporary file: %s", tempPath)
+
+	// Create the temporary file
+	out, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+
+	// Use io.Copy to write the response stream to the file.
+	// This avoids loading the entire file into memory.
+	_, err = io.Copy(out, resp.Body)
+
+	// Ensure the file handle is closed regardless of whether writing succeeded.
+	// Note: We cannot rely solely on 'defer out.Close()' here. On Windows,
+	// os.Rename will fail if the file handle is still open.
+	closeErr := out.Close()
+
+	if err != nil {
+		// If an error occurred during writing, remove the incomplete temporary file
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to write data to temporary file: %w", err)
+	}
+
+	// Catch potential I/O flush errors during close
+	if closeErr != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to close temporary file safely: %w", closeErr)
+	}
+
+	// Download is complete and successful. Rename the temporary file to the target file.
+	// This operation automatically overwrites any existing file with the same name.
+	zlog.Debugf("Renaming temporary file to target path: %s", destPath)
+	if err := os.Rename(tempPath, destPath); err != nil {
+		// Clean up the temp file if the rename operation fails
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to rename temporary file: %w", err)
+	}
+
+	return nil
+}
+
+type GeoRouter struct {
+	fullDomains  map[string]struct{}
+	subDomains   map[string]struct{}
+	keywordList  []string
+	keywordAC    *ahocorasick.Matcher
+	regexList    []*regexp.Regexp
+	regexGrouped []*regexp.Regexp
+
+	ipTrie      *ipTrie
 	domainCache sync.Map // 路由结果 L1 并发缓存
 	cacheCount  int32    // L1 缓存条目计数器
 
@@ -189,7 +281,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	}
 
 	// 清理动作
-	data = nil // 释放原始字节流引用
+	data = nil       // 释放原始字节流引用
 	keywordMap = nil // 释放去重映射表
 
 	// 强制触发 GC，并立即将解析 Protobuf 产生的巨大临时内存还给 Android 系统
@@ -439,12 +531,14 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 
 	// 当缓存唯一域名超过 10000 条时，直接重置清空。
 	// 这种“阈值粗暴清空”比维护 LRU 链表的代价小无数倍，且完美保留了读操作的无锁并发性能。
-	if atomic.AddInt32(&r.cacheCount, 1) > 10000 {
-		r.domainCache.Range(func(key, value interface{}) bool {
-			r.domainCache.Delete(key)
-			return true
-		})
-		atomic.StoreInt32(&r.cacheCount, 0)
+	if atomic.AddInt32(&r.cacheCount, 1) == 10000 {
+		go func() {
+			r.domainCache.Range(func(key, value interface{}) bool {
+				r.domainCache.Delete(key)
+				return true
+			})
+			atomic.StoreInt32(&r.cacheCount, 0)
+		}()
 	}
 
 	r.domainCache.Store(domain, matched)
@@ -538,8 +632,7 @@ func (r *GeoRouter) MatchNetIP(addr netip.Addr) bool {
 }
 
 // ==========================================
-// 内部实现：高性能 IP 前缀树 (CIDR Trie)
-// 用于完全取代外部依赖 cidranger
+// 高性能 IP 前缀树 (CIDR Trie)
 // ==========================================
 
 type ipTrieNode struct {

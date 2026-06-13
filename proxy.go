@@ -319,25 +319,25 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					defer conn.Close()
 					defer udpNatMap.Delete(key)
 
-				bufPtr := udpBufPool.Get().(*[]byte)
-				// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度，防止复用引发的 0 长度截断
-				buf := (*bufPtr)[:cap(*bufPtr)]
-				defer udpBufPool.Put(bufPtr)
+					bufPtr := udpBufPool.Get().(*[]byte)
+					// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度，防止复用引发的 0 长度截断
+					buf := (*bufPtr)[:cap(*bufPtr)]
+					defer udpBufPool.Put(bufPtr)
 
-				for {
-					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-					n, err := conn.Read(buf)
-					if err != nil {
-						if Debug {
-							zlog.Debugf("%s [ROUTER-Direct] 🔴 Direct downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
+					for {
+						conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+						n, err := conn.Read(buf)
+						if err != nil {
+							if Debug {
+								zlog.Debugf("%s [ROUTER-Direct] 🔴 Direct downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
+							}
+							break
 						}
-						break
+						if Debug {
+							zlog.Debugf("%s [ROUTER-Direct] 📥 Received downlink direct data -> Session: %s | Length: %d bytes", TAG, key, n)
+						}
+						h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 					}
-					if Debug {
-						zlog.Debugf("%s [ROUTER-Direct] 📥 Received downlink direct data -> Session: %s | Length: %d bytes", TAG, key, n)
-					}
-					h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
-				}
 				}(uc, sessionKey, d.Atyp, dstAddrCopy, dstPortCopy, addr)
 			}
 		}
@@ -423,26 +423,26 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				defer conn.Close()
 				defer udpgwMap.Delete(key)
 
-			// 从内存池取出后，利用 cap 恢复其最大切片长度
-			bufPtr := udpBufPool.Get().(*[]byte)
-			buf := (*bufPtr)[:cap(*bufPtr)]
-			defer udpBufPool.Put(bufPtr)
+				// 从内存池取出后，利用 cap 恢复其最大切片长度
+				bufPtr := udpBufPool.Get().(*[]byte)
+				buf := (*bufPtr)[:cap(*bufPtr)]
+				defer udpBufPool.Put(bufPtr)
 
-			for {
-				conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-				n, err := conn.Read(buf)
-				if err != nil {
-					if Debug {
-						zlog.Debugf("%s [ROUTER-Proxy] 🔴 Proxy downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
+				for {
+					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+					n, err := conn.Read(buf)
+					if err != nil {
+						if Debug {
+							zlog.Debugf("%s [ROUTER-Proxy] 🔴 Proxy downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
+						}
+						break
 					}
-					break
-				}
 
-				if Debug {
-					zlog.Debugf("%s [ROUTER-Proxy] 📥 Received downlink proxy data -> Session: %s | Payload: %d bytes", TAG, key, n)
+					if Debug {
+						zlog.Debugf("%s [ROUTER-Proxy] 📥 Received downlink proxy data -> Session: %s | Payload: %d bytes", TAG, key, n)
+					}
+					h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
 				}
-				h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
-			}
 			}(uConn, addr, sessionKey, d.Atyp, dstAddrCopy, dstPortCopy)
 		}
 	}
