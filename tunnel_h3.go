@@ -37,7 +37,7 @@ func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 		return rt.(*http3.Transport), nil
 	}
 
-	zlog.Infof("%s [Tunnel-H3] 🔄 Cache miss, starting to establish brand new physical UDP connection and QUIC handshake...", TAG)
+	zlog.Infof("%s [Tunnel] 🔄 Cache miss, starting to establish brand new physical UDP connection and QUIC handshake...", TAG)
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -95,7 +95,7 @@ func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 	}
 
 	h3TransportCache.Store(proxyAddr, rt)
-	zlog.Infof("%s [Tunnel-H3] ✅ Underlying QUIC physical tunnel established successfully and cached", TAG)
+	zlog.Infof("%s [Tunnel] ✅ Underlying QUIC physical tunnel established successfully and cached", TAG)
 
 	return rt, nil
 }

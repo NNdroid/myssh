@@ -320,7 +320,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					defer udpNatMap.Delete(key)
 
 					bufPtr := udpBufPool.Get().(*[]byte)
-					// 🌟 从内存池取出后，利用 cap 恢复其最大切片长度，防止复用引发的 0 长度截断
+					// 从内存池取出后，利用 cap 恢复其最大切片长度，防止复用引发的 0 长度截断
 					buf := (*bufPtr)[:cap(*bufPtr)]
 					defer udpBufPool.Put(bufPtr)
 

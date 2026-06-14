@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -39,6 +40,8 @@ type UdpgwConn struct {
 
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	lastActive int64
 }
 
 // DialTun2proxyUdpgw 是基于 SSH 隧道的 UDPGW 协议拨号器
@@ -121,6 +124,7 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		downloadCounter:   nil,
 		closed:            make(chan struct{}),
 	}
+	atomic.StoreInt64(&c.lastActive, time.Now().Unix())
 
 	// 启动后台心跳守护
 	go c.keepAliveLoop()
@@ -135,21 +139,64 @@ func (c *UdpgwConn) keepAliveLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	c.writeLock.Lock()
-	c.Conn.Write(keepalivePkt)
-	c.writeLock.Unlock()
+	// 给予远端建连缓冲时间，最多重试 3 次
+	var initialErr error
+	for i := 0; i < 3; i++ {
+		// 稍微等一下，让子弹飞一会儿 (第一次循环也会等，正好给 SSH 握手留时间)
+		time.Sleep(time.Duration(i+1) * time.Millisecond * 100)
+		
+		c.writeLock.Lock()
+		_, initialErr = c.Conn.Write(keepalivePkt)
+		c.writeLock.Unlock()
+
+		if initialErr == nil {
+			break // 成功了就跳出循环
+		}
+		if Debug {
+			zlog.Warnf("%s [UDPGW-Daemon] ⚠️ Initial Keepalive attempt %d failed: %v", TAG, i+1, initialErr)
+		}
+	}
+
+	// 如果 3 次都失败了，说明通道真的坏了
+	if initialErr != nil {
+		zlog.Errorf("%s [UDPGW-Daemon] ❌ Failed to send initial Keepalive after retries: %v", TAG, initialErr)
+		c.Close()
+		return
+	}
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-Daemon] 🚀 Initial Keepalive sent (Flag: 0x01), session registration complete", TAG)
+		zlog.Debugf("%s [UDPGW-Daemon] 🚀 Initial Keepalive sent successfully", TAG)
 	}
 
 	for {
 		select {
 		case <-ticker.C:
-			c.writeLock.Lock()
-			c.Conn.Write(keepalivePkt)
-			c.writeLock.Unlock()
 		case <-c.closed:
+			return
+		}
+
+		// 双向检测，45秒没下行包直接判定假死
+		last := atomic.LoadInt64(&c.lastActive)
+		if time.Now().Unix()-last > 45 {
+			zlog.Errorf("%s [UDPGW-Daemon] ❌ Server heartbeat timeout (45s), connection dead", TAG)
+			c.Close()
+			return
+		}
+
+		// 发送心跳包
+		c.writeLock.Lock()
+		_, err := c.Conn.Write(keepalivePkt)
+		c.writeLock.Unlock()
+
+		// 捕获断线错误并自动关闭重连
+		if err != nil {
+			select {
+			case <-c.closed:
+				return // 正常下线
+			default:
+			}
+			zlog.Errorf("%s [UDPGW-Daemon] ❌ Failed to write Keepalive: %v", TAG, err)
+			c.Close()
 			return
 		}
 	}
@@ -174,7 +221,7 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 
 	packet := buffer[:2+totalSize]
 	binary.BigEndian.PutUint16(packet[0:2], uint16(totalSize))
-	packet[2] = UdpgwFlagData                  // 🌟 tun2proxy 数据包 Flag: 0x02
+	packet[2] = UdpgwFlagData                  // tun2proxy 数据包 Flag: 0x02
 	binary.BigEndian.PutUint16(packet[3:5], 1) // CONN_ID: 1
 
 	packet[5] = c.addressType
@@ -183,6 +230,11 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	copy(packet[6+len(c.targetAddressData)+2:], payload)
 
 	if _, err := c.Conn.Write(packet); err != nil {
+		select {
+		case <-c.closed:
+			return 0, io.EOF
+		default:
+		}
 		zlog.Errorf("%s [UDPGW-Write] ❌ Failed to write to tunnel: %v", TAG, err)
 		return 0, err
 	}
@@ -208,6 +260,12 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 	for {
 		var lenBuf [2]byte
 		if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
+			select {
+			case <-c.closed:
+				return 0, io.EOF
+			default:
+			}
+			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet length: %v", TAG, err)
 			return 0, err
 		}
 		pLen := binary.BigEndian.Uint16(lenBuf[:])
@@ -223,8 +281,16 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 
 		body := bodyBuf[:pLen]
 		if _, err := io.ReadFull(c.Conn, body); err != nil {
+			select {
+			case <-c.closed:
+				return 0, io.EOF
+			default:
+			}
+			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet payload: %v", TAG, err)
 			return 0, err
 		}
+		// 只要完整读取到了包（不管是心跳、数据还是Error），说明连接存活，立刻刷新
+		atomic.StoreInt64(&c.lastActive, time.Now().Unix())
 
 		flag := body[0]
 		switch flag {

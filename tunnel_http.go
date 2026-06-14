@@ -62,10 +62,12 @@ func init() {
 		}
 
 		// ==========================================
-		// 🐛 DEBUG: 打印即将发送的完整 Payload (使用 %q 显式打印 \r\n 等不可见字符)
+		// 打印即将发送的完整 Payload (使用 %q 显式打印 \r\n 等不可见字符)
 		// ==========================================
 		zlog.Infof("%s [Tunnel] 🚀 Preparing to send request (Method: %s)", TAG, method)
-		zlog.Debugf("%s [Tunnel] ⬆️ Sent full Payload data:\n%q", TAG, rawPayload)
+		if Debug {
+			zlog.Debugf("%s [Tunnel] ⬆️ Sent full Payload data:\n%q", TAG, rawPayload)
+		}
 
 		// 发送请求
 		n, err := baseConn.Write([]byte(rawPayload))
@@ -74,7 +76,9 @@ func init() {
 			zlog.Errorf("%s [Tunnel] ❌ Failed to send Payload: %v", TAG, err)
 			return nil, fmt.Errorf("failed to send Payload: %v", err)
 		}
-		zlog.Debugf("%s [Tunnel] ⬆️ Successfully sent %d bytes", TAG, n)
+		if Debug {
+			zlog.Debugf("%s [Tunnel] ⬆️ Payload sent successfully | Bytes Written: %d", TAG, n)
+		}
 
 		// 解析响应
 		br := bufio.NewReader(baseConn)
@@ -86,9 +90,11 @@ func init() {
 		}
 
 		// ==========================================
-		// 🐛 DEBUG: 打印收到的第一行状态行
+		// 打印收到的第一行状态行
 		// ==========================================
-		zlog.Debugf("%s [Tunnel] ⬇️ Received proxy server response line: %q", TAG, strings.TrimSpace(line))
+		if Debug {
+			zlog.Debugf("%s [Tunnel] ⬇️ Received proxy server response line: %q", TAG, strings.TrimSpace(line))
+		}
 
 		if !strings.HasPrefix(line, "HTTP/") {
 			baseConn.Close()
@@ -120,14 +126,19 @@ func init() {
 		}
 
 		// ==========================================
-		// 🐛 DEBUG: 打印所有返回的 Headers，直到遇到空行
+		// 打印所有返回的 Headers，直到遇到空行
 		// ==========================================
-		zlog.Debugf("%s [Tunnel] ⬇️ Start reading the response header...", TAG)
+		if Debug {
+			zlog.Debugf("%s [Tunnel] ⬇️ Start reading the response header...", TAG)
+		}
 		// 消耗头部直到空行
 		for {
 			l, err := br.ReadString('\n')
 			if err != nil || l == "\r\n" || l == "\n" || l == "" {
 				break
+			}
+			if Debug {
+				zlog.Debugf("%s [Tunnel] ⬇️ Received header line: %q", TAG, strings.TrimSpace(l))
 			}
 		}
 
