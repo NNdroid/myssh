@@ -3,8 +3,6 @@ package myssh
 import (
 	"context"
 	"net"
-
-	utls "github.com/refraction-networking/utls"
 )
 
 func init() {
@@ -17,14 +15,9 @@ func init() {
 	RegisterTunnel("tls", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		zlog.Infof("%s [Tunnel] 2. Preparing TLS (utls SNI Proxy) handshake, Spoofed SNI: %s", TAG, cfg.ServerName)
 
-		utlsConfig := &utls.Config{
-			ServerName:            cfg.ServerName,
-			InsecureSkipVerify:    true,
-			VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
-		}
-
-		uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
-		if err := uConn.HandshakeContext(ctx); err != nil {
+		utlsConfig := buildUTLSConfig(cfg, nil)
+		uConn, err := handshakeUTLS(ctx, baseConn, utlsConfig)
+		if err != nil {
 			zlog.Errorf("%s [Tunnel] ❌ TLS connection failed: %v", TAG, err)
 			return nil, err
 		}

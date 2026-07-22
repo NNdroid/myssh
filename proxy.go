@@ -613,73 +613,6 @@ func StartSshTProxy2(configJson string) int {
 	go func() {
 		defer wg.Done()
 
-		var sshAuthMethod []ssh.AuthMethod
-		if cfg.AuthType == "password" {
-			sshAuthMethod = []ssh.AuthMethod{
-				ssh.Password(cfg.Pass),
-			}
-		} else {
-			signer, err := parsePrivateKeySshSigner([]byte(cfg.PrivateKey), []byte(cfg.PrivateKeyPassphrase))
-			if err != nil {
-				zlog.Fatalf("unable to parse private key: %v", err)
-			}
-			sshAuthMethod = []ssh.AuthMethod{
-				ssh.PublicKeys(signer),
-			}
-		}
-
-		sshConfig := &ssh.ClientConfig{
-			User: cfg.User,
-			Auth: sshAuthMethod,
-			BannerCallback: func(message string) error {
-				zlog.Warnf("===== SSH Banner START =====\n%s\n===== SSH Banner END =====", message)
-				return nil
-			},
-			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-				// 指纹（推荐用 SHA256）
-				fpSHA256 := ssh.FingerprintSHA256(key)
-				// 旧格式（MD5，不推荐但有时用于兼容）
-				fpMD5 := ssh.FingerprintLegacyMD5(key)
-				// 算法类型（例如 ssh-ed25519）
-				algo := key.Type()
-				// 原始公钥（authorized_keys 格式）
-				pubKey := string(ssh.MarshalAuthorizedKey(key))
-				zlog.Warnf("%s [SSH-Handshake] ==== SSH Host Key Info ====", TAG)
-				zlog.Warnf("%s [SSH-Handshake] Host: %s", TAG, hostname)
-				zlog.Warnf("%s [SSH-Handshake] Remote: %s", TAG, remote.String())
-				zlog.Warnf("%s [SSH-Handshake] Algorithm: %s", TAG, algo)
-				zlog.Warnf("%s [SSH-Handshake] Fingerprint (SHA256): %s", TAG, fpSHA256)
-				zlog.Warnf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
-				zlog.Warnf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
-				zlog.Warnf("%s [SSH-Handshake] ===========================", TAG)
-				if cfg.VerifySSHFingerprint {
-					if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
-						return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)
-					}
-				}
-				return nil
-			},
-			Timeout: 15 * time.Second,
-			Config: ssh.Config{
-				KeyExchanges: []string{
-					"curve25519-sha256",
-					"curve25519-sha256@libssh.org",
-				},
-				Ciphers: []string{
-					"chacha20-poly1305@openssh.com",
-					"aes256-gcm@openssh.com",
-					"aes128-gcm@openssh.com",
-				},
-				MACs: []string{
-					"hmac-sha2-512-etm@openssh.com",
-					"hmac-sha2-256-etm@openssh.com",
-				},
-			},
-			HostKeyAlgorithms: []string{
-				"ssh-ed25519",
-			},
-		}
-
 		for {
 			select {
 			case <-engineCtx.Done():
@@ -697,19 +630,13 @@ func StartSshTProxy2(configJson string) int {
 			}
 
 			zlog.Infof("%s [AutoSSH] Performing SSH security authentication...", TAG)
-			scc, chans, reqs, err := ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
+			client, err := dialSSH(engineCtx, conn, cfg, false)
 			if err != nil {
 				conn.Close()
 				zlog.Errorf("%s [AutoSSH] ❌ SSH handshake failed: %v", TAG, err)
 				time.Sleep(3 * time.Second)
 				continue
 			}
-			cv := string(scc.ClientVersion())
-			sv := string(scc.ServerVersion())
-			zlog.Warnf("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
-			zlog.Warnf("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
-
-			client := ssh.NewClient(scc, chans, reqs)
 
 			mu.Lock()
 			sshClient = client
@@ -792,5 +719,103 @@ func StopSshTProxy() {
 		zlog.Infof("%s [Core] Forcibly disconnected %d UDPGW proxy sessions", TAG, udpgwSessionCount)
 	}
 
-	zlog.Infof("%s [Core] Proxy engine stop command sent completely", TAG)
+	zlog.Infof("%s [Core] All active SSH/Proxy connections destroyed", TAG)
+}
+
+func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (*ssh.Client, error) {
+	var sshAuthMethod []ssh.AuthMethod
+	if cfg.AuthType == "password" {
+		sshAuthMethod = []ssh.AuthMethod{
+			ssh.Password(cfg.Pass),
+		}
+	} else {
+		signer, err := parsePrivateKeySshSigner([]byte(cfg.PrivateKey), []byte(cfg.PrivateKeyPassphrase))
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse private key: %v", err)
+		}
+		sshAuthMethod = []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		}
+	}
+
+	var hostKeyCallback ssh.HostKeyCallback
+	if isPing {
+		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+	} else {
+		hostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			fpSHA256 := ssh.FingerprintSHA256(key)
+			fpMD5 := ssh.FingerprintLegacyMD5(key)
+			algo := key.Type()
+			pubKey := string(ssh.MarshalAuthorizedKey(key))
+			zlog.Warnf("%s [SSH-Handshake] ==== SSH Host Key Info ====", TAG)
+			zlog.Warnf("%s [SSH-Handshake] Host: %s", TAG, hostname)
+			zlog.Warnf("%s [SSH-Handshake] Remote: %s", TAG, remote.String())
+			zlog.Warnf("%s [SSH-Handshake] Algorithm: %s", TAG, algo)
+			zlog.Warnf("%s [SSH-Handshake] Fingerprint (SHA256): %s", TAG, fpSHA256)
+			zlog.Warnf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
+			zlog.Warnf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
+			zlog.Warnf("%s [SSH-Handshake] ===========================", TAG)
+			if cfg.VerifySSHFingerprint {
+				if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
+					return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)
+				}
+			}
+			return nil
+		}
+	}
+
+	timeout := 15 * time.Second
+	if isPing {
+		if d, ok := ctx.Deadline(); ok {
+			timeout = time.Until(d)
+		} else {
+			timeout = 5 * time.Second
+		}
+	}
+
+	sshConfig := &ssh.ClientConfig{
+		User: cfg.User,
+		Auth: sshAuthMethod,
+		BannerCallback: func(message string) error {
+			if !isPing {
+				zlog.Warnf("===== SSH Banner START =====\n%s\n===== SSH Banner END =====", message)
+			}
+			return nil
+		},
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         timeout,
+		Config: ssh.Config{
+			KeyExchanges: []string{
+				"curve25519-sha256",
+				"curve25519-sha256@libssh.org",
+			},
+			Ciphers: []string{
+				"chacha20-poly1305@openssh.com",
+				"aes256-gcm@openssh.com",
+				"aes128-gcm@openssh.com",
+			},
+			MACs: []string{
+				"hmac-sha2-512-etm@openssh.com",
+				"hmac-sha2-256-etm@openssh.com",
+			},
+		},
+		HostKeyAlgorithms: []string{
+			"ssh-ed25519",
+		},
+	}
+
+	scc, chans, reqs, err := ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if !isPing {
+		cv := string(scc.ClientVersion())
+		sv := string(scc.ServerVersion())
+		zlog.Warnf("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
+		zlog.Warnf("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
+	}
+
+	client := ssh.NewClient(scc, chans, reqs)
+	return client, nil
 }

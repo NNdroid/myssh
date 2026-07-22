@@ -81,6 +81,7 @@ func InitLogger(logPath string, logLevelStr string) int {
 
 	// 实例化 logger，开启调用者行号显示
 	logger := zap.New(combinedCore, zap.AddCaller())
+	zap.ReplaceGlobals(logger)
 	zlog = logger.Sugar()
 
 	zlog.Infof("[Logger] Generic log system initialization completed | Level: %s | File: %s", level.String(), logPath)

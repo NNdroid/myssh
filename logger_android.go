@@ -3,10 +3,11 @@
 package myssh
 
 import (
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"os"
 	"strings"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // --- 接口定义 ---
@@ -181,6 +182,7 @@ func InitLogger(logPath string, logLevelStr string) int {
 
 	combinedCore := zapcore.NewTee(fileCore, androidCoreInstance)
 	logger := zap.New(combinedCore, zap.AddCaller())
+	zap.ReplaceGlobals(logger)
 	zlog = logger.Sugar()
 
 	zlog.Infof("[Logger] Log system initialization completed (LogReceiver mode)")

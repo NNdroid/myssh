@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudflare/ahocorasick"
 	"github.com/miekg/dns"
@@ -24,6 +25,15 @@ const (
 	GEOSITE_URL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
 )
 
+// shouldDownload checks if the file is missing or older than 24 hours
+func shouldDownload(filePath string) bool {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return true // File does not exist or cannot be accessed
+	}
+	return time.Since(info.ModTime()) > 24*time.Hour
+}
+
 // DownloadRuleFiles downloads geoip.dat and geosite.dat to the specified directory.
 func DownloadRuleFiles(destDir string) error {
 	// Check and create the destination directory (MkdirAll returns nil if it already exists).
@@ -34,19 +44,27 @@ func DownloadRuleFiles(destDir string) error {
 
 	// Download geoip.dat
 	geoipPath := filepath.Join(destDir, "geoip.dat")
-	zlog.Debugf("Downloading geoip.dat...")
-	if err := downloadFile(GEOIP_URL, geoipPath); err != nil {
-		return fmt.Errorf("failed to download geoip.dat: %w", err)
+	if shouldDownload(geoipPath) {
+		zlog.Debugf("Downloading geoip.dat...")
+		if err := downloadFile(GEOIP_URL, geoipPath); err != nil {
+			return fmt.Errorf("failed to download geoip.dat: %w", err)
+		}
+		zlog.Debugf("geoip.dat downloaded and updated successfully!")
+	} else {
+		zlog.Debugf("geoip.dat is up to date, skipping download.")
 	}
-	zlog.Debugf("geoip.dat downloaded and updated successfully!")
 
 	// Download geosite.dat
 	geositePath := filepath.Join(destDir, "geosite.dat")
-	zlog.Debugf("Downloading geosite.dat...")
-	if err := downloadFile(GEOSITE_URL, geositePath); err != nil {
-		return fmt.Errorf("failed to download geosite.dat: %w", err)
+	if shouldDownload(geositePath) {
+		zlog.Debugf("Downloading geosite.dat...")
+		if err := downloadFile(GEOSITE_URL, geositePath); err != nil {
+			return fmt.Errorf("failed to download geosite.dat: %w", err)
+		}
+		zlog.Debugf("geosite.dat downloaded and updated successfully!")
+	} else {
+		zlog.Debugf("geosite.dat is up to date, skipping download.")
 	}
-	zlog.Debugf("geosite.dat downloaded and updated successfully!")
 
 	return nil
 }
@@ -54,8 +72,8 @@ func DownloadRuleFiles(destDir string) error {
 // downloadFile contains the core download logic: download to a temporary file first,
 // then overwrite the original file upon success.
 func downloadFile(url string, destPath string) error {
-	// Create an HTTP GET request
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("HTTP GET request failed: %w", err)
 	}

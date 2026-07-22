@@ -84,6 +84,13 @@
                 <div class="terminal-header">
                     <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
                     <span class="term-title" data-i18n="title_logs">Live Console</span>
+                    <div style="flex: 1;"></div>
+                    <select id="log-level-select" class="form-control" style="width: 100px; padding: 2px 8px; height: 28px; font-size: 12px; margin-right: 10px;">
+                        <option value="debug">DEBUG</option>
+                        <option value="info" selected>INFO</option>
+                        <option value="warn">WARN</option>
+                        <option value="error">ERROR</option>
+                    </select>
                     <button id="clear-log-btn" class="btn danger btn-sm" data-i18n="btn_clear_log">Clear</button>
                 </div>
                 <pre id="logs" class="terminal-body" data-i18n="text_log_loading"></pre>
@@ -206,26 +213,54 @@
                         <div class="form-group">
                             <label data-i18n="label_tunnel_type">Tunnel Type</label>
                             <select name="tunnelType" id="tunnelType" class="form-control">
-                                <option value="base">Base SSH</option>
-                                <option value="tls">TLS</option>
-                                <option value="ws">WebSocket</option>
-                                <option value="wss">WebSocket + TLS</option>
-                                <option value="http">HTTP Payload</option>
-                                <option value="h2c">HTTP/2 Cleartext</option>
-                                <option value="h2">HTTP/2 TLS</option>
-                                <option value="quic">QUIC</option>
-                                <option value="grpc">gRPC</option>
-                                <option value="grpcc">gRPC (Cleartext)</option>
-                                <option value="masque">MASQUE (HTTP/3)</option>
-                                <option value="wt">WebTransport</option>
-                                <option value="xhttpc">XHTTP Cleartext</option>
-                                <option value="xhttp">XHTTP TLS</option>
+                                <option value="base" data-i18n="opt_base_ssh">Base SSH</option>
+                                <option value="tls" data-i18n="opt_tls">TLS</option>
+                                <option value="ws" data-i18n="opt_ws">WebSocket</option>
+                                <option value="wss" data-i18n="opt_wss">WebSocket + TLS</option>
+                                <option value="http" data-i18n="opt_http">HTTP Payload</option>
+                                <option value="h2c" data-i18n="opt_h2c">HTTP/2 Cleartext</option>
+                                <option value="h2" data-i18n="opt_h2">HTTP/2 TLS</option>
+                                <option value="quic" data-i18n="opt_quic">QUIC</option>
+                                <option value="grpc" data-i18n="opt_grpc">gRPC</option>
+                                <option value="grpcc" data-i18n="opt_grpcc">gRPC (Cleartext)</option>
+                                <option value="masque" data-i18n="opt_masque">MASQUE (HTTP/3)</option>
+                                <option value="wt" data-i18n="opt_wt">WebTransport</option>
+                                <option value="xhttpc" data-i18n="opt_xhttpc">XHTTP Cleartext</option>
+                                <option value="xhttp" data-i18n="opt_xhttp">XHTTP TLS</option>
+                                <option value="vaydns" data-i18n="opt_vaydns">VayDNS (DNS Tunnel)</option>
                             </select>
                         </div>
                         <div class="form-group" data-visibility-key="proxyAddr">
                             <label data-i18n="label_proxy_addr">Proxy Address</label>
                             <input type="text" name="proxyAddr" class="form-control">
                         </div>
+
+                        <!-- VayDNS Fields -->
+                        <div class="form-group" data-visibility-key="vaydnsFields">
+                            <label data-i18n="label_vaydns_pubkey">VayDNS Server Pubkey</label>
+                            <input type="text" name="vaydnsPubkey" class="form-control">
+                        </div>
+                        <div class="form-group" data-visibility-key="vaydnsFields">
+                            <label data-i18n="label_vaydns_domain">VayDNS Domain</label>
+                            <input type="text" name="vaydnsDomain" class="form-control">
+                        </div>
+                        <div class="form-group" data-visibility-key="vaydnsFields">
+                            <label data-i18n="label_vaydns_mode">VayDNS Mode</label>
+                            <select name="vaydnsMode" class="form-control">
+                                <option value="doh" data-i18n="opt_dns_doh">DNS over HTTPS (DoH)</option>
+                                <option value="dot" data-i18n="opt_dns_dot">DNS over TLS (DoT)</option>
+                                <option value="udp" data-i18n="opt_dns_udp">Standard DNS (UDP)</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-visibility-key="vaydnsFields">
+                            <label data-i18n="label_vaydns_query_type">DNS Query Type</label>
+                            <input type="text" name="vaydnsQueryType" class="form-control" placeholder="TXT or NULL">
+                        </div>
+                        <div class="form-group" data-visibility-key="vaydnsFields" style="grid-column: 1/-1;">
+                            <label data-i18n="label_vaydns_resolvers">VayDNS Resolvers</label>
+                            <input type="text" name="vaydnsResolvers" class="form-control" data-i18n-placeholder="ph_vaydns_resolvers">
+                        </div>
+
                         <div class="form-group" data-visibility-key="customHost">
                             <label data-i18n="label_custom_host">Custom Host / SNI</label>
                             <input type="text" name="customHost" class="form-control">
@@ -329,8 +364,8 @@
                                     <div class="form-group">
                                         <label data-i18n="label_udpgw_version">UDPGW Version</label>
                                         <select name="udpgwVersion" class="form-control">
-                                            <option value="tun2proxy">tun2proxy</option>
-                                            <option value="badvpn">badvpn</option>
+                                            <option value="tun2proxy" data-i18n="opt_tun2proxy">tun2proxy</option>
+                                            <option value="badvpn" data-i18n="opt_badvpn">badvpn</option>
                                         </select>
                                     </div>
                                 </div>
@@ -364,6 +399,18 @@
         </div>
     </div>
     </div> <!-- /main-ui 结束 -->
+
+    <!-- iOS Confirm Modal -->
+    <div id="ios-confirm-overlay" class="ios-modal-overlay">
+        <div class="ios-confirm-box">
+            <h3 id="ios-confirm-title" data-i18n="title_confirm">Confirm</h3>
+            <p id="ios-confirm-message"></p>
+            <div class="ios-confirm-actions">
+                <button id="ios-confirm-cancel" class="ios-btn-cancel" data-i18n="btn_cancel">Cancel</button>
+                <button id="ios-confirm-ok" class="ios-btn-ok" data-i18n="btn_confirm">OK</button>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/script.js"></script>
 </body>

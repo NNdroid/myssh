@@ -3,16 +3,29 @@ package main
 import (
 	"flag"
 	"fmt"
+	"myssh"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
-	"myssh"
 )
 
 func main() {
 	// 1. 定义并解析命令行参数
 	confPath := flag.String("conf", "config.json", "指定配置文件的路径")
+	logLevel := flag.String("level", "debug", "Log level (debug, info, warn, error)")
+	pprofAddr := flag.String("pprof", "", "指定 pprof 性能分析监听地址 (例如: localhost:6060)")
 	flag.Parse()
+
+	if *pprofAddr != "" {
+		go func() {
+			fmt.Printf("[Main] 🔍 启动 pprof 性能分析服务器: http://%s/debug/pprof/\n", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				fmt.Printf("[Main] ⚠️ pprof 服务器启动失败: %v\n", err)
+			}
+		}()
+	}
 
 	// 2. 读取配置文件内容
 	configBytes, err := os.ReadFile(*confPath)
@@ -21,14 +34,14 @@ func main() {
 		os.Exit(1)
 	}
 	configStr := string(configBytes)
-	
+
 	// 初始化日志：控制台输出 DEBUG 级别，不写文件
 	// 如果你要写文件，可以改成 myssh.InitLogger("/var/log/myssh.log", "INFO")
 	if logRes := myssh.InitLogger("", "DEBUG"); logRes != 0 {
 		fmt.Printf("[Main] ❌ 日志系统初始化失败\n")
 		os.Exit(1)
 	}
-	
+
 	// 在 main 函数结束前确保日志落盘
 	defer myssh.SyncLogger()
 
@@ -61,6 +74,6 @@ func main() {
 
 	// 8. 等待所有后台 goroutine 完成资源回收
 	myssh.WgWait()
-	
+
 	fmt.Println("[Main] 👋 资源已彻底清理，程序安全退出。")
 }

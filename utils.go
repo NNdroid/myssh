@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	utls "github.com/refraction-networking/utls"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 )
@@ -78,6 +79,26 @@ func CheckIfKeyEncrypted(key string) int {
 	}
 
 	return 2
+}
+
+func buildUTLSConfig(cfg ProxyConfig, alpn []string) *utls.Config {
+	c := &utls.Config{
+		ServerName:            cfg.ServerName,
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
+	}
+	if len(alpn) > 0 {
+		c.NextProtos = alpn
+	}
+	return c
+}
+
+func handshakeUTLS(ctx context.Context, conn net.Conn, utlsConfig *utls.Config) (*utls.UConn, error) {
+	uConn := utls.UClient(conn, utlsConfig, utls.HelloChrome_Auto)
+	if err := uConn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	return uConn, nil
 }
 
 // ValidatePassphrase 示例：带密码解析并测试是否通过

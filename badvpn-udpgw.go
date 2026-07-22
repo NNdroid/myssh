@@ -201,7 +201,7 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 			// 规避假报错。如果此时通道已经是合法关闭状态，就安静退出。
 			select {
 			case <-c.closed:
-				return 
+				return
 			default:
 			}
 

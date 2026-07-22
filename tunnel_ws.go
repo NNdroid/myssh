@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	utls "github.com/refraction-networking/utls"
 	"nhooyr.io/websocket"
 )
 
@@ -48,14 +47,9 @@ func init() {
 
 		if isWSS {
 			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				utlsConfig := &utls.Config{
-					ServerName:            cfg.ServerName,
-					InsecureSkipVerify:    true,
-					NextProtos:            []string{"http/1.1"},
-					VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
-				}
-				uConn := utls.UClient(baseConn, utlsConfig, utls.HelloChrome_Auto)
-				if err := uConn.HandshakeContext(ctx); err != nil {
+				utlsConfig := buildUTLSConfig(cfg, []string{"http/1.1"})
+				uConn, err := handshakeUTLS(ctx, baseConn, utlsConfig)
+				if err != nil {
 					return nil, err
 				}
 				return uConn, nil

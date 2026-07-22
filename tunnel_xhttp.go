@@ -52,7 +52,7 @@ var (
 type boundedBufPool struct {
 	pool       sync.Pool
 	tokens     chan struct{} // 令牌桶，容量 = maxIdle
-	maxCapByte int          // 单个 buf 允许入池的最大 cap（字节）
+	maxCapByte int           // 单个 buf 允许入池的最大 cap（字节）
 }
 
 func newBoundedBufPool(maxIdle int, maxCapBytes int, newBufSize int) *boundedBufPool {
@@ -293,10 +293,10 @@ type meekVirtualConn struct {
 	local     net.Addr
 	remote    net.Addr
 
-	readCond    *sync.Cond
-	readBuf     bytes.Buffer
-	nextReadSeq uint64
-	oooBuf      map[uint64][]byte
+	readCond     *sync.Cond
+	readBuf      bytes.Buffer
+	nextReadSeq  uint64
+	oooBuf       map[uint64][]byte
 	oooBytesSize int
 
 	writeBuf *reliableBuffer

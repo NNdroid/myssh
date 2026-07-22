@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go.uber.org/zap"
 	"html/template"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -127,25 +127,24 @@ func (lc *logCache) resetCache() {
 
 func StartWebServer(port int, logPath string, workDir string, webUser, webPass string) {
 	if webServer != nil {
-		log.Printf("%s [WebServer] Web admin panel is already running, please do not start again", TAG)
+		zap.L().Sugar().Infof("%s [WebServer] Web admin panel is already running, please do not start again", TAG)
 		return
 	}
 
 	// Ensure workDir exists
 	if err := os.MkdirAll(workDir, 0755); err != nil {
-		log.Printf("%s [WebServer] ❌ Failed to create work directory: %v", TAG, err)
+		zap.L().Sugar().Infof("%s [WebServer] ❌ Failed to create work directory: %v", TAG, err)
 		return
 	}
 
 	// Download rule files to workDir
 	if err := myssh.DownloadRuleFiles(workDir); err != nil {
-		log.Printf("%s [WebServer] ❌ Failed to download rule files: %v", TAG, err)
-		return
+		zap.L().Sugar().Infof("%s [WebServer] ⚠️ Failed to download rule files: %v (Using existing or skipping)", TAG, err)
 	}
 
 	// Initialize Database
 	if err := InitDB(filepath.Join(workDir, "mysshd.db")); err != nil {
-		log.Printf("%s [WebServer] ❌ Failed to initialize database: %v", TAG, err)
+		zap.L().Sugar().Infof("%s [WebServer] ❌ Failed to initialize database: %v", TAG, err)
 		return
 	}
 
@@ -157,7 +156,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 	// Parse the HTML template
 	tmpl, err := template.ParseFS(webFS, "html/index.html")
 	if err != nil {
-		log.Fatalf("Failed to parse template: %v", err)
+		zap.L().Sugar().Fatalf("Failed to parse template: %v", err)
 	}
 	router.SetHTMLTemplate(tmpl)
 
@@ -176,7 +175,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 	})
 
 	if webUser != "" && webPass != "" {
-		log.Printf("%s [WebServer] 🔒 JWT Authentication is ENABLED for the web panel.", TAG)
+		zap.L().Sugar().Infof("%s [WebServer] 🔒 JWT Authentication is ENABLED for the web panel.", TAG)
 
 		// 开放的登录接口 (发放 JWT)
 		router.POST("/api/v1/login", func(c *gin.Context) {
@@ -392,7 +391,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 					}
 				}
 				if _, err := os.Stat(gConfig.GeoSiteFilePath); err != nil {
-					log.Printf("%s [WebServer] ❌ GeoSite file not found at %s", TAG, gConfig.GeoSiteFilePath)
+					zap.L().Sugar().Infof("%s [WebServer] ❌ GeoSite file not found at %s", TAG, gConfig.GeoSiteFilePath)
 				}
 				if gConfig.GeoIPFilePath != "" && !filepath.IsAbs(gConfig.GeoIPFilePath) {
 					possiblePath := filepath.Join(workDir, gConfig.GeoIPFilePath)
@@ -401,7 +400,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 					}
 				}
 				if _, err := os.Stat(gConfig.GeoIPFilePath); err != nil {
-					log.Printf("%s [WebServer] ❌ GeoIP file not found at %s", TAG, gConfig.GeoIPFilePath)
+					zap.L().Sugar().Infof("%s [WebServer] ❌ GeoIP file not found at %s", TAG, gConfig.GeoIPFilePath)
 				}
 				if b, err := json.Marshal(gConfig); err == nil {
 					globalConfigJson = string(b)
@@ -440,6 +439,21 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 				"running":      proxyRunning,
 				"running_node": proxyRunningNode,
 			})
+		})
+
+		apiV1.POST("/loglevel", func(c *gin.Context) {
+			var req struct {
+				Level string `json:"level"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+				return
+			}
+
+			// Re-initialize logger with new level
+			myssh.InitLogger(logPath, req.Level)
+
+			c.JSON(http.StatusOK, gin.H{"message": "Log level updated to " + req.Level})
 		})
 
 		// --- Log Management ---
@@ -487,13 +501,13 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 		Handler: router,
 	}
 
-	log.Printf("%s [WebServer] 🌐 Web admin panel started: http://%s/", TAG, addr)
+	zap.L().Sugar().Infof("%s [WebServer] 🌐 Web admin panel started: http://%s/", TAG, addr)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("%s [WebServer] Web service exited abnormally: %v", TAG, err)
+			zap.L().Sugar().Infof("%s [WebServer] Web service exited abnormally: %v", TAG, err)
 		}
 	}()
 }
@@ -504,9 +518,9 @@ func StopWebServer() {
 		defer cancel()
 
 		if err := webServer.Shutdown(ctx); err != nil {
-			log.Printf("%s [WebServer] ❌ Web service shutdown exception: %v", TAG, err)
+			zap.L().Sugar().Infof("%s [WebServer] ❌ Web service shutdown exception: %v", TAG, err)
 		} else {
-			log.Printf("%s [WebServer] 🛑 Web admin panel safely stopped", TAG)
+			zap.L().Sugar().Infof("%s [WebServer] 🛑 Web admin panel safely stopped", TAG)
 		}
 		webServer = nil
 	}
@@ -580,7 +594,7 @@ func main() {
 	port := flag.Int("port", 8080, "Port for the web server")
 	logPath := flag.String("log", "mysshd.log", "Path to the log file")
 	workDir := flag.String("workDir", "./", "Directory for working files and database")
-	logLevel := flag.String("level", "info", "Log level (debug, info, warn, error)")
+	logLevel := flag.String("level", "debug", "Log level (debug, info, warn, error)")
 	webUser := flag.String("user", "admin", "Web admin username (optional)")
 	webPass := flag.String("pass", "admin", "Web admin password (optional)")
 	flag.Parse()
@@ -588,7 +602,7 @@ func main() {
 	// Initialize the myssh logger first
 	myssh.InitLogger(*logPath, *logLevel)
 
-	log.Printf("%s Starting web server on port %d", TAG, *port)
+	zap.L().Sugar().Infof("%s Starting web server on port %d", TAG, *port)
 
 	StartWebServer(*port, *logPath, *workDir, *webUser, *webPass)
 

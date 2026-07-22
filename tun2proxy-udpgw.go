@@ -144,7 +144,7 @@ func (c *UdpgwConn) keepAliveLoop() {
 	for i := 0; i < 3; i++ {
 		// 稍微等一下，让子弹飞一会儿 (第一次循环也会等，正好给 SSH 握手留时间)
 		time.Sleep(time.Duration(i+1) * time.Millisecond * 100)
-		
+
 		c.writeLock.Lock()
 		_, initialErr = c.Conn.Write(keepalivePkt)
 		c.writeLock.Unlock()

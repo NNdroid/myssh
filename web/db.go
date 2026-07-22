@@ -130,6 +130,31 @@ func InitDB(dbPath string) error {
 	INSERT OR IGNORE INTO settings (id, local_addr, dns_addr, local_dns_server, remote_dns_server, geosite_filepath, geoip_filepath, direct_site_tags, direct_ip_tags, udpgw_addr, udpgw_version)
 	VALUES (1, '127.0.0.1:1080', '127.0.0.1:5353', '223.5.5.5:53', '8.8.8.8:53', 'geosite.dat', 'geoip.dat', 'cn', 'cn', '127.0.0.1:7300', 'badvpn');
 	`)
+
+	// Perform migrations for existing DB
+	migrations := []string{
+		"ALTER TABLE profiles ADD COLUMN dnsOverride BOOLEAN DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN remoteDns TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN localDns TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN routingOverride BOOLEAN DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN geositeDirect TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN geoipDirect TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN appFilterOverride BOOLEAN DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN filterApps TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN filterMode INTEGER DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN totalTx INTEGER DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN totalRx INTEGER DEFAULT 0;",
+		"ALTER TABLE settings ADD COLUMN udpgw_addr TEXT DEFAULT '127.0.0.1:7300';",
+		"ALTER TABLE settings ADD COLUMN udpgw_version TEXT DEFAULT 'badvpn';",
+		"ALTER TABLE settings ADD COLUMN geosite_filepath TEXT DEFAULT 'geosite.dat';",
+		"ALTER TABLE settings ADD COLUMN geoip_filepath TEXT DEFAULT 'geoip.dat';",
+		"ALTER TABLE settings ADD COLUMN direct_site_tags TEXT DEFAULT 'cn';",
+		"ALTER TABLE settings ADD COLUMN direct_ip_tags TEXT DEFAULT 'cn';",
+	}
+	for _, query := range migrations {
+		db.Exec(query) // Ignore errors (column already exists)
+	}
+
 	return err
 }
 

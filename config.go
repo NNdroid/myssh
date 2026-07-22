@@ -6,33 +6,33 @@ import (
 )
 
 type ProxyConfig struct {
-	LocalAddr                    string `json:"local_addr"`
-	SshAddr                      string `json:"ssh_addr"`
-	User                         string `json:"user"`
-	AuthType                     string `json:"auth_type"`
-	PrivateKey                   string `json:"private_key"`
-	PrivateKeyPassphrase         string `json:"private_key_passphrase"`
-	Pass                         string `json:"pass"`
-	VerifySSHFingerprint         bool   `json:"verify_ssh_finger_print"`
-	ServerSSHFingerprint         string `json:"server_ssh_finger_print"`
-	TunnelType                   string `json:"tunnel_type"`
-	ProxyAddr                    string `json:"proxy_addr"`
-	ProxyAuthRequired            bool   `json:"proxy_auth_required"`
-	ProxyAuthToken               string `json:"proxy_auth_token"`
-	ProxyAuthUser                string `json:"proxy_auth_user"`
-	ProxyAuthPass                string `json:"proxy_auth_pass"`
-	CustomHost                   string `json:"custom_host"`
-	ServerName                   string `json:"server_name"`
-	HttpPayload                  string `json:"http_payload"`
-	CustomPath                   string `json:"custom_path"`
-	UdpgwAddr                    string `json:"udpgw_addr"` // 留空则不开启 UDPGW
-	DisableStatusCheck           bool   `json:"disable_status_check"`
-	Alpn                         string `json:"alpn"`
-	VerifyCertificateFingerprint bool   `json:"verify_certificate_finger_print"`
-	ServerCertificateFingerprint string `json:"server_certificate_finger_print"`
-	DnsAddr                      string `json:"dns_addr"`
-	UdpgwVersion                 string `json:"udpgw_version"`
-	BindInterface                string `json:"bind_interface"`
+	LocalAddr                    string   `json:"local_addr"`
+	SshAddr                      string   `json:"ssh_addr"`
+	User                         string   `json:"user"`
+	AuthType                     string   `json:"auth_type"`
+	PrivateKey                   string   `json:"private_key"`
+	PrivateKeyPassphrase         string   `json:"private_key_passphrase"`
+	Pass                         string   `json:"pass"`
+	VerifySSHFingerprint         bool     `json:"verify_ssh_finger_print"`
+	ServerSSHFingerprint         string   `json:"server_ssh_finger_print"`
+	TunnelType                   string   `json:"tunnel_type"`
+	ProxyAddr                    string   `json:"proxy_addr"`
+	ProxyAuthRequired            bool     `json:"proxy_auth_required"`
+	ProxyAuthToken               string   `json:"proxy_auth_token"`
+	ProxyAuthUser                string   `json:"proxy_auth_user"`
+	ProxyAuthPass                string   `json:"proxy_auth_pass"`
+	CustomHost                   string   `json:"custom_host"`
+	ServerName                   string   `json:"server_name"`
+	HttpPayload                  string   `json:"http_payload"`
+	CustomPath                   string   `json:"custom_path"`
+	UdpgwAddr                    string   `json:"udpgw_addr"` // 留空则不开启 UDPGW
+	DisableStatusCheck           bool     `json:"disable_status_check"`
+	Alpn                         string   `json:"alpn"`
+	VerifyCertificateFingerprint bool     `json:"verify_certificate_finger_print"`
+	ServerCertificateFingerprint string   `json:"server_certificate_finger_print"`
+	DnsAddr                      string   `json:"dns_addr"`
+	UdpgwVersion                 string   `json:"udpgw_version"`
+	BindInterface                string   `json:"bind_interface"`
 }
 
 type GlobalConfig struct {
@@ -92,6 +92,8 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	} else if os.IsNotExist(err) {
 		zlog.Warnf("%s [Config] ⚠️ GeoIP file not found (%s), direct IP routing disabled", TAG, cfg.GeoIPFilePath)
 	}
+
+	globalConfig = cfg
 
 	return 0
 }

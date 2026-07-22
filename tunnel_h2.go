@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 )
 
@@ -219,14 +218,9 @@ func init() {
 						return nil, err
 					}
 
-					utlsConfig := &utls.Config{
-						ServerName:            cfg.ServerName,
-						InsecureSkipVerify:    true,
-						NextProtos:            []string{"h2", "http/1.1"},
-						VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
-					}
-					uConn := utls.UClient(c, utlsConfig, utls.HelloChrome_Auto)
-					if err := uConn.HandshakeContext(ctx); err != nil {
+					utlsConfig := buildUTLSConfig(cfg, []string{"h2", "http/1.1"})
+					uConn, err := handshakeUTLS(ctx, c, utlsConfig)
+					if err != nil {
 						c.Close()
 						return nil, err
 					}

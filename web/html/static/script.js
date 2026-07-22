@@ -91,8 +91,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const el = (id) => document.getElementById(id);
     const setVis = (selector, isVisible) => {
-        const element = document.querySelector(selector);
-        if (element) element.style.display = isVisible ? '' : 'none';
+        document.querySelectorAll(selector).forEach(element => {
+            element.style.display = isVisible ? '' : 'none';
+        });
     };
 
     // --- Control Locking ---
@@ -119,7 +120,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const handleAuthError = (res) => {
         if (res.status === 401) {
             localStorage.removeItem('jwt_token');
-            el('login-overlay').style.display = 'flex';
+            const loginEl = el('login-overlay');
+            loginEl.style.display = 'flex';
+            loginEl.classList.add('active');
             el('main-ui').style.display = 'none';
             throw new Error('Unauthorized');
         }
@@ -230,6 +233,43 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- Modal Logic ---
+    
+// Custom async confirm replacing native confirm
+const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => {
+    return new Promise((resolve) => {
+        const overlay = el('ios-confirm-overlay');
+        if (!overlay) {
+            resolve(confirm(message));
+            return;
+        }
+        const titleEl = el('ios-confirm-title');
+        const msgEl = el('ios-confirm-message');
+        const btnCancel = el('ios-confirm-cancel');
+        const btnOk = el('ios-confirm-ok');
+
+        titleEl.textContent = title;
+        msgEl.textContent = message;
+        
+        btnCancel.textContent = i18n.t('btn_cancel') || 'Cancel';
+        btnOk.textContent = i18n.t('btn_confirm') || 'OK';
+
+        const close = (result) => {
+            overlay.classList.remove('active');
+            setTimeout(() => { overlay.style.display = 'none'; }, 300);
+            btnCancel.onclick = null;
+            btnOk.onclick = null;
+            resolve(result);
+        };
+
+        btnCancel.onclick = () => close(false);
+        btnOk.onclick = () => close(true);
+
+        overlay.style.display = 'flex';
+        void overlay.offsetWidth;
+        overlay.classList.add('active');
+    });
+};
+
     const modal = {
         open: (node = null) => {
             const form = el('node-form');
@@ -246,9 +286,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
             modal.updateVisibility();
-            el('node-modal').style.display = 'flex';
+            const nodeModal = el('node-modal');
+            nodeModal.style.display = 'flex';
+            nodeModal.classList.add('active');
         },
-        close: () => el('node-modal').style.display = 'none',
+        close: () => {
+            const nodeModal = el('node-modal');
+            nodeModal.classList.remove('active');
+            setTimeout(() => { nodeModal.style.display = 'none'; }, 300);
+        },
         updateVisibility: () => {
             const authType = el('authType').value;
             setVis('[data-auth="password"]', authType === 'password');
@@ -258,12 +304,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const isHttp = tunnelType === 'http';
             const isBase = tunnelType === 'base';
             const isMasque = tunnelType === 'masque';
+            const isVaydns = tunnelType === 'vaydns';
             const isWss = ['ws', 'wss'].includes(tunnelType);
             const isTls = ['tls', 'wss', 'h2', 'quic', 'xhttp', 'grpc', 'h3', 'wt', 'masque'].includes(tunnelType);
             const isCustomPathSupported = ['ws', 'wss', 'h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'xhttp', 'xhttpc'].includes(tunnelType);
             
-            setVis('[data-visibility-key="proxyAddr"]', !isBase);
-            setVis('[data-visibility-key="customHost"]', !isBase && tunnelType !== 'tls' && tunnelType !== 'quic');
+            setVis('[data-visibility-key="proxyAddr"]', !isBase && !isVaydns);
+            setVis('[data-visibility-key="vaydnsFields"]', isVaydns);
+            setVis('[data-visibility-key="customHost"]', !isBase && !isVaydns && tunnelType !== 'tls' && tunnelType !== 'quic');
             setVis('[data-visibility-key="serverName"]', isTls);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 
@@ -307,7 +355,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await res.json();
                 localStorage.setItem('jwt_token', data.token);
                 await actions.start();
-                el('login-overlay').style.display = 'none';
+                const loginEl = el('login-overlay');
+                loginEl.style.display = 'none';
+                loginEl.classList.remove('active');
                 el('main-ui').style.display = 'block';
                 showToast(i18n.t('alert_login_success'), 'success');
             } else {
@@ -315,10 +365,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         },
         navigate: (e) => {
-            if (e.target.matches('.nav-tab')) {
+            const tab = e.target.closest('.nav-tab');
+            if (tab) {
                 document.querySelectorAll('.panel-section, .nav-tab').forEach(el => el.classList.remove('active'));
-                el(e.target.dataset.panel + '-panel').classList.add('active');
-                e.target.classList.add('active');
+                el(tab.dataset.panel + '-panel').classList.add('active');
+                tab.classList.add('active');
             }
         },
         saveSettings: async (e) => {
@@ -353,7 +404,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (action === 'edit') {
                 modal.open(state.nodes.find(n => n.id === id));
             } else if (action === 'delete') {
-                if (confirm(i18n.t('alert_confirm_delete'))) {
+                if (await asyncConfirm(i18n.t('alert_confirm_delete'))) {
                     const res = await api.delete(`/nodes/${id}`);
                     if (res.message) {
                         showToast(i18n.t('alert_delete_success'), 'success');
@@ -385,7 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         },
         clearLogs: async () => {
-            if (confirm(i18n.t('alert_confirm_clear_log'))) {
+            if (await asyncConfirm(i18n.t('alert_confirm_clear_log'))) {
                 const res = await api.post('/log-clear');
                 if (res.message) {
                     state.logs.content = '';
@@ -514,6 +565,15 @@ document.addEventListener('DOMContentLoaded', () => {
             bind('settings-form', 'submit', handlers.saveSettings);
             bind('node-list', 'click', handlers.nodeListClick);
             bind('clear-log-btn', 'click', handlers.clearLogs);
+            bind('log-level-select', 'change', async (e) => {
+                const level = e.target.value;
+                try {
+                    await api.post('/loglevel', { level });
+                    showToast(`Log level updated to ${level.toUpperCase()}`);
+                } catch (err) {
+                    showToast(`Failed to update log level: ${err.message}`, 'error');
+                }
+            });
             bind('start-btn', 'click', handlers.startProxy);
             bind('stop-btn', 'click', handlers.stopProxy);
             bind('export-btn', 'click', handlers.exportNodes);
@@ -522,10 +582,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (localStorage.getItem('jwt_token')) {
                 await actions.start();
-                el('login-overlay').style.display = 'none';
+                const loginEl = el('login-overlay');
+                loginEl.style.display = 'none';
+                loginEl.classList.remove('active');
                 el('main-ui').style.display = 'block';
             } else {
-                el('login-overlay').style.display = 'flex';
+                const loginEl = el('login-overlay');
+                loginEl.style.display = 'flex';
+                loginEl.classList.add('active');
                 el('main-ui').style.display = 'none';
             }
             i18n.updateUI();
