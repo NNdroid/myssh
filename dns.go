@@ -473,25 +473,31 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 
 // ==================== TCP 池管理 ====================
 
+// tryGetPooledConn 非阻塞地从连接池取一个仍然在有效期内的连接。
+// 取出成功返回 (conn, true)；池为空或取出的连接已过期则 (nil, false)（过期连接会被关闭）。
+func (l *LocalDnsServer) tryGetPooledConn(pool chan pooledDnsConn) (*dns.Conn, bool) {
+	select {
+	case pc := <-pool:
+		if time.Since(pc.lastUsed) > 5*time.Second {
+			pc.conn.Close()
+			return nil, false
+		}
+		return pc.conn, true
+	default:
+		return nil, false
+	}
+}
+
 func (l *LocalDnsServer) getTcpConnFromPool(addr string, isDirect bool, client *ssh.Client, forceNew bool) (*dns.Conn, string, error) {
 	poolKey := fmt.Sprintf("%v|%s", isDirect, addr) // 例如 "true|8.8.8.8:53"
 	pool := l.getPool(&l.tcpConnPools, poolKey)
 
 	if !forceNew {
-		for {
-			select {
-			case pc := <-pool:
-				if time.Since(pc.lastUsed) > 5*time.Second {
-					pc.conn.Close()
-					continue
-				}
-				return pc.conn, poolKey, nil
-			default:
-				goto DialNew
-			}
+		if pc, ok := l.tryGetPooledConn(pool); ok {
+			return pc, poolKey, nil
 		}
 	}
-DialNew:
+
 	trackedConn, err := l.dialTracked("tcp", addr, isDirect, client, "DNS-TCP")
 	if err != nil {
 		return nil, "", err
@@ -515,20 +521,11 @@ func (l *LocalDnsServer) getDoTConnFromPool(addr string, isDirect bool, client *
 	pool := l.getPool(&l.dotConnPools, poolKey)
 
 	if !forceNew {
-		for {
-			select {
-			case pc := <-pool:
-				if time.Since(pc.lastUsed) > 5*time.Second {
-					pc.conn.Close()
-					continue
-				}
-				return pc.conn, poolKey, nil
-			default:
-				goto DialNew
-			}
+		if pc, ok := l.tryGetPooledConn(pool); ok {
+			return pc, poolKey, nil
 		}
 	}
-DialNew:
+
 	trackedConn, err := l.dialTracked("tcp", addr, isDirect, client, "DNS-DoT")
 	if err != nil {
 		return nil, "", err

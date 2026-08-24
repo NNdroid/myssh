@@ -227,7 +227,7 @@
                                 <option value="wt" data-i18n="opt_wt">WebTransport</option>
                                 <option value="xhttpc" data-i18n="opt_xhttpc">XHTTP Cleartext</option>
                                 <option value="xhttp" data-i18n="opt_xhttp">XHTTP TLS</option>
-                                <option value="vaydns" data-i18n="opt_vaydns">VayDNS (DNS Tunnel)</option>
+                                <option value="dns" data-i18n="opt_dns_tunnel">DNS Tunnel (SSH-over-DNS)</option>
                             </select>
                         </div>
                         <div class="form-group" data-visibility-key="proxyAddr">
@@ -235,30 +235,23 @@
                             <input type="text" name="proxyAddr" class="form-control">
                         </div>
 
-                        <!-- VayDNS Fields -->
-                        <div class="form-group" data-visibility-key="vaydnsFields">
-                            <label data-i18n="label_vaydns_pubkey">VayDNS Server Pubkey</label>
-                            <input type="text" name="vaydnsPubkey" class="form-control">
+                        <!-- DNS Tunnel (SSH-over-DNS) Fields -->
+                        <div class="form-group" data-visibility-key="dnsTunnelFields">
+                            <label data-i18n="label_dns_tunnel_domain">DNS Tunnel Domain</label>
+                            <input type="text" name="dnsTunnelDomain" class="form-control" data-i18n-placeholder="ph_dns_tunnel_domain">
                         </div>
-                        <div class="form-group" data-visibility-key="vaydnsFields">
-                            <label data-i18n="label_vaydns_domain">VayDNS Domain</label>
-                            <input type="text" name="vaydnsDomain" class="form-control">
+                        <div class="form-group" data-visibility-key="dnsTunnelFields" style="grid-column: 1/-1;">
+                            <label data-i18n="label_dns_tunnel_servers">DNS Servers (comma-separated, failover)</label>
+                            <input type="text" name="dnsTunnelServers" class="form-control" data-i18n-placeholder="ph_dns_tunnel_servers">
                         </div>
-                        <div class="form-group" data-visibility-key="vaydnsFields">
-                            <label data-i18n="label_vaydns_mode">VayDNS Mode</label>
-                            <select name="vaydnsMode" class="form-control">
-                                <option value="doh" data-i18n="opt_dns_doh">DNS over HTTPS (DoH)</option>
-                                <option value="dot" data-i18n="opt_dns_dot">DNS over TLS (DoT)</option>
-                                <option value="udp" data-i18n="opt_dns_udp">Standard DNS (UDP)</option>
+                        <div class="form-group" data-visibility-key="dnsTunnelFields">
+                            <label data-i18n="label_dns_tunnel_type">DNS Record Type</label>
+                            <select name="dnsTunnelType" class="form-control">
+                                <option value="txt" data-i18n="opt_dns_type_txt">TXT (default)</option>
+                                <option value="null" data-i18n="opt_dns_type_null">NULL</option>
+                                <option value="cname" data-i18n="opt_dns_type_cname">CNAME</option>
+                                <option value="a" data-i18n="opt_dns_type_a">A</option>
                             </select>
-                        </div>
-                        <div class="form-group" data-visibility-key="vaydnsFields">
-                            <label data-i18n="label_vaydns_query_type">DNS Query Type</label>
-                            <input type="text" name="vaydnsQueryType" class="form-control" placeholder="TXT or NULL">
-                        </div>
-                        <div class="form-group" data-visibility-key="vaydnsFields" style="grid-column: 1/-1;">
-                            <label data-i18n="label_vaydns_resolvers">VayDNS Resolvers</label>
-                            <input type="text" name="vaydnsResolvers" class="form-control" data-i18n-placeholder="ph_vaydns_resolvers">
                         </div>
 
                         <div class="form-group" data-visibility-key="customHost">

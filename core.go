@@ -41,8 +41,9 @@ var (
 	// 填充池
 	padPool    []byte
 	padPoolLen = 64 * 1024
-	// tcp
-	tcpOptimizeBufferSize   = 4 * 1024 * 1024
+	// tcp: 单个连接的读写缓冲上限。
+	// 原先 4MB 在移动端/高并发下内核内存占用过大，降到 1MB 以平衡跨国高 BDP 吞吐与内存占用。
+	tcpOptimizeBufferSize   = 1 * 1024 * 1024
 	tcpKeepaliveIntervalSec = 15
 )
 
@@ -84,8 +85,8 @@ func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) fu
 		}
 		actualFingerprint := actualFPBuilder.String()
 
-		// 只要有握手，就打出这个日志
-		zlog.Infof("%s [Tunnel] Actual certificate fingerprint: %s", TAG, actualFingerprint)
+		// 实际指纹仅在调试级别打印，避免每次 TLS/QUIC 握手都产生大量 INFO 日志
+		zlog.Debugf("%s [Tunnel] Actual certificate fingerprint: %s", TAG, actualFingerprint)
 
 		if !verifyFingerprint {
 			return nil // 如果用户没有开启强制验证，则直接放行

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -151,7 +152,6 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
-	router.Use(rateLimitMiddleware())
 
 	// Parse the HTML template
 	tmpl, err := template.ParseFS(webFS, "html/index.html")
@@ -178,7 +178,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 		zap.L().Sugar().Infof("%s [WebServer] 🔒 JWT Authentication is ENABLED for the web panel.", TAG)
 
 		// 开放的登录接口 (发放 JWT)
-		router.POST("/api/v1/login", func(c *gin.Context) {
+		router.POST("/api/v1/login", rateLimitMiddleware(), func(c *gin.Context) {
 			var req struct {
 				Username string `json:"username"`
 				Password string `json:"password"`
@@ -187,7 +187,8 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 				return
 			}
-			if req.Username == webUser && req.Password == webPass {
+			if subtle.ConstantTimeCompare([]byte(req.Username), []byte(webUser)) == 1 &&
+				subtle.ConstantTimeCompare([]byte(req.Password), []byte(webPass)) == 1 {
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 					"user": req.Username,
 					"exp":  time.Now().Add(24 * time.Hour).Unix(),
@@ -226,6 +227,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 
 	// Protect all API routes
 	apiV1 := authorized.Group("/api/v1")
+	apiV1.Use(rateLimitMiddleware())
 	{
 		// --- Dashboard Stats ---
 		apiV1.GET("/dashboard-stats", func(c *gin.Context) {
@@ -367,6 +369,11 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 		apiV1.POST("/start", func(c *gin.Context) {
 			proxyMu.Lock()
 			defer proxyMu.Unlock()
+
+			if proxyRunning {
+				c.JSON(http.StatusConflict, gin.H{"error": "Proxy is already running"})
+				return
+			}
 
 			var req struct {
 				NodeID string `json:"node_id"`

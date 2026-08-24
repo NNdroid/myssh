@@ -131,6 +131,69 @@ func (g *grpcConn) Write(b []byte) (n int, err error) { return g.gw.Write(b) }
 // ==========================================
 // 核心握手逻辑与注册
 // ==========================================
+
+// acquireH2Transport 获取或复用一条 HTTP/2（含 gRPC）多工传输通道。
+//
+// 命中缓存时关闭外层多余的 baseConn 并直接复用共享 Transport；未命中时基于 baseConn
+// 构建新的 Transport 并写入全局缓存。返回的 *http.Client 由调用方用于发起隧道握手请求。
+func acquireH2Transport(ctx context.Context, cacheKey string, isTLS bool, cfg ProxyConfig, baseConn net.Conn) (*http.Client, error) {
+	if cached, ok := h2TransportCache.Load(cacheKey); ok {
+		// 命中缓存：释放外层多余的 TCP 连接，直接复用现有高速通道
+		baseConn.Close()
+		zlog.Debugf("%s [Tunnel] ⚡ Reused cached multiplexing transport", TAG)
+		return cached.(*http.Client), nil
+	}
+
+	// 缓存未命中：建立新的 Transport
+	var firstConnUsed int32
+	transport := &http2.Transport{}
+
+	// 智慧拨号器：第一次握手消耗 baseConn，若未来断线重连则自动拨号新连接
+	smartDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var c net.Conn
+		var dialErr error
+		if atomic.CompareAndSwapInt32(&firstConnUsed, 0, 1) {
+			c = baseConn // 充分利用外层已建立的 Socket
+		} else {
+			c, dialErr = dialTCP(ctx, cfg, cfg.ProxyAddr)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+		}
+		c.SetDeadline(time.Now().Add(10 * time.Second))
+		return c, nil
+	}
+
+	if isTLS {
+		transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
+			c, err := smartDialer(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			utlsConfig := buildUTLSConfig(cfg, []string{"h2", "http/1.1"})
+			uConn, err := handshakeUTLS(ctx, c, utlsConfig)
+			if err != nil {
+				c.Close()
+				return nil, err
+			}
+			c.SetDeadline(time.Time{})
+			return uConn, nil
+		}
+	} else {
+		transport.AllowHTTP = true
+		transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
+			c, err := smartDialer(ctx, network, addr)
+			c.SetDeadline(time.Time{}) // 清除超时
+			return c, err
+		}
+	}
+
+	client := &http.Client{Transport: transport}
+	h2TransportCache.Store(cacheKey, client)
+	return client, nil
+}
+
 func init() {
 	h2Handler := func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn, isTLS bool, isGRPC bool) (net.Conn, error) {
 		scheme := "http"
@@ -183,61 +246,11 @@ func init() {
 		// 多工複用快取機制與 Zero-Waste 撥號
 		// ==========================================
 		cacheKey := cfg.ProxyAddr + "|" + protoName
-		var client *http.Client
-
-		if cached, ok := h2TransportCache.Load(cacheKey); ok {
-			// 命中快取：釋放外層多餘撥號的 TCP 連線，直接複用現有高速通道
+		client, err := acquireH2Transport(ctx, cacheKey, isTLS, cfg, baseConn)
+		if err != nil {
 			baseConn.Close()
-			client = cached.(*http.Client)
-			zlog.Debugf("%s [Tunnel] ⚡ Reused cached %s multiplexing transport", TAG, protoName)
-		} else {
-			// 快取未命中：建立新的 Transport
-			var firstConnUsed int32
-			transport := &http2.Transport{}
-
-			// 智慧撥號器：第一次握手消耗 baseConn，若未來斷線重連則自動撥號新連線
-			smartDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
-				var c net.Conn
-				var dialErr error
-				if atomic.CompareAndSwapInt32(&firstConnUsed, 0, 1) {
-					c = baseConn // 充分利用外層已建立的 Socket
-				} else {
-					c, dialErr = dialTCP(ctx, cfg, cfg.ProxyAddr) // 假設你的 myssh 包裡有 dialTCP 函數
-					if dialErr != nil {
-						return nil, dialErr
-					}
-				}
-				c.SetDeadline(time.Now().Add(10 * time.Second))
-				return c, nil
-			}
-
-			if isTLS {
-				transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
-					c, err := smartDialer(ctx, network, addr)
-					if err != nil {
-						return nil, err
-					}
-
-					utlsConfig := buildUTLSConfig(cfg, []string{"h2", "http/1.1"})
-					uConn, err := handshakeUTLS(ctx, c, utlsConfig)
-					if err != nil {
-						c.Close()
-						return nil, err
-					}
-					c.SetDeadline(time.Time{})
-					return uConn, nil
-				}
-			} else {
-				transport.AllowHTTP = true
-				transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
-					c, err := smartDialer(ctx, network, addr)
-					c.SetDeadline(time.Time{}) // 清除超時
-					return c, err
-				}
-			}
-
-			client = &http.Client{Transport: transport}
-			h2TransportCache.Store(cacheKey, client)
+			cancel()
+			return nil, err
 		}
 
 		respChan := make(chan *http.Response, 1)

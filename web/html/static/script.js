@@ -96,6 +96,16 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
+    // 智能字节格式化：自动在 B/KB/MB/GB/TB 间换算
+    const formatBytesSmart = (bytes, perSec = false) => {
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let v = Math.abs(Number(bytes) || 0);
+        let i = 0;
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        const num = i === 0 ? String(Math.round(v)) : v.toFixed(2);
+        return `${num} ${units[i]}${perSec ? '/s' : ''}`;
+    };
+
     // --- Control Locking ---
     const setControlsLocked = (locked) => {
         state.controlsLocked = locked;
@@ -139,9 +149,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Render Functions ---
     const render = {
         status: () => {
-            const { running, running_node, sys_cpu, sys_mem, sys_goroutine, traf_rate, traf_total, traf_conns, top_domains } = state.status;
-            
-            // --- 原有的基础状态更新 ---
+            const st = state.status;
+            const { running, running_node, top_domains } = st;
+
+            // --- 基础状态 ---
             el('status-indicator').classList.toggle('active', running);
             el('status-text').textContent = running ? i18n.t('status_connected') : i18n.t('status_disconnected');
             const runningNode = state.nodes.find(n => n.id === running_node);
@@ -149,41 +160,41 @@ document.addEventListener('DOMContentLoaded', () => {
             el('start-btn').style.display = running ? 'none' : 'block';
             el('stop-btn').style.display = running ? 'block' : 'none';
 
-            // --- 新增：渲染系统资源和流量统计 ---
-            if (el('sysCpu')) el('sysCpu').textContent = sys_cpu || '0.0%';
-            if (el('sysMem')) el('sysMem').textContent = sys_mem || '0/0 MB';
-            if (el('sysGoroutine')) el('sysGoroutine').textContent = sys_goroutine || '0';
+            // --- 系统资源 & 流量（智能单位）---
+            if (el('sysCpu')) el('sysCpu').textContent = st.sys_cpu || '0.0%';
+            if (el('sysMem')) el('sysMem').textContent = st.sys_mem || '0/0 MB';
+            if (el('sysGoroutine')) el('sysGoroutine').textContent = st.sys_goroutine || '0';
 
-            const formatBytes = (bytes) => (bytes / 1024).toFixed(1);
-            const formatMB = (bytes) => (bytes / 1024 / 1024).toFixed(2);
+            if (el('trafRateTx')) el('trafRateTx').textContent = formatBytesSmart(st.tx_rate || 0, true);
+            if (el('trafRateRx')) el('trafRateRx').textContent = formatBytesSmart(st.rx_rate || 0, true);
+            if (el('trafTotalTx')) el('trafTotalTx').textContent = formatBytesSmart(st.tx_total || 0);
+            if (el('trafTotalRx')) el('trafTotalRx').textContent = formatBytesSmart(st.rx_total || 0);
+            if (el('trafConnsActive')) el('trafConnsActive').textContent = `${st.active_conns || 0} / ${st.total_conns || 0}`;
 
-            if (el('trafRateTx')) el('trafRateTx').textContent = formatBytes(state.status.tx_rate || 0) + ' KB/s';
-            if (el('trafRateRx')) el('trafRateRx').textContent = formatBytes(state.status.rx_rate || 0) + ' KB/s';
-            if (el('trafTotalTx')) el('trafTotalTx').textContent = formatMB(state.status.tx_total || 0) + ' MB';
-            if (el('trafTotalRx')) el('trafTotalRx').textContent = formatMB(state.status.rx_total || 0) + ' MB';
-            if (el('trafConnsActive')) el('trafConnsActive').textContent = `${state.status.active_conns || 0} / ${state.status.total_conns || 0}`;
-
-            // --- 新增：渲染热门域名 ---
+            // --- 热门域名（进度条按最繁忙域名横向比较）---
             const domainListEl = el('domainList');
             if (domainListEl) {
                 domainListEl.innerHTML = '';
                 if (!top_domains || top_domains.length === 0) {
-                    domainListEl.innerHTML = `<li class="empty-state">${i18n.t('text_no_nodes')}</li>`; // 或者添加一个 "No active domains" 的翻译
+                    domainListEl.innerHTML = `<li class="empty-state">${i18n.t('text_no_domains') || i18n.t('text_no_nodes')}</li>`;
                 } else {
+                    const maxRate = Math.max(1, ...top_domains.map(d => (d.tx_rate || 0) + (d.rx_rate || 0)));
                     top_domains.forEach(d => {
                         const li = document.createElement('li');
-                        const txKB = formatBytes(d.tx_rate);
-                        const rxKB = formatBytes(d.rx_rate);
+                        const tx = formatBytesSmart(d.tx_rate || 0, true);
+                        const rx = formatBytesSmart(d.rx_rate || 0, true);
+                        const txPct = (d.tx_rate || 0) / maxRate * 100;
+                        const rxPct = (d.rx_rate || 0) / maxRate * 100;
                         li.innerHTML = `
                             <div style="display:flex; justify-content:space-between; width:100%; margin-bottom: 4px;">
                                 <span class="domain-name" style="font-weight: 500;">${d.domain}</span>
                                 <span class="domain-rates" style="font-size: 0.85em; opacity: 0.8;">
-                                    <span style="color: var(--accent-blue);">↑${txKB}</span> / <span style="color: var(--danger);">↓${rxKB}</span> KB/s
+                                    <span style="color: var(--accent-blue);">↑${tx}</span> / <span style="color: var(--danger);">↓${rx}</span>
                                 </span>
                             </div>
                             <div class="progress-bar" style="width:100%; background:rgba(255,255,255,0.1); height:4px; border-radius:2px; overflow:hidden; display:flex;">
-                                <div style="background:var(--accent-blue); width:${(d.tx_rate / (d.tx_rate + d.rx_rate + 1) * 100)}%;"></div>
-                                <div style="background:var(--danger); width:${(d.rx_rate / (d.tx_rate + d.rx_rate + 1) * 100)}%;"></div>
+                                <div style="background:var(--accent-blue); width:${txPct}%;"></div>
+                                <div style="background:var(--danger); width:${rxPct}%;"></div>
                             </div>
                         `;
                         domainListEl.appendChild(li);
@@ -198,6 +209,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 list.innerHTML = `<p style="text-align:center; color: #aaa;">${i18n.t('text_no_nodes')}</p>`;
                 return;
             }
+            const runningId = state.status.running_node;
             state.nodes.forEach(node => {
                 const item = document.createElement('div');
                 item.className = 'node-item';
@@ -205,12 +217,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (state.selectedNodeId === node.id) {
                     item.classList.add('selected');
                 }
+                const isRunning = !!runningId && runningId === node.id;
+                if (isRunning) item.classList.add('running');
                 item.innerHTML = `
                     <div class="node-item-info">
-                        <h4>${node.name} <span class="node-tag">${node.tunnelType || 'base'}</span></h4>
+                        <h4>${node.name} <span class="node-tag">${node.tunnelType || 'base'}</span>${isRunning ? `<span class="node-running-badge">${i18n.t('badge_running')}</span>` : ''}</h4>
                         <p>${node.user}@${node.sshAddr}</p>
                     </div>
                     <div class="node-actions">
+                        ${!isRunning ? `<button class="btn btn-sm accent" data-action="start" data-id="${node.id}" title="${i18n.t('btn_start')}" style="display:inline-flex; align-items:center; gap:4px;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            ${i18n.t('btn_start')}
+                        </button>` : ''}
                         <button class="btn btn-sm" data-action="edit" data-id="${node.id}" title="${i18n.t('btn_edit')}" style="display:inline-flex; align-items:center; gap:4px;">
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                             ${i18n.t('btn_edit')}
@@ -304,14 +322,14 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
             const isHttp = tunnelType === 'http';
             const isBase = tunnelType === 'base';
             const isMasque = tunnelType === 'masque';
-            const isVaydns = tunnelType === 'vaydns';
+            const isDns = tunnelType === 'dns' || tunnelType === 'vaydns';
             const isWss = ['ws', 'wss'].includes(tunnelType);
             const isTls = ['tls', 'wss', 'h2', 'quic', 'xhttp', 'grpc', 'h3', 'wt', 'masque'].includes(tunnelType);
             const isCustomPathSupported = ['ws', 'wss', 'h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'xhttp', 'xhttpc'].includes(tunnelType);
             
-            setVis('[data-visibility-key="proxyAddr"]', !isBase && !isVaydns);
-            setVis('[data-visibility-key="vaydnsFields"]', isVaydns);
-            setVis('[data-visibility-key="customHost"]', !isBase && !isVaydns && tunnelType !== 'tls' && tunnelType !== 'quic');
+            setVis('[data-visibility-key="proxyAddr"]', !isBase && !isDns);
+            setVis('[data-visibility-key="dnsTunnelFields"]', isDns);
+            setVis('[data-visibility-key="customHost"]', !isBase && !isDns && tunnelType !== 'tls' && tunnelType !== 'quic');
             setVis('[data-visibility-key="serverName"]', isTls);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 
@@ -401,7 +419,12 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
                 return;
             }
             const { action, id } = button.dataset;
-            if (action === 'edit') {
+            if (action === 'start') {
+                state.selectedNodeId = id;
+                document.querySelectorAll('.node-item').forEach(el => el.classList.remove('selected'));
+                e.target.closest('.node-item')?.classList.add('selected');
+                await handlers.startProxy();
+            } else if (action === 'edit') {
                 modal.open(state.nodes.find(n => n.id === id));
             } else if (action === 'delete') {
                 if (await asyncConfirm(i18n.t('alert_confirm_delete'))) {
@@ -492,6 +515,9 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
             if (res.message) {
                 showToast(i18n.t('alert_starting_proxy'), 'info');
                 await actions.fetchStatus();
+            } else if (res.error && /already running/i.test(res.error)) {
+                showToast(i18n.t('alert_already_running'), 'info');
+                await actions.fetchStatus();
             } else {
                 showToast(`${i18n.t('alert_start_failed')}: ${res.error}`, 'error');
             }
@@ -501,7 +527,13 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
 
     // --- Main Actions ---
     const actions = {
-        fetchStatus: async () => { state.status = await api.get('/dashboard-stats'); render.status(); },
+        fetchStatus: async () => {
+            const prevRunning = state.status.running_node;
+            state.status = await api.get('/dashboard-stats');
+            render.status();
+            // 仅当运行中节点变化时才重渲染节点列表，避免每 5s 重建 DOM
+            if (state.status.running_node !== prevRunning) render.nodes();
+        },
         fetchNodes: async () => { 
             const data = await api.get('/nodes');
             state.nodes = Array.isArray(data) ? data : []; 

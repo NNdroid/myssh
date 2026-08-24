@@ -50,6 +50,8 @@ type TunnelProtocol struct {
 
 var tunnelRegistry = make(map[string]TunnelProtocol)
 
+// RegisterTunnel 向全局隧道注册表注册一种隧道协议实现。
+// name 为协议名（如 "h2"/"grpc"），network 为底层网络类型（"tcp"/"udp"/"none"），handler 为建连逻辑。
 func RegisterTunnel(name string, network string, handler TunnelHandler) {
 	tunnelRegistry[name] = TunnelProtocol{
 		Network: network,
@@ -57,6 +59,7 @@ func RegisterTunnel(name string, network string, handler TunnelHandler) {
 	}
 }
 
+// GetTunnel 从注册表中获取指定协议名的隧道实现；未找到时返回错误。
 func GetTunnel(name string) (TunnelProtocol, error) {
 	if proto, ok := tunnelRegistry[name]; ok {
 		return proto, nil
@@ -262,13 +265,6 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		}
 	}
 
-	// 深拷贝地址和端口信息，防止 txthinking/socks5 底层复用 UDP 读缓冲
-	// 导致后台异步回包时发生切片指针篡改 (Data Race / 目标地址错乱)
-	dstAddrCopy := make([]byte, len(d.DstAddr))
-	copy(dstAddrCopy, d.DstAddr)
-	dstPortCopy := make([]byte, len(d.DstPort))
-	copy(dstPortCopy, d.DstPort)
-
 	var isDirect bool
 	var dialHost string
 
@@ -280,12 +276,18 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		isDirect = false
 	}
 
+	cloneSlice := func(b []byte) []byte {
+		c := make([]byte, len(b))
+		copy(c, b)
+		return c
+	}
+
 	// ==========================================
 	// 命中直连规则，走本地传统 UDP 拨号
 	// ==========================================
 	if isDirect {
-		targetAddrStr := net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
-		sessionKey := addr.String() + "<->" + targetAddrStr
+		directTarget := net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
+		sessionKey := addr.String() + "<->" + directTarget
 
 		var uc net.Conn
 		if val, ok := udpNatMap.Load(sessionKey); ok {
@@ -294,14 +296,14 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Debugf("%s [ROUTER-Direct] ♻️ Reusing local direct session -> %s", TAG, sessionKey)
 			}
 		} else {
-			rawConn, err := dialProtected(context.Background(), ProxyConfig{}, "udp", targetAddrStr, 5*time.Second)
+			rawConn, err := dialProtected(context.Background(), ProxyConfig{}, "udp", directTarget, 5*time.Second)
 			if err != nil {
 				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP: %v", TAG, err)
 				return err
 			}
 
 			// --- Wrap the outbound connection ---
-			uc = WrapConn(rawConn, targetAddrStr)
+			uc = WrapConn(rawConn, directTarget)
 			// ------------------------------------
 
 			// 使用 LoadOrStore 防止并发同一目标造成重拨泄漏
@@ -314,6 +316,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					zlog.Debugf("%s [ROUTER-Direct] 🟢 Created new local direct session -> %s", TAG, sessionKey)
 				}
 				wg.Add(1)
+				// 仅在新建会话时深拷贝地址信息，彻底避免复用已有会话时的无意义堆分配
+				dstAddrCopy := cloneSlice(d.DstAddr)
+				dstPortCopy := cloneSlice(d.DstPort)
 				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
 					defer wg.Done()
 					defer conn.Close()
@@ -418,6 +423,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Debugf("%s [ROUTER-Proxy] 🟢 Created new proxy session (UDPGW) -> Client: %s | Tunnel target: %s", TAG, sessionKey, targetAddrStr)
 			}
 			wg.Add(1)
+			// 仅在新建会话时深拷贝地址信息
+			dstAddrCopy := cloneSlice(d.DstAddr)
+			dstPortCopy := cloneSlice(d.DstPort)
 			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
 				defer wg.Done()
 				defer conn.Close()
@@ -559,6 +567,8 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	}
 }
 
+// StartSshTProxy2 启动 AutoSSH 模式的代理引擎：初始化 DNS 服务、SOCKS5 服务，
+// 并后台维护 SSH 隧道的自动重连。返回 0 表示启动成功，非 0 为各阶段错误码。
 func StartSshTProxy2(configJson string) int {
 	StopSshTProxy()
 
@@ -621,19 +631,10 @@ func StartSshTProxy2(configJson string) int {
 			default:
 			}
 
-			zlog.Infof("%s [AutoSSH] 🔄 Attempting to establish tunnel with remote...", TAG)
-			conn, err := dialTunnel(engineCtx, cfg)
+			zlog.Infof("%s [AutoSSH] 🔄 Attempting to establish tunnel and SSH connection...", TAG)
+			client, _, err := DialNode(engineCtx, cfg, false)
 			if err != nil {
-				zlog.Errorf("%s [AutoSSH] ❌ Tunnel establishment failed: %v", TAG, err)
-				time.Sleep(3 * time.Second)
-				continue
-			}
-
-			zlog.Infof("%s [AutoSSH] Performing SSH security authentication...", TAG)
-			client, err := dialSSH(engineCtx, conn, cfg, false)
-			if err != nil {
-				conn.Close()
-				zlog.Errorf("%s [AutoSSH] ❌ SSH handshake failed: %v", TAG, err)
+				zlog.Errorf("%s [AutoSSH] ❌ Connection failed: %v", TAG, err)
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -665,6 +666,7 @@ func StartSshTProxy2(configJson string) int {
 	return 0
 }
 
+// StopSshTProxy 停止代理引擎，并清理所有 SSH/代理连接、DNS 与 SOCKS5 资源。
 func StopSshTProxy() {
 	mu.Lock()
 	defer mu.Unlock()

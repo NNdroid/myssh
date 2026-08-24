@@ -368,10 +368,11 @@ func bytesPerSecond(delta uint64, elapsed time.Duration) uint64 {
 
 type TrackedConn struct {
 	net.Conn
-	manager   *trafficManager
-	info      *ConnInfo
-	closeOnce sync.Once
-	closeErr  error
+	manager    *trafficManager
+	info       *ConnInfo
+	domainStat *domainStat // 缓存域名统计对象指针，避免每次读写都查 sync.Map
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func (tc *TrackedConn) Read(b []byte) (n int, err error) {
@@ -379,10 +380,8 @@ func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 	if n > 0 {
 		atomic.AddUint64(&tc.manager.RxTotal, uint64(n)) // 增加全局下行
 		atomic.AddUint64(&tc.info.ReadBytes, uint64(n))  // 增加本连接下行
-		if tc.info.TargetHost != "" {
-			val, _ := globalDomainStatsManager.stats.LoadOrStore(tc.info.TargetHost, &domainStat{})
-			stat := val.(*domainStat)
-			atomic.AddUint64(&stat.currentRxBytes, uint64(n))
+		if tc.domainStat != nil {
+			atomic.AddUint64(&tc.domainStat.currentRxBytes, uint64(n))
 		}
 	}
 	return n, err
@@ -393,10 +392,8 @@ func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 	if n > 0 {
 		atomic.AddUint64(&tc.manager.TxTotal, uint64(n)) // 增加全局上行
 		atomic.AddUint64(&tc.info.WriteBytes, uint64(n)) // 增加本连接上行
-		if tc.info.TargetHost != "" {
-			val, _ := globalDomainStatsManager.stats.LoadOrStore(tc.info.TargetHost, &domainStat{})
-			stat := val.(*domainStat)
-			atomic.AddUint64(&stat.currentTxBytes, uint64(n))
+		if tc.domainStat != nil {
+			atomic.AddUint64(&tc.domainStat.currentTxBytes, uint64(n))
 		}
 	}
 	return n, err
@@ -492,10 +489,19 @@ func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	}
 	globalTrafficManager.activeMap.Store(id, info)
 
+	// 仅当存在目标域名时才在路由统计表里登记一次，并缓存指针。
+	// 这样 Read/Write 直接累加，省去每次收发包都做一次 sync.Map 查找与可能的分配。
+	var stat *domainStat
+	if host != "" {
+		val, _ := globalDomainStatsManager.stats.LoadOrStore(host, &domainStat{})
+		stat = val.(*domainStat)
+	}
+
 	return &TrackedConn{
-		Conn:    conn,
-		manager: globalTrafficManager,
-		info:    info,
+		Conn:       conn,
+		manager:    globalTrafficManager,
+		info:       info,
+		domainStat: stat,
 	}
 }
 
@@ -693,6 +699,11 @@ var (
 )
 
 func getCpuPercent() float64 {
+	// 仅 Linux/Android 拥有 /proc/self/stat；其他平台（Windows/macOS 等）直接返回 0，
+	// 避免每秒产生一次无意义的文件读取与内存分配。
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+		return 0.0
+	}
 	cpuStatsMu.Lock()
 	defer cpuStatsMu.Unlock()
 

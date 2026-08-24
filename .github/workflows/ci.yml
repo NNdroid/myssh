@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# 取消同一分支上旧的、仍在运行的流水线，避免资源浪费。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (with -race)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 采用最新稳定版 Go，可满足 go.mod 中声明的语言版本要求。
+          go-version: "stable"
+          check-latest: true
+
+      - name: gofmt
+        # 任何未格式化文件都会使本次检查失败（提交门槛）。
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt 检查："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race, CGO)
+        # 数据竞争检测 (-race) 依赖 CGO，本机若缺少 C 编译器无法运行；
+        # 在 GitHub 的 Linux runner 上开启 CGO_ENABLED=1 后即可进行竞争检测。
+        run: CGO_ENABLED=1 go test -race -count=1 ./...

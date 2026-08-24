@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func newProtectedDialer(cfg ProxyConfig, timeout time.Duration) *net.Dialer {
@@ -53,7 +55,7 @@ func applyOptimiseForTcpConnection(conn net.Conn) {
 			}
 		}
 
-		zlog.Debugf("%s [TCP Tune] 🚀 Successfully applied Socket optimizations (4MB Buffer, NoDelay, KeepAlive)", TAG)
+		zlog.Debugf("%s [TCP Tune] 🚀 Successfully applied Socket optimizations (%dKB Buffer, NoDelay, KeepAlive)", TAG, tcpOptimizeBufferSize/1024)
 	} else {
 		zlog.Debugf("%s [TCP Tune] ⚠️ Current connection is not TCP, skipping optimization", TAG)
 	}
@@ -152,4 +154,19 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	}
 
 	return targetConn, err
+}
+
+// DialNode is the unified function for establishing a tunnel and an SSH connection
+func DialNode(ctx context.Context, cfg ProxyConfig, isPing bool) (*ssh.Client, net.Conn, error) {
+	conn, err := dialTunnel(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tunnel err: %v", err)
+	}
+
+	client, err := dialSSH(ctx, conn, cfg, isPing)
+	if err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("ssh err: %v", err)
+	}
+	return client, conn, nil
 }

@@ -8,6 +8,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -35,9 +36,9 @@ func main() {
 	}
 	configStr := string(configBytes)
 
-	// 初始化日志：控制台输出 DEBUG 级别，不写文件
+	// 初始化日志：控制台输出，级别取自 -level 命令行参数（默认 debug），不写文件
 	// 如果你要写文件，可以改成 myssh.InitLogger("/var/log/myssh.log", "INFO")
-	if logRes := myssh.InitLogger("", "DEBUG"); logRes != 0 {
+	if logRes := myssh.InitLogger("", strings.ToUpper(*logLevel)); logRes != 0 {
 		fmt.Printf("[Main] ❌ 日志系统初始化失败\n")
 		os.Exit(1)
 	}

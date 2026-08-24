@@ -44,7 +44,7 @@ func init() {
 		// 快取攔截，嘗試複用已建立的 QUIC 連線
 		// ==========================================
 		if cachedVal, ok := quicConnCache.Load(cfg.ProxyAddr); ok {
-			conn := cachedVal.(quic.Conn)
+			conn := cachedVal.(*quic.Conn)
 
 			// 嘗試在現有的 QUIC 連線上開啟新的輕量級 Stream
 			stream, err := conn.OpenStreamSync(parentCtx)

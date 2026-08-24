@@ -135,9 +135,11 @@ type GeoRouter struct {
 	regexList    []*regexp.Regexp
 	regexGrouped []*regexp.Regexp
 
-	ipTrie      *ipTrie
-	domainCache sync.Map // 路由结果 L1 并发缓存
-	cacheCount  int32    // L1 缓存条目计数器
+	ipTrie            *ipTrie
+	domainCache       sync.Map // 路由结果 L1 并发缓存
+	routeIPCache      sync.Map // 路由专用：域名→已解析 IP 的短缓存，避免重复同步解析
+	cacheCount        int32    // L1 缓存条目计数器
+	routeIPCacheCount int32    // routeIP 缓存条目计数器
 
 	queryCount    int64 // 总查询次数统计
 	cacheHitCount int64 // 缓存命中次数统计
@@ -483,6 +485,19 @@ type RouteResult struct {
 	DialHost string `json:"dial_host"`
 }
 
+// routeIPCacheTTL 路由解析缓存的有效期。命中 GeoIP 直连规则前对同一域名做同步 DNS 解析代价较高，
+// 缓存解析结果（含“无匹配”的空结果）可在 TTL 内复用，避免阻塞 SOCKS5 处理协程。
+const routeIPCacheTTL = 5 * time.Minute
+
+// routeResolved 缓存某域名经同步解析得到的 IP 列表及其过期时间。
+type routeResolved struct {
+	ips    []net.IP
+	expire time.Time
+}
+
+// ShouldDirect 判断目标 host 是否应当直连。
+// 命中 GeoSite 域名规则、或解析出的 IP 命中 GeoIP 段时返回 IsDirect=true，
+// DialHost 为实际用于拨号的主机（可能是已解析的 IP）；否则走代理。
 func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	if host == "" {
 		return RouteResult{IsDirect: false, DialHost: ""}
@@ -512,11 +527,37 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	// 查 GeoIP (IP 规则)
 	ips := GetCachedIPs(host)
 	if len(ips) == 0 {
+		// 优先查路由专用解析缓存，跳过重复的同步 DNS 解析（避免阻塞 SOCKS5 处理协程）
+		if cached, ok := r.routeIPCache.Load(host); ok {
+			rc := cached.(routeResolved)
+			if time.Now().Before(rc.expire) {
+				ips = rc.ips
+			} else {
+				r.routeIPCache.Delete(host)
+			}
+		}
+	}
+	if len(ips) == 0 {
 		if ip4 := ResolveOne(host, dns.TypeA); ip4 != nil {
 			ips = append(ips, ip4)
 		}
 		if ip6 := ResolveOne(host, dns.TypeAAAA); ip6 != nil {
 			ips = append(ips, ip6)
+		}
+		// 写入路由解析缓存（含 TTL）；空结果也缓存，避免对已知走代理的域名反复解析
+		r.routeIPCache.Store(host, routeResolved{ips: ips, expire: time.Now().Add(routeIPCacheTTL)})
+		if atomic.AddInt32(&r.routeIPCacheCount, 1) >= 5000 {
+			if atomic.CompareAndSwapInt32(&r.routeIPCacheCount, 5000, 0) {
+				go func() {
+					now := time.Now()
+					r.routeIPCache.Range(func(key, value interface{}) bool {
+						if rc, ok := value.(routeResolved); ok && now.After(rc.expire) {
+							r.routeIPCache.Delete(key)
+						}
+						return true
+					})
+				}()
+			}
 		}
 	}
 
@@ -548,15 +589,16 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 	matched := r.doMatchDomain(domain)
 
 	// 当缓存唯一域名超过 10000 条时，直接重置清空。
-	// 这种“阈值粗暴清空”比维护 LRU 链表的代价小无数倍，且完美保留了读操作的无锁并发性能。
-	if atomic.AddInt32(&r.cacheCount, 1) == 10000 {
-		go func() {
-			r.domainCache.Range(func(key, value interface{}) bool {
-				r.domainCache.Delete(key)
-				return true
-			})
-			atomic.StoreInt32(&r.cacheCount, 0)
-		}()
+	// 使用 CAS 保证高并发穿透时不漏检，并保留读操作的无锁并发性能。
+	if atomic.AddInt32(&r.cacheCount, 1) >= 10000 {
+		if atomic.CompareAndSwapInt32(&r.cacheCount, 10000, 0) {
+			go func() {
+				r.domainCache.Range(func(key, value interface{}) bool {
+					r.domainCache.Delete(key)
+					return true
+				})
+			}()
+		}
 	}
 
 	r.domainCache.Store(domain, matched)
@@ -569,7 +611,12 @@ func (r *GeoRouter) ResetCacheAndStats() {
 		r.domainCache.Delete(key)
 		return true
 	})
+	r.routeIPCache.Range(func(key, value interface{}) bool {
+		r.routeIPCache.Delete(key)
+		return true
+	})
 	atomic.StoreInt32(&r.cacheCount, 0)
+	atomic.StoreInt32(&r.routeIPCacheCount, 0)
 	atomic.StoreInt64(&r.queryCount, 0)
 	atomic.StoreInt64(&r.cacheHitCount, 0)
 	zlog.Infof("%s [Router] ♻️ Route cache and query stats manually reset", TAG)

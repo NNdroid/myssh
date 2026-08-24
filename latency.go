@@ -82,20 +82,12 @@ func testSingleNodeTrueLatency(cfg ProxyConfig, targetUrl string, timeout time.D
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// 1. 建立受 VpnService.protect 保护的底层隧道
-	// dialTunnel 内部使用 dialProtected，确保绕过 Android VPN 虚拟网卡
-	conn, err := dialTunnel(ctx, cfg)
+	// 1. 建立受保护的底层隧道并完成 SSH 握手
+	sshClient, conn, err := DialNode(ctx, cfg, false)
 	if err != nil {
-		return fmt.Errorf("tunnel err: %v", err)
+		return err
 	}
-	// 确保在任何情况下最终都会关闭底层连接
 	defer conn.Close()
-
-	// 2. 执行 SSH 握手 (复用 proxy.go 中的 dialSSH 辅助函数)
-	sshClient, err := dialSSH(ctx, conn, cfg, false) // 修改这里，启用指纹校验，与实际 VPN 逻辑一致
-	if err != nil {
-		return fmt.Errorf("ssh err: %v", err)
-	}
 	defer sshClient.Close()
 
 	// 4. 解析测试网页的域名

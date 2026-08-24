@@ -12,6 +12,7 @@ require (
 	github.com/refraction-networking/utls v1.8.2
 	github.com/stretchr/testify v1.11.1
 	github.com/txthinking/socks5 v0.0.0-20260601051520-339b044ab0eb
+	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/mobile v0.0.0-20260611195102-4dd8f1dbf5d2

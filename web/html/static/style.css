@@ -337,3 +337,14 @@ input:checked + .slider:before { transform: translateX(20px); }
 }
 .node-actions { display: flex; gap: 8px; }
 .node-actions .btn { padding: 8px; min-height: auto; border-radius: 10px; }
+.node-item.running { border-color: var(--success); background: rgba(48, 209, 88, 0.08); box-shadow: 0 0 15px rgba(48, 209, 88, 0.25); }
+.node-running-badge {
+    font-size: 0.7rem; background: var(--success); color: #fff;
+    padding: 2px 8px; border-radius: 8px; font-weight: 600; letter-spacing: 0.5px;
+    display: inline-flex; align-items: center; gap: 4px;
+}
+.node-running-badge::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%; background: #fff;
+    animation: pulseDot 1.2s ease-in-out infinite;
+}
+@keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }

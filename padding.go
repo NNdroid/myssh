@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"io"
+	mrand "math/rand/v2"
 	"net"
 	"sync"
 	"time"
@@ -24,11 +25,14 @@ func init() {
 	rand.Read(paddingGarbage[:])
 }
 
-// 快速获取随机数
+// 快速获取随机数。
+//
+// 填充长度只是流量混淆用的随机量，并非密钥/令牌，不需要密码学安全随机数。
+// 原本每次调用都走 crypto/rand.Read（一次系统调用），在高速下载、按 1MB 分块写入时
+// 会产生大量 syscall 开销。改用 math/rand/v2 的全局源（并发安全），吞吐与延迟显著改善，
+// 同时保持填充长度的不可预测性（足以对抗基于长度的流量分析）。
 func fastRand(max int) int {
-	var b [1]byte
-	rand.Read(b[:])
-	return int(b[0]) % max
+	return mrand.IntN(max)
 }
 
 // calculatePadding 智能动态填充算法

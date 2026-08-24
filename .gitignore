@@ -33,3 +33,5 @@ go.work.sum
 
 bin/
 libs/
+.workbuddy/
+.codebuddy/
