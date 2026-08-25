@@ -39,8 +39,9 @@ import (
 //	- tunnel  : 固定标记标签，解析时用于定位 DOMAIN 边界
 //	- DOMAIN  : 用户委托给隧道服务端的权威域名
 //
-// 服务端在应答里用相同的记录类型（TXT/NULL/CNAME/A）把「服务端->客户端」数据
-// 回传（TXT 用 base32，NULL 用裸字节，CNAME 用首标签，A 仅 4 字节）。
+// 服务端在应答里用相同的记录类型（TXT/NULL/CNAME/A/AAAA/MX/SRV/NS）把「服务端->客户端」数据
+// 回传（TXT 用 base32 分段；NULL 用裸字节；CNAME/A 用首标签/4 字节；AAAA 用 16 字节；
+// MX/SRV/NS 用目标名首标签，均为 base32，容量小但利于抗审查混淆）。
 //
 // ⚠️ 部署前提：用户必须在自己的权威 DNS 上把 <DOMAIN> 委托给本文件实现的
 // DNSTunnelServer（或等价实现）。仅客户端无法构成完整隧道。
@@ -75,8 +76,16 @@ func dnsTypeToQType(t string) (uint16, error) {
 		return dns.TypeCNAME, nil
 	case "a":
 		return dns.TypeA, nil
+	case "aaaa":
+		return dns.TypeAAAA, nil
+	case "mx":
+		return dns.TypeMX, nil
+	case "srv":
+		return dns.TypeSRV, nil
+	case "ns":
+		return dns.TypeNS, nil
 	default:
-		return 0, fmt.Errorf("unsupported dns tunnel type: %q (want txt/null/cname/a)", t)
+		return 0, fmt.Errorf("unsupported dns tunnel type: %q (want txt/null/cname/a/aaaa/mx/srv/ns)", t)
 	}
 }
 
@@ -175,6 +184,18 @@ func makeAnswer(qname string, qtype uint16, data []byte, domain string) dns.RR {
 			ip = net.IP(append([]byte(nil), data[:4]...)).To4()
 		}
 		return &dns.A{Hdr: hdr, A: ip}
+	case dns.TypeAAAA:
+		ip := net.IPv6zero.To16()
+		if len(data) >= 16 {
+			ip = net.IP(append([]byte(nil), data[:16]...)).To16()
+		}
+		return &dns.AAAA{Hdr: hdr, AAAA: ip}
+	case dns.TypeMX:
+		return &dns.MX{Hdr: hdr, Preference: 0, Mx: encodeTunnelLabel(data, domain)}
+	case dns.TypeSRV:
+		return &dns.SRV{Hdr: hdr, Priority: 0, Weight: 0, Port: 0, Target: encodeTunnelLabel(data, domain)}
+	case dns.TypeNS:
+		return &dns.NS{Hdr: hdr, Ns: encodeTunnelLabel(data, domain)}
 	default:
 		return &dns.TXT{Hdr: hdr, Txt: splitTxt(dnsTunnelB32.EncodeToString(data))}
 	}
@@ -194,14 +215,49 @@ func extractAnswer(rr dns.RR) []byte {
 	case *dns.NULL:
 		return []byte(v.Data)
 	case *dns.CNAME:
-		labels := dns.SplitDomainName(v.Target)
-		if len(labels) > 0 {
-			if d, e := dnsTunnelB32.DecodeString(labels[0]); e == nil {
-				return d
-			}
-		}
+		return decodeTunnelLabel(v.Target)
 	case *dns.A:
+		// 仅当非全零地址才视为有效负载，否则空/短负载会被误解码为 4 个零字节污染流
+		if v.A.Equal(net.IPv4zero) {
+			return nil
+		}
 		return v.A.To4()
+	case *dns.AAAA:
+		// 同上：全零地址视为空负载，避免空/短负载污染流
+		if bytes.Equal(v.AAAA, net.IPv6zero) {
+			return nil
+		}
+		return v.AAAA.To16()
+	case *dns.MX:
+		return decodeTunnelLabel(v.Mx)
+	case *dns.SRV:
+		return decodeTunnelLabel(v.Target)
+	case *dns.NS:
+		return decodeTunnelLabel(v.Ns)
+	}
+	return nil
+}
+
+// encodeTunnelLabel 将隧道数据编码进 MX/SRV/NS/CNAME 等「域名型」应答记录的目标名。
+// 单标签上限 63 字符（约 39 字节），超出则截断并告警；空数据得到占位标签、解码时回退为空。
+func encodeTunnelLabel(data []byte, domain string) string {
+	b32s := dnsTunnelB32.EncodeToString(data)
+	if len(b32s) > 63 {
+		b32s = b32s[:63]
+		zlog.Warnf("%s [Tunnel-DNS-Server] ⚠️ DNS 隧道标签容量受限，数据被截断", TAG)
+	}
+	return b32s + "." + dnsTunnelMarker + "." + dns.Fqdn(domain)
+}
+
+// decodeTunnelLabel 从「域名型」应答记录的目标名中取出首标签并 base32 解码为隧道数据。
+// 空/非法标签返回 nil，表示本应答不含有效负载（不污染数据流）。
+func decodeTunnelLabel(name string) []byte {
+	labels := dns.SplitDomainName(name)
+	if len(labels) == 0 {
+		return nil
+	}
+	if d, e := dnsTunnelB32.DecodeString(labels[0]); e == nil {
+		return d
 	}
 	return nil
 }

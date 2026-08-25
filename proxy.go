@@ -31,8 +31,10 @@ var (
 	// 生命周期与守护进程管理
 	engineCancel context.CancelFunc
 
-	// 引擎上下文持有器：供短时直连拨号在 Stop 时及时取消，与重连 goroutine 的局部 ctx 解耦
-	engineCtxHolder atomic.Value
+	// 引擎上下文持有器：供短时直连拨号在 Stop 时及时取消，与重连 goroutine 的局部 ctx 解耦。
+	// 用 atomic.Pointer[context.Context] 而非 atomic.Value：后者要求所有 Store 的动态类型一致，
+	// 而 context.Background()(*emptyCtx) 与 WithCancel 结果(*cancelCtx) 类型不同会触发 inconsistent store panic。
+	engineCtxHolder atomic.Pointer[context.Context]
 
 	// 连接池与会话追踪管理
 	udpNatMap  sync.Map
@@ -42,12 +44,19 @@ var (
 	wg sync.WaitGroup
 )
 
+// init 保证 globalConfig 始终为非 nil 的零值，避免 startSshTProxy 未先调用
+// loadGlobalConfigFromJson 时，DNS 劫持/解析路径对 globalConfig.Load() 做 nil 解引用而 panic。
+// 改造前 globalConfig 是裸结构体（零值可用），此处还原该语义。
+func init() {
+	globalConfig.Store(&GlobalConfig{})
+}
+
 // ----- 隧道注册表机制 (策略模式) -----
 
 // currentEngineCtx 返回当前引擎上下文，供直连拨号在停止时及时取消；未启动时回退 Background。
 func currentEngineCtx() context.Context {
 	if v := engineCtxHolder.Load(); v != nil {
-		return v.(context.Context)
+		return *v
 	}
 	return context.Background()
 }
@@ -508,7 +517,7 @@ func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *ne
 
 // ----- 核心引擎调度 -----
 
-func WgWait() {
+func wgWait() {
 	zlog.Infof("%s [Core] Waiting for all background tasks to exit completely...", TAG)
 	wg.Wait()
 	zlog.Infof("%s [Core] ✅ All background tasks safely cleaned up, program can exit safely", TAG)
@@ -579,23 +588,26 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	}
 }
 
-// StartSshTProxy2 启动 AutoSSH 模式的代理引擎：初始化 DNS 服务、SOCKS5 服务，
+// startSshTProxy 启动 AutoSSH 模式的代理引擎：初始化 DNS 服务、SOCKS5 服务，
 // 并后台维护 SSH 隧道的自动重连。返回 0 表示启动成功，非 0 为各阶段错误码。
-func StartSshTProxy2(configJson string) int {
-	StopSshTProxy()
+func startSshTProxy(configJson string) int {
+	stopSshTProxy()
 
 	PrintAndroidUserInfo()
 
 	var cfg ProxyConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		zlog.Errorf("%s [Core] ❌ Failed to parse config JSON: %v", TAG, err)
+		emitError(-1, "config parse failed: "+err.Error())
+		emitState(StateError, err.Error())
 		return -1
 	}
 
 	var ctx context.Context
 	ctx, engineCancel = context.WithCancel(context.Background())
-	engineCtxHolder.Store(ctx)
+	engineCtxHolder.Store(&ctx)
 
+	emitState(StateStarting, "")
 	zlog.Infof("%s [Core] ==================== Starting proxy engine (AutoSSH mode) ====================", TAG)
 
 	// 初始化 DNS 服务
@@ -609,6 +621,8 @@ func StartSshTProxy2(configJson string) int {
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
 	if err != nil {
 		zlog.Errorf("%s [SOCKS5] ❌ Failed to create SOCKS5 server instance: %v", TAG, err)
+		emitError(-4, err.Error())
+		emitState(StateError, err.Error())
 		return -4
 	}
 
@@ -644,9 +658,13 @@ func StartSshTProxy2(configJson string) int {
 			}
 
 			zlog.Infof("%s [AutoSSH] 🔄 Attempting to establish tunnel and SSH connection...", TAG)
+			emitState(StateConnecting, cfg.SshAddr)
+			emitNodeEvent(cfg.SshAddr, NodeEventConnecting, "")
 			client, _, err := DialNode(ctx, cfg, false)
 			if err != nil {
 				zlog.Errorf("%s [AutoSSH] ❌ Connection failed: %v", TAG, err)
+				emitState(StateReconnecting, err.Error())
+				emitNodeEvent(cfg.SshAddr, NodeEventFailed, err.Error())
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -655,11 +673,14 @@ func StartSshTProxy2(configJson string) int {
 			sshClient = client
 			mu.Unlock()
 			zlog.Infof("%s [AutoSSH] ✅ SSH tunnel established successfully, global traffic taken over!", TAG)
+			emitState(StateConnected, cfg.SshAddr)
+			emitNodeEvent(cfg.SshAddr, NodeEventConnected, "")
 
 			go maintainKeepAlive(ctx, client)
 
 			err = client.Wait()
 			zlog.Warnf("%s [AutoSSH] ⚠️ Tunnel disconnected (%v), preparing to reconnect automatically...", TAG, err)
+			emitState(StateReconnecting, err.Error())
 
 			mu.Lock()
 			sshClient = nil
@@ -678,8 +699,8 @@ func StartSshTProxy2(configJson string) int {
 	return 0
 }
 
-// StopSshTProxy 停止代理引擎，并清理所有 SSH/代理连接、DNS 与 SOCKS5 资源。
-func StopSshTProxy() {
+// stopSshTProxy 停止代理引擎，并清理所有 SSH/代理连接、DNS 与 SOCKS5 资源。
+func stopSshTProxy() {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -687,9 +708,11 @@ func StopSshTProxy() {
 		engineCancel()
 		engineCancel = nil
 	}
-	engineCtxHolder.Store(context.Background())
+	b := context.Background()
+	engineCtxHolder.Store(&b)
 
 	zlog.Infof("%s [Core] Stopping resources...", TAG)
+	emitState(StateStopped, "")
 
 	if lds := localDnsServer.Load(); lds != nil {
 		lds.Stop()

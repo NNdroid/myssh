@@ -60,6 +60,12 @@ type Profile struct {
 	DnsTunnelDomain       string `json:"dnsTunnelDomain"`
 	DnsTunnelServers      string `json:"dnsTunnelServers"`
 	DnsTunnelType         string `json:"dnsTunnelType"`
+	KcpPassword           string `json:"kcpPassword"`
+	KcpCrypt              string `json:"kcpCrypt"`
+	KcpNoDelay            bool   `json:"kcpNoDelay"`
+	KcpDataShards         int    `json:"kcpDataShards"`
+	KcpParityShards       int    `json:"kcpParityShards"`
+	UdpCustomPayload      string `json:"udpCustomPayload"`
 	DnsOverride           bool   `json:"dnsOverride"`
 	RemoteDns             string `json:"remoteDns"`
 	LocalDns              string `json:"localDns"`
@@ -113,7 +119,10 @@ func InitDB(dbPath string) error {
 		dnsOverride BOOLEAN, remoteDns TEXT, localDns TEXT, 
 		routingOverride BOOLEAN, geositeDirect TEXT, geoipDirect TEXT,
 		totalTx INTEGER, totalRx INTEGER,
-		dnsTunnelDomain TEXT DEFAULT '', dnsTunnelServers TEXT DEFAULT '', dnsTunnelType TEXT DEFAULT ''
+		dnsTunnelDomain TEXT DEFAULT '', dnsTunnelServers TEXT DEFAULT '', dnsTunnelType TEXT DEFAULT '',
+		kcpPassword TEXT DEFAULT '', kcpCrypt TEXT DEFAULT 'aes', kcpNoDelay BOOLEAN DEFAULT 1,
+		kcpDataShards INTEGER DEFAULT 10, kcpParityShards INTEGER DEFAULT 3,
+		udpCustomPayload TEXT DEFAULT ''
 	);
 	CREATE TABLE IF NOT EXISTS settings (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -145,6 +154,12 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelDomain TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelServers TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelType TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN kcpPassword TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN kcpCrypt TEXT DEFAULT 'aes';",
+		"ALTER TABLE profiles ADD COLUMN kcpNoDelay BOOLEAN DEFAULT 1;",
+		"ALTER TABLE profiles ADD COLUMN kcpDataShards INTEGER DEFAULT 10;",
+		"ALTER TABLE profiles ADD COLUMN kcpParityShards INTEGER DEFAULT 3;",
+		"ALTER TABLE profiles ADD COLUMN udpCustomPayload TEXT DEFAULT '';",
 		"ALTER TABLE settings ADD COLUMN udpgw_addr TEXT DEFAULT '127.0.0.1:7300';",
 		"ALTER TABLE settings ADD COLUMN udpgw_version TEXT DEFAULT 'badvpn';",
 		"ALTER TABLE settings ADD COLUMN geosite_filepath TEXT DEFAULT 'geosite.dat';",
@@ -163,7 +178,7 @@ func GetProfiles() ([]Profile, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
-	rows, err := db.Query("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType FROM profiles")
+	rows, err := db.Query("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpNoDelay, kcpDataShards, kcpParityShards, udpCustomPayload FROM profiles")
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +187,7 @@ func GetProfiles() ([]Profile, error) {
 	var profiles []Profile
 	for rows.Next() {
 		var p Profile
-		if err := rows.Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpNoDelay, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPayload); err != nil {
 			return nil, err
 		}
 		profiles = append(profiles, p)
@@ -185,8 +200,8 @@ func GetProfile(id string) (*Profile, error) {
 	defer dbMu.Unlock()
 
 	var p Profile
-	err := db.QueryRow("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType FROM profiles WHERE id = ?", id).
-		Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType)
+	err := db.QueryRow("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpNoDelay, kcpDataShards, kcpParityShards, udpCustomPayload FROM profiles WHERE id = ?", id).
+		Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpNoDelay, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPayload)
 	if err != nil {
 		return nil, err
 	}
@@ -201,8 +216,8 @@ func AddProfile(p Profile) (string, error) {
 		p.ID = generateUUID()
 	}
 
-	_, err := db.Exec("INSERT INTO profiles (id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-		p.ID, p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.Type, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType)
+	_, err := db.Exec("INSERT INTO profiles (id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpNoDelay, kcpDataShards, kcpParityShards, udpCustomPayload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		p.ID, p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.Type, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpNoDelay, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPayload)
 	if err != nil {
 		return "", err
 	}
@@ -213,8 +228,8 @@ func UpdateProfile(id string, p Profile) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
-	_, err := db.Exec("UPDATE profiles SET name=?, sshAddr=?, user=?, pass=?, authType=?, privateKey=?, keyPass=?, tunnelType=?, proxyAddr=?, customHost=?, serverName=?, customPath=?, enableCustomPath=?, proxyAuthRequired=?, proxyAuthToken=?, proxyAuthUser=?, proxyAuthPass=?, httpPayload=?, type=?, udpgwVersion=?, udpgwAddr=?, disableStatusCheck=?, verifyFingerprint=?, serverFingerprint=?, verifyCertFingerprint=?, serverCertFingerprint=?, alpn=?, bindInterface=?, dnsOverride=?, remoteDns=?, localDns=?, routingOverride=?, geositeDirect=?, geoipDirect=?, totalTx=?, totalRx=?, dnsTunnelDomain=?, dnsTunnelServers=?, dnsTunnelType=? WHERE id=?",
-		p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.Type, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, id)
+	_, err := db.Exec("UPDATE profiles SET name=?, sshAddr=?, user=?, pass=?, authType=?, privateKey=?, keyPass=?, tunnelType=?, proxyAddr=?, customHost=?, serverName=?, customPath=?, enableCustomPath=?, proxyAuthRequired=?, proxyAuthToken=?, proxyAuthUser=?, proxyAuthPass=?, httpPayload=?, type=?, udpgwVersion=?, udpgwAddr=?, disableStatusCheck=?, verifyFingerprint=?, serverFingerprint=?, verifyCertFingerprint=?, serverCertFingerprint=?, alpn=?, bindInterface=?, dnsOverride=?, remoteDns=?, localDns=?, routingOverride=?, geositeDirect=?, geoipDirect=?, totalTx=?, totalRx=?, dnsTunnelDomain=?, dnsTunnelServers=?, dnsTunnelType=?, kcpPassword=?, kcpCrypt=?, kcpNoDelay=?, kcpDataShards=?, kcpParityShards=?, udpCustomPayload=? WHERE id=?",
+		p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.Type, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpNoDelay, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPayload, id)
 	return err
 }
 
@@ -326,6 +341,12 @@ func BuildProxyConfigJSON(profileID string) (string, error) {
 		DnsTunnelDomain:              p.DnsTunnelDomain,
 		DnsTunnelServers:             dnsServers,
 		DnsTunnelType:                p.DnsTunnelType,
+		KcpPassword:                  p.KcpPassword,
+		KcpCrypt:                     p.KcpCrypt,
+		KcpNoDelay:                   p.KcpNoDelay,
+		KcpDataShards:                p.KcpDataShards,
+		KcpParityShards:              p.KcpParityShards,
+		UdpCustomPayload:             p.UdpCustomPayload,
 	}
 
 	b, err := json.Marshal(config)

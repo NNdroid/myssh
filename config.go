@@ -38,6 +38,16 @@ type ProxyConfig struct {
 	DnsTunnelDomain  string   `json:"dns_tunnel_domain"`  // 委托给隧道服务端的权威域名，如 "tunnel.example.com"
 	DnsTunnelServers []string `json:"dns_tunnel_servers"` // 多个权威 DNS 服务端地址（故障转移），支持 udp(默认)/tcp:///tls:///dot://
 	DnsTunnelType    string   `json:"dns_tunnel_type"`    // 承载数据的记录类型：txt(默认)/null/cname/a
+
+	// KCP 隧道（SSH-over-KCP）相关配置
+	KcpPassword     string `json:"kcp_password"`      // KCP 密码 (用于 BlockCrypt 加密)
+	KcpCrypt        string `json:"kcp_crypt"`         // KCP 加密方式: none(默认)/aes/aes-128/chacha20/salsa20/sm4
+	KcpNoDelay      bool   `json:"kcp_nodelay"`       // 是否启用极速模式 (nodelay=1, interval=10ms, resend=2, nc=1)
+	KcpDataShards   int    `json:"kcp_data_shards"`   // FEC 数据分片数 (默认 10)
+	KcpParityShards int    `json:"kcp_parity_shards"` // FEC 校验分片数 (默认 3)
+
+	// UDP Custom 相关配置
+	UdpCustomPayload string `json:"udp_custom_payload"` // UDP Custom 自定义 Payload/Auth 标识
 }
 
 type GlobalConfig struct {
@@ -49,7 +59,7 @@ type GlobalConfig struct {
 	DirectIPTags    []string `json:"direct_ip_tags"`
 }
 
-func LoadGlobalConfigFromJson(configJson string) int {
+func loadGlobalConfigFromJson(configJson string) int {
 	var cfg GlobalConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		zlog.Errorf("%s [Config] ❌ Failed to parse global config JSON: %v\nInput JSON content: %s", TAG, err, configJson)

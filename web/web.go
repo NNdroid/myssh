@@ -413,7 +413,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 					globalConfigJson = string(b)
 				}
 			}
-			myssh.LoadGlobalConfigFromJson(globalConfigJson)
+			myssh.NewSshTProxy().LoadGlobalConfig(globalConfigJson)
 
 			proxyConfigJson, err := BuildProxyConfigJSON(req.NodeID)
 			if err != nil {
@@ -421,7 +421,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 				return
 			}
 
-			if myssh.StartSshTProxy2(proxyConfigJson) == 0 {
+			if myssh.NewSshTProxy().Start(proxyConfigJson) == 0 {
 				proxyRunning = true
 				proxyRunningNode = req.NodeID
 				c.JSON(http.StatusOK, gin.H{"message": "Proxy started"})
@@ -434,7 +434,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 			proxyMu.Lock()
 			defer proxyMu.Unlock()
 
-			myssh.StopSshTProxy()
+			myssh.NewSshTProxy().Stop()
 			proxyRunning = false
 			proxyRunningNode = ""
 			c.JSON(http.StatusOK, gin.H{"message": "Proxy stopped"})

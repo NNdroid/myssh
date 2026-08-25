@@ -3,6 +3,7 @@ package myssh
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -204,6 +205,284 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 		Protocol:   protocol,
 		IsVerified: verifyErr == nil,
 	}, nil
+}
+
+// GetSSHFingerprint 连接远程 SSH 服务并获取其主机密钥的 SHA256 指纹
+func GetSSHFingerprint(sshAddr string) (string, error) {
+	if strings.TrimSpace(sshAddr) == "" {
+		return "", fmt.Errorf("empty sshAddr")
+	}
+	addr := strings.TrimSpace(sshAddr)
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, "22")
+	}
+
+	var capturedKey ssh.PublicKey
+	config := &ssh.ClientConfig{
+		User: "probe",
+		Auth: []ssh.AuthMethod{
+			ssh.Password("probe"),
+		},
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			capturedKey = key
+			return nil
+		},
+		Timeout: 6 * time.Second,
+	}
+
+	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
+	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if sshConn != nil {
+		sshConn.Close()
+	}
+	_ = chans
+	_ = reqs
+
+	if capturedKey != nil {
+		return ssh.FingerprintSHA256(capturedKey), nil
+	}
+	return "", fmt.Errorf("failed to retrieve ssh host key fingerprint")
+}
+
+// GetTLSCertFingerprint 连接目标 TLS/HTTPS/WSS 端点并获取其对端证书的 SHA256 指纹 (格式: XX:XX:XX:...)
+func GetTLSCertFingerprint(target string, serverName string) (string, error) {
+	if strings.TrimSpace(target) == "" {
+		return "", fmt.Errorf("empty target")
+	}
+
+	addr := strings.TrimSpace(target)
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, "443")
+	}
+	host, _, _ := net.SplitHostPort(addr)
+
+	sni := strings.TrimSpace(serverName)
+	if sni == "" {
+		sni = host
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"h2", "http/1.1"},
+	}
+
+	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	peerCerts := conn.ConnectionState().PeerCertificates
+	if len(peerCerts) == 0 {
+		return "", fmt.Errorf("no certificate presented by server")
+	}
+
+	sha256Sum := sha256.Sum256(peerCerts[0].Raw)
+	var fpBuilder strings.Builder
+	for i, b := range sha256Sum {
+		if i > 0 {
+			fpBuilder.WriteString(":")
+		}
+		fmt.Fprintf(&fpBuilder, "%02X", b)
+	}
+
+	return fpBuilder.String(), nil
+}
+
+// SSHServerDetails 包含探测到的 SSH 服务端详细属性
+type SSHServerDetails struct {
+	Address           string `json:"address"`
+	Banner            string `json:"banner"`
+	KeyType           string `json:"key_type"`
+	FingerprintSHA256 string `json:"fingerprint_sha256"`
+	FingerprintMD5    string `json:"fingerprint_md5"`
+	LatencyMs         int64  `json:"latency_ms"`
+}
+
+// GetSSHServerDetailsJSON 查询 SSH 服务端完整详情并返回 JSON 字符串
+func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
+	if strings.TrimSpace(sshAddr) == "" {
+		return "", fmt.Errorf("empty sshAddr")
+	}
+	addr := strings.TrimSpace(sshAddr)
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, "22")
+	}
+
+	startTime := time.Now()
+	var capturedKey ssh.PublicKey
+	config := &ssh.ClientConfig{
+		User: "probe",
+		Auth: []ssh.AuthMethod{
+			ssh.Password("probe"),
+		},
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			capturedKey = key
+			return nil
+		},
+		Timeout: 6 * time.Second,
+	}
+
+	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
+	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	var serverVersion string
+	if sshConn != nil {
+		serverVersion = string(sshConn.ServerVersion())
+		sshConn.Close()
+	}
+	_ = chans
+	_ = reqs
+
+	if capturedKey == nil {
+		return "", fmt.Errorf("failed to retrieve ssh host key")
+	}
+
+	details := SSHServerDetails{
+		Address:           addr,
+		Banner:            serverVersion,
+		KeyType:           capturedKey.Type(),
+		FingerprintSHA256: ssh.FingerprintSHA256(capturedKey),
+		FingerprintMD5:    ssh.FingerprintLegacyMD5(capturedKey),
+		LatencyMs:         latencyMs,
+	}
+
+	data, err := json.Marshal(details)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// TLSCertDetails 包含探测到的 TLS 证书详细属性
+type TLSCertDetails struct {
+	Target             string   `json:"target"`
+	SNI                string   `json:"sni"`
+	Subject            string   `json:"subject"`
+	Issuer             string   `json:"issuer"`
+	NotBefore          int64    `json:"not_before"`
+	NotAfter           int64    `json:"not_after"`
+	DaysRemaining      int      `json:"days_remaining"`
+	IsExpired          bool     `json:"is_expired"`
+	DNSNames           []string `json:"dns_names"`
+	IPAddresses        []string `json:"ip_addresses"`
+	SignatureAlgorithm string   `json:"signature_algorithm"`
+	PublicKeyAlgorithm string   `json:"public_key_algorithm"`
+	FingerprintSHA256  string   `json:"fingerprint_sha256"`
+	TLSVersion         string   `json:"tls_version"`
+	NegotiatedProtocol string   `json:"negotiated_protocol"`
+	LatencyMs          int64    `json:"latency_ms"`
+}
+
+// GetTLSCertDetailsJSON 查询 TLS 证书完整详情并返回 JSON 字符串
+func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
+	if strings.TrimSpace(target) == "" {
+		return "", fmt.Errorf("empty target")
+	}
+
+	addr := strings.TrimSpace(target)
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, "443")
+	}
+	host, _, _ := net.SplitHostPort(addr)
+
+	sni := strings.TrimSpace(serverName)
+	if sni == "" {
+		sni = host
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"h2", "http/1.1"},
+	}
+
+	startTime := time.Now()
+	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	latencyMs := time.Since(startTime).Milliseconds()
+	connState := conn.ConnectionState()
+	peerCerts := connState.PeerCertificates
+	if len(peerCerts) == 0 {
+		return "", fmt.Errorf("no certificate presented by server")
+	}
+
+	cert := peerCerts[0]
+	sha256Sum := sha256.Sum256(cert.Raw)
+	var fpBuilder strings.Builder
+	for i, b := range sha256Sum {
+		if i > 0 {
+			fpBuilder.WriteString(":")
+		}
+		fmt.Fprintf(&fpBuilder, "%02X", b)
+	}
+
+	var tlsVerStr string
+	switch connState.Version {
+	case tls.VersionTLS13:
+		tlsVerStr = "TLS 1.3"
+	case tls.VersionTLS12:
+		tlsVerStr = "TLS 1.2"
+	case tls.VersionTLS11:
+		tlsVerStr = "TLS 1.1"
+	case tls.VersionTLS10:
+		tlsVerStr = "TLS 1.0"
+	default:
+		tlsVerStr = fmt.Sprintf("0x%04X", connState.Version)
+	}
+
+	var ips []string
+	for _, ip := range cert.IPAddresses {
+		ips = append(ips, ip.String())
+	}
+
+	daysRemaining := int(time.Until(cert.NotAfter).Hours() / 24)
+	isExpired := time.Now().After(cert.NotAfter)
+
+	details := TLSCertDetails{
+		Target:             addr,
+		SNI:                sni,
+		Subject:            cert.Subject.String(),
+		Issuer:             cert.Issuer.String(),
+		NotBefore:          cert.NotBefore.Unix(),
+		NotAfter:           cert.NotAfter.Unix(),
+		DaysRemaining:      daysRemaining,
+		IsExpired:          isExpired,
+		DNSNames:           cert.DNSNames,
+		IPAddresses:        ips,
+		SignatureAlgorithm: cert.SignatureAlgorithm.String(),
+		PublicKeyAlgorithm: cert.PublicKeyAlgorithm.String(),
+		FingerprintSHA256:  fpBuilder.String(),
+		TLSVersion:         tlsVerStr,
+		NegotiatedProtocol: connState.NegotiatedProtocol,
+		LatencyMs:          latencyMs,
+	}
+
+	data, err := json.Marshal(details)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // ==========================================

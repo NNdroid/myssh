@@ -13,12 +13,12 @@ func TestLoadGlobalConfigFromJson(t *testing.T) {
 	validJson := "{\"local_dns_server\":\"1.1.1.1:53\",\"remote_dns_server\":\"8.8.8.8:53\",\"geosite_filepath\":\"test_geosite.dat\",\"geoip_filepath\":\"test_geoip.dat\"}"
 	invalidJson := "{\"local_dns_server\":\"1.1.1.1:53\","
 
-	assert.Equal(t, 0, LoadGlobalConfigFromJson(validJson), "Should successfully load valid JSON")
-	assert.Equal(t, -2, LoadGlobalConfigFromJson(invalidJson), "Should fail on invalid JSON")
+	assert.Equal(t, 0, loadGlobalConfigFromJson(validJson), "Should successfully load valid JSON")
+	assert.Equal(t, -2, loadGlobalConfigFromJson(invalidJson), "Should fail on invalid JSON")
 
 	emptyJson := "{}"
 	globalConfig.Store(&GlobalConfig{}) // Reset global state
-	assert.Equal(t, 0, LoadGlobalConfigFromJson(emptyJson), "Should successfully load empty JSON")
+	assert.Equal(t, 0, loadGlobalConfigFromJson(emptyJson), "Should successfully load empty JSON")
 
 	mu.Lock()
 	defer mu.Unlock()

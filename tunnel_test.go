@@ -37,6 +37,8 @@ func TestTunnelRegistry(t *testing.T) {
 		{"grpc", "tcp", false},
 		{"grpcc", "tcp", false},
 		{"masque", "custom", false},
+		{"kcp", "udp", false},
+		{"udp_custom", "udp", false},
 		{"nonexistent-proto", "", true},
 	}
 	for _, tt := range tests {

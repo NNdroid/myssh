@@ -269,7 +269,7 @@ func TestDNSTunnelConfigErrors(t *testing.T) {
 		},
 		{
 			name:    "unsupported type",
-			cfg:     ProxyConfig{DnsTunnelDomain: "tunnel.test.", DnsTunnelServers: []string{"127.0.0.1:53"}, DnsTunnelType: "mx"},
+			cfg:     ProxyConfig{DnsTunnelDomain: "tunnel.test.", DnsTunnelServers: []string{"127.0.0.1:53"}, DnsTunnelType: "soa"},
 			wantErr: true,
 		},
 		{

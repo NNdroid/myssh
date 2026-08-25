@@ -48,12 +48,12 @@ func main() {
 
 	// 3. 加载全局路由与 DNS 配置 (如果你的 JSON 包含 GlobalConfig)
 	// 如果配置文件中没有全局配置字段，解析失败会返回负数，这里仅做警告不中断
-	if loadRes := myssh.LoadGlobalConfigFromJson(configStr); loadRes != 0 {
+	if loadRes := myssh.NewSshTProxy().LoadGlobalConfig(configStr); loadRes != 0 {
 		fmt.Printf("[Main] ⚠️ 全局配置加载异常或未配置，返回值: %d\n", loadRes)
 	}
 
 	// 4. 启动 SSH 代理主引擎
-	if startRes := myssh.StartSshTProxy2(configStr); startRes != 0 {
+	if startRes := myssh.NewSshTProxy().Start(configStr); startRes != 0 {
 		fmt.Printf("[Main] ❌ SSH 代理引擎启动失败，错误码: %d\n", startRes)
 		os.Exit(1)
 	}
@@ -71,10 +71,10 @@ func main() {
 	fmt.Println("\n[Main] 🛑 接收到系统终止信号，开始清理资源...")
 
 	// 7. 触发安全的关闭流程
-	myssh.StopSshTProxy()
+	myssh.NewSshTProxy().Stop()
 
 	// 8. 等待所有后台 goroutine 完成资源回收
-	myssh.WgWait()
+	myssh.NewSshTProxy().WgWait()
 
 	fmt.Println("[Main] 👋 资源已彻底清理，程序安全退出。")
 }

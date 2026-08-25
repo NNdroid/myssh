@@ -385,13 +385,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const isBase = tunnelType === 'base';
             const isMasque = tunnelType === 'masque';
             const isDns = tunnelType === 'dns' || tunnelType === 'vaydns';
+            const isKcp = tunnelType === 'kcp';
+            const isUdpCustom = tunnelType === 'udp_custom';
             const isWss = ['ws', 'wss'].includes(tunnelType);
             const isTls = ['tls', 'wss', 'h2', 'quic', 'xhttp', 'grpc', 'h3', 'wt', 'masque'].includes(tunnelType);
             const isCustomPathSupported = ['ws', 'wss', 'h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'xhttp', 'xhttpc'].includes(tunnelType);
             
             setVis('[data-visibility-key="proxyAddr"]', !isBase && !isDns);
+            setVis('[data-visibility-key="kcpFields"]', isKcp);
+            setVis('[data-visibility-key="udpCustomFields"]', isUdpCustom);
             setVis('[data-visibility-key="dnsTunnelFields"]', isDns);
-            setVis('[data-visibility-key="customHost"]', !isBase && !isDns && tunnelType !== 'tls' && tunnelType !== 'quic');
+            setVis('[data-visibility-key="customHost"]', !isBase && !isDns && !isKcp && !isUdpCustom && tunnelType !== 'tls' && tunnelType !== 'quic');
             setVis('[data-visibility-key="serverName"]', isTls);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 

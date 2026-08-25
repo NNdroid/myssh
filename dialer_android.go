@@ -72,7 +72,7 @@ func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
 					zlog.Debugf("[Protect-%d] ✅ Success: ProtectSocket(fd=%d) protected", reqID, fd)
 				}
 			} else {
-				zlog.Errorf("[Protect-%d] ⚠️ Severe Warning: getProtector() returned nil! VPN is not initialized, which will cause a traffic infinite loop!", reqID)
+				//zlog.Errorf("[Protect-%d] ⚠️ Severe Warning: getProtector() returned nil! VPN is not initialized, which will cause a traffic infinite loop!", reqID)
 			}
 		})
 
