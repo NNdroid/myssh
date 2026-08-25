@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -67,7 +68,7 @@ type LocalDnsServer struct {
 }
 
 var (
-	localDnsServer  *LocalDnsServer
+	localDnsServer  atomic.Pointer[LocalDnsServer]
 	dotSessionCache = tls.NewLRUClientSessionCache(64)
 )
 
@@ -83,7 +84,7 @@ func NewLocalDnsServer(udpgwAddr string, udpgwVersion string) *LocalDnsServer {
 		directUdpClient: &dns.Client{Net: "udp", Timeout: 5 * time.Second},
 	}
 	go l.cacheCleanupLoop()
-	localDnsServer = l
+	localDnsServer.Store(l)
 	return l
 }
 
@@ -100,7 +101,7 @@ func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshCli
 
 	if isDirect {
 		// 🟢 直连模式：无论是 TCP 还是 UDP，都直接使用标准库 Dial
-		rawConn, err = dialProtected(context.Background(), ProxyConfig{}, network, addr, 5*time.Second)
+		rawConn, err = dialProtected(currentEngineCtx(), ProxyConfig{}, network, addr, 5*time.Second)
 	} else {
 		if sshClient == nil {
 			return nil, fmt.Errorf("ssh client disconnected")
@@ -163,8 +164,8 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 	}
 
 	isDirect := false
-	if globalRouter != nil {
-		isDirect = globalRouter.MatchDomain(cleanDomain)
+	if gr := globalRouter.Load(); gr != nil {
+		isDirect = gr.MatchDomain(cleanDomain)
 	}
 
 	// 缓存快查
@@ -202,9 +203,9 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 		}
 		l.cacheMu.RUnlock()
 
-		serverUrl := globalConfig.RemoteDnsServer
+		serverUrl := globalConfig.Load().RemoteDnsServer
 		if isDirect {
-			serverUrl = globalConfig.LocalDnsServer
+			serverUrl = globalConfig.Load().LocalDnsServer
 			if serverUrl == "" {
 				serverUrl = "223.5.5.5:53"
 			}
@@ -703,16 +704,17 @@ func (l *LocalDnsServer) printDnsResponse(source, server, domainName, qtypeStr s
 // ==================== 全局适配接口 ====================
 
 func GetCachedIPs(domain string) []net.IP {
-	if localDnsServer == nil {
+	lds := localDnsServer.Load()
+	if lds == nil {
 		return nil
 	}
 	fqdn := dns.Fqdn(domain)
 	var ips []net.IP
-	localDnsServer.cacheMu.RLock()
-	defer localDnsServer.cacheMu.RUnlock()
+	lds.cacheMu.RLock()
+	defer lds.cacheMu.RUnlock()
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		key := fqdn + "-" + strconv.Itoa(int(qt))
-		if entry, ok := localDnsServer.cache[key]; ok && time.Now().Before(entry.expiresAt) {
+		if entry, ok := lds.cache[key]; ok && time.Now().Before(entry.expiresAt) {
 			for _, ans := range entry.msg.Answer {
 				if a, ok := ans.(*dns.A); ok {
 					ips = append(ips, a.A)
@@ -727,12 +729,13 @@ func GetCachedIPs(domain string) []net.IP {
 }
 
 func ResolveOne(host string, qType uint16) net.IP {
-	if localDnsServer == nil {
+	lds := localDnsServer.Load()
+	if lds == nil {
 		return nil
 	}
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(host), qType)
-	reply, err := localDnsServer.HandleDnsRequest(msg)
+	reply, err := lds.HandleDnsRequest(msg)
 	if err == nil && reply != nil && len(reply.Answer) > 0 {
 		for _, ans := range reply.Answer {
 			if qType == dns.TypeAAAA {

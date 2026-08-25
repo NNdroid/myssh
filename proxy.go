@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -24,12 +25,14 @@ var (
 	sshClient    *ssh.Client
 	socksServer  *socks5.Server
 	mu           sync.Mutex
-	globalConfig GlobalConfig
-	globalRouter *GeoRouter
+	globalConfig atomic.Pointer[GlobalConfig]
+	globalRouter atomic.Pointer[GeoRouter]
 
 	// 生命周期与守护进程管理
-	engineCtx    context.Context
 	engineCancel context.CancelFunc
+
+	// 引擎上下文持有器：供短时直连拨号在 Stop 时及时取消，与重连 goroutine 的局部 ctx 解耦
+	engineCtxHolder atomic.Value
 
 	// 连接池与会话追踪管理
 	udpNatMap  sync.Map
@@ -40,6 +43,14 @@ var (
 )
 
 // ----- 隧道注册表机制 (策略模式) -----
+
+// currentEngineCtx 返回当前引擎上下文，供直连拨号在停止时及时取消；未启动时回退 Background。
+func currentEngineCtx() context.Context {
+	if v := engineCtxHolder.Load(); v != nil {
+		return v.(context.Context)
+	}
+	return context.Background()
+}
 
 type TunnelHandler func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
 
@@ -129,8 +140,8 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		var isDirect bool
 		var dialHost string
-		if globalRouter != nil {
-			res := globalRouter.ShouldDirect(host)
+		if gr := globalRouter.Load(); gr != nil {
+			res := gr.ShouldDirect(host)
 			isDirect = res.IsDirect
 			dialHost = res.DialHost
 		} else {
@@ -143,7 +154,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		if isDirect {
 			dialTarget := net.JoinHostPort(dialHost, port)
-			remote, dialErr = dialProtected(context.Background(), ProxyConfig{}, "tcp", dialTarget, 5*time.Second)
+			remote, dialErr = dialProtected(currentEngineCtx(), ProxyConfig{}, "tcp", dialTarget, 5*time.Second)
 		} else {
 			remote, dialErr = client.Dial("tcp", target)
 		}
@@ -236,8 +247,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 
 	// 劫持 DNS
 	if dstPort == 53 {
-		isConfiguredDNS := strings.Contains(globalConfig.LocalDnsServer, targetAddrStr) ||
-			strings.Contains(globalConfig.RemoteDnsServer, targetAddrStr)
+		gc := globalConfig.Load()
+		isConfiguredDNS := strings.Contains(gc.LocalDnsServer, targetAddrStr) ||
+			strings.Contains(gc.RemoteDnsServer, targetAddrStr)
 
 		if !isConfiguredDNS {
 			if Debug {
@@ -249,8 +261,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				return err
 			}
 
-			if localDnsServer != nil {
-				replyMsg, err := localDnsServer.HandleDnsRequest(reqMsg)
+			if lds := localDnsServer.Load(); lds != nil {
+				replyMsg, err := lds.HandleDnsRequest(reqMsg)
 				if err == nil && replyMsg != nil {
 					replyData, _ := replyMsg.Pack()
 					h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
@@ -268,8 +280,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	var isDirect bool
 	var dialHost string
 
-	if globalRouter != nil {
-		res := globalRouter.ShouldDirect(targetHost)
+	if gr := globalRouter.Load(); gr != nil {
+		res := gr.ShouldDirect(targetHost)
 		isDirect = res.IsDirect
 		dialHost = res.DialHost
 	} else {
@@ -296,7 +308,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Debugf("%s [ROUTER-Direct] ♻️ Reusing local direct session -> %s", TAG, sessionKey)
 			}
 		} else {
-			rawConn, err := dialProtected(context.Background(), ProxyConfig{}, "udp", directTarget, 5*time.Second)
+			rawConn, err := dialProtected(currentEngineCtx(), ProxyConfig{}, "udp", directTarget, 5*time.Second)
 			if err != nil {
 				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP: %v", TAG, err)
 				return err
@@ -582,7 +594,7 @@ func StartSshTProxy2(configJson string) int {
 
 	var ctx context.Context
 	ctx, engineCancel = context.WithCancel(context.Background())
-	engineCtx = ctx
+	engineCtxHolder.Store(ctx)
 
 	zlog.Infof("%s [Core] ==================== Starting proxy engine (AutoSSH mode) ====================", TAG)
 
@@ -590,8 +602,8 @@ func StartSshTProxy2(configJson string) int {
 	NewLocalDnsServer(cfg.UdpgwAddr, cfg.UdpgwVersion)
 
 	// 启动本地 DNS 监听
-	if localDnsServer != nil {
-		localDnsServer.Start(cfg.DnsAddr)
+	if lds := localDnsServer.Load(); lds != nil {
+		lds.Start(cfg.DnsAddr)
 	}
 
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
@@ -625,14 +637,14 @@ func StartSshTProxy2(configJson string) int {
 
 		for {
 			select {
-			case <-engineCtx.Done():
+			case <-ctx.Done():
 				zlog.Infof("%s [AutoSSH] Received global stop signal, daemon exiting", TAG)
 				return
 			default:
 			}
 
 			zlog.Infof("%s [AutoSSH] 🔄 Attempting to establish tunnel and SSH connection...", TAG)
-			client, _, err := DialNode(engineCtx, cfg, false)
+			client, _, err := DialNode(ctx, cfg, false)
 			if err != nil {
 				zlog.Errorf("%s [AutoSSH] ❌ Connection failed: %v", TAG, err)
 				time.Sleep(3 * time.Second)
@@ -644,7 +656,7 @@ func StartSshTProxy2(configJson string) int {
 			mu.Unlock()
 			zlog.Infof("%s [AutoSSH] ✅ SSH tunnel established successfully, global traffic taken over!", TAG)
 
-			go maintainKeepAlive(engineCtx, client)
+			go maintainKeepAlive(ctx, client)
 
 			err = client.Wait()
 			zlog.Warnf("%s [AutoSSH] ⚠️ Tunnel disconnected (%v), preparing to reconnect automatically...", TAG, err)
@@ -656,7 +668,7 @@ func StartSshTProxy2(configJson string) int {
 			killActiveProxyConnections()
 
 			select {
-			case <-engineCtx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(2 * time.Second):
 			}
@@ -675,13 +687,14 @@ func StopSshTProxy() {
 		engineCancel()
 		engineCancel = nil
 	}
+	engineCtxHolder.Store(context.Background())
 
 	zlog.Infof("%s [Core] Stopping resources...", TAG)
 
-	if localDnsServer != nil {
-		localDnsServer.Stop()
-		localDnsServer = nil
+	if lds := localDnsServer.Load(); lds != nil {
+		lds.Stop()
 	}
+	localDnsServer.Store(nil)
 
 	if socksServer != nil {
 		socksServer.Shutdown()
@@ -749,14 +762,14 @@ func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (
 			fpMD5 := ssh.FingerprintLegacyMD5(key)
 			algo := key.Type()
 			pubKey := string(ssh.MarshalAuthorizedKey(key))
-			zlog.Warnf("%s [SSH-Handshake] ==== SSH Host Key Info ====", TAG)
-			zlog.Warnf("%s [SSH-Handshake] Host: %s", TAG, hostname)
-			zlog.Warnf("%s [SSH-Handshake] Remote: %s", TAG, remote.String())
-			zlog.Warnf("%s [SSH-Handshake] Algorithm: %s", TAG, algo)
-			zlog.Warnf("%s [SSH-Handshake] Fingerprint (SHA256): %s", TAG, fpSHA256)
-			zlog.Warnf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
-			zlog.Warnf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
-			zlog.Warnf("%s [SSH-Handshake] ===========================", TAG)
+			zlog.Debugf("%s [SSH-Handshake] ==== SSH Host Key Info ====", TAG)
+			zlog.Debugf("%s [SSH-Handshake] Host: %s", TAG, hostname)
+			zlog.Debugf("%s [SSH-Handshake] Remote: %s", TAG, remote.String())
+			zlog.Debugf("%s [SSH-Handshake] Algorithm: %s", TAG, algo)
+			zlog.Debugf("%s [SSH-Handshake] Fingerprint (SHA256): %s", TAG, fpSHA256)
+			zlog.Debugf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
+			zlog.Debugf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
+			zlog.Debugf("%s [SSH-Handshake] ===========================", TAG)
 			if cfg.VerifySSHFingerprint {
 				if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
 					return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)

@@ -449,7 +449,7 @@ func (tc *TrackedPacketConn) Close() error {
 
 // DialTracked 替代 net.DialTimeout
 func DialTracked(network, address string, timeout time.Duration, targetAddr string) (net.Conn, error) {
-	conn, err := dialProtected(context.Background(), ProxyConfig{}, network, address, timeout)
+	conn, err := dialProtected(currentEngineCtx(), ProxyConfig{}, network, address, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -656,8 +656,8 @@ func GetDomainActivityJSON() string {
 
 // ResetDomainStatsAndCache 供外部 (Android) 主动调用，清空路由缓存与域名活动排行榜数据
 func ResetDomainStatsAndCache() {
-	if globalRouter != nil {
-		globalRouter.ResetCacheAndStats()
+	if gr := globalRouter.Load(); gr != nil {
+		gr.ResetCacheAndStats()
 	}
 	globalDomainStatsManager.reset()
 	zlog.Infof("%s [Stats] ♻️ Domain stats ranking and route cache have been reset per UI request", TAG)
@@ -672,11 +672,12 @@ type RouterStats struct {
 
 // GetRouterStats 供外部 (Android) 主动调用，获取当前路由引擎的实时统计信息
 func GetRouterStats() *RouterStats {
-	if globalRouter == nil {
+	gr := globalRouter.Load()
+	if gr == nil {
 		return &RouterStats{}
 	}
 
-	total, hits := globalRouter.getStats()
+	total, hits := gr.getStats()
 	var rate float64
 	if total > 0 {
 		rate = float64(hits) / float64(total) * 100.0

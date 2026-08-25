@@ -17,15 +17,15 @@ func TestLoadGlobalConfigFromJson(t *testing.T) {
 	assert.Equal(t, -2, LoadGlobalConfigFromJson(invalidJson), "Should fail on invalid JSON")
 
 	emptyJson := "{}"
-	globalConfig = GlobalConfig{} // Reset global state
+	globalConfig.Store(&GlobalConfig{}) // Reset global state
 	assert.Equal(t, 0, LoadGlobalConfigFromJson(emptyJson), "Should successfully load empty JSON")
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, "223.5.5.5:53", globalConfig.LocalDnsServer, "Should set default LocalDnsServer")
-	assert.Equal(t, "8.8.8.8:53", globalConfig.RemoteDnsServer, "Should set default RemoteDnsServer")
-	assert.Equal(t, "geosite.dat", globalConfig.GeoSiteFilePath, "Should set default GeoSiteFilePath")
-	assert.Equal(t, "geoip.dat", globalConfig.GeoIPFilePath, "Should set default GeoIPFilePath")
+	assert.Equal(t, "223.5.5.5:53", globalConfig.Load().LocalDnsServer, "Should set default LocalDnsServer")
+	assert.Equal(t, "8.8.8.8:53", globalConfig.Load().RemoteDnsServer, "Should set default RemoteDnsServer")
+	assert.Equal(t, "geosite.dat", globalConfig.Load().GeoSiteFilePath, "Should set default GeoSiteFilePath")
+	assert.Equal(t, "geoip.dat", globalConfig.Load().GeoIPFilePath, "Should set default GeoIPFilePath")
 }
 
 func initLoggerIfNeed() {

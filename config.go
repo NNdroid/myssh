@@ -50,11 +50,12 @@ type GlobalConfig struct {
 }
 
 func LoadGlobalConfigFromJson(configJson string) int {
-	if err := json.Unmarshal([]byte(configJson), &globalConfig); err != nil {
+	var cfg GlobalConfig
+	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		zlog.Errorf("%s [Config] ❌ Failed to parse global config JSON: %v\nInput JSON content: %s", TAG, err, configJson)
 		return -2
 	}
-	return loadGlobalConfig(globalConfig)
+	return loadGlobalConfig(cfg)
 }
 
 func loadGlobalConfig(cfg GlobalConfig) int {
@@ -76,10 +77,9 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 
 	zlog.Infof("%s [Config] ✅ Global config applied: LocalDNS=[%s], RemoteDNS=[%s]", TAG, cfg.LocalDnsServer, cfg.RemoteDnsServer)
 
-	globalRouter = newGeoRouter()
-
+	gr := newGeoRouter()
 	if _, err := os.Stat(cfg.GeoSiteFilePath); err == nil {
-		if err := globalRouter.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
+		if err := gr.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoSite: %v", TAG, err)
 		} else {
 			zlog.Infof("%s [Config] ✅ GeoSite loaded successfully", TAG)
@@ -89,7 +89,7 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	}
 
 	if _, err := os.Stat(cfg.GeoIPFilePath); err == nil {
-		if err := globalRouter.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
+		if err := gr.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoIP: %v", TAG, err)
 		} else {
 			zlog.Infof("%s [Config] ✅ GeoIP loaded successfully", TAG)
@@ -98,7 +98,8 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 		zlog.Warnf("%s [Config] ⚠️ GeoIP file not found (%s), direct IP routing disabled", TAG, cfg.GeoIPFilePath)
 	}
 
-	globalConfig = cfg
+	globalRouter.Store(gr)
+	globalConfig.Store(&cfg)
 
 	return 0
 }

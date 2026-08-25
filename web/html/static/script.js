@@ -45,6 +45,46 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // --- Theme Management (Auto / Light / Dark) ---
+    const theme = {
+        get: () => localStorage.getItem('theme') || 'auto',
+        set: (mode) => {
+            localStorage.setItem('theme', mode);
+            theme.apply(mode);
+        },
+        apply: (mode) => {
+            if (mode === 'light' || mode === 'dark') {
+                document.documentElement.setAttribute('data-theme', mode);
+            } else {
+                // Auto mode: remove data-theme attribute so CSS @media (prefers-color-scheme) kicks in naturally
+                document.documentElement.removeAttribute('data-theme');
+            }
+            const selector = el('theme-selector');
+            if (selector && selector.value !== mode) {
+                selector.value = mode;
+            }
+        },
+        init: () => {
+            const saved = theme.get();
+            theme.apply(saved);
+
+            const selector = el('theme-selector');
+            if (selector) {
+                selector.value = saved;
+                selector.addEventListener('change', (e) => theme.set(e.target.value));
+            }
+
+            // 监听系统深浅色偏好动态变化
+            if (window.matchMedia) {
+                window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+                    if (theme.get() === 'auto') {
+                        theme.apply('auto');
+                    }
+                });
+            }
+        }
+    };
+
     // --- Toast System ---
     const showToast = (message, type = 'info') => {
         const container = document.getElementById('toast-container');
@@ -149,157 +189,179 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Render Functions ---
     const render = {
         status: () => {
-            const st = state.status;
-            const { running, running_node, top_domains } = st;
+            const ind = el('status-indicator');
+            const txt = el('status-text');
+            const nodeTxt = el('status-node');
+            const startBtn = el('start-btn');
+            const stopBtn = el('stop-btn');
 
-            // --- 基础状态 ---
-            el('status-indicator').classList.toggle('active', running);
-            el('status-text').textContent = running ? i18n.t('status_connected') : i18n.t('status_disconnected');
-            const runningNode = state.nodes.find(n => n.id === running_node);
-            el('status-node').textContent = runningNode ? `${i18n.t('status_node_prefix')}: ${runningNode.name}` : '-';
-            el('start-btn').style.display = running ? 'none' : 'block';
-            el('stop-btn').style.display = running ? 'block' : 'none';
-
-            // --- 系统资源 & 流量（智能单位）---
-            if (el('sysCpu')) el('sysCpu').textContent = st.sys_cpu || '0.0%';
-            if (el('sysMem')) el('sysMem').textContent = st.sys_mem || '0/0 MB';
-            if (el('sysGoroutine')) el('sysGoroutine').textContent = st.sys_goroutine || '0';
-
-            if (el('trafRateTx')) el('trafRateTx').textContent = formatBytesSmart(st.tx_rate || 0, true);
-            if (el('trafRateRx')) el('trafRateRx').textContent = formatBytesSmart(st.rx_rate || 0, true);
-            if (el('trafTotalTx')) el('trafTotalTx').textContent = formatBytesSmart(st.tx_total || 0);
-            if (el('trafTotalRx')) el('trafTotalRx').textContent = formatBytesSmart(st.rx_total || 0);
-            if (el('trafConnsActive')) el('trafConnsActive').textContent = `${st.active_conns || 0} / ${st.total_conns || 0}`;
-
-            // --- 热门域名（进度条按最繁忙域名横向比较）---
-            const domainListEl = el('domainList');
-            if (domainListEl) {
-                domainListEl.innerHTML = '';
-                if (!top_domains || top_domains.length === 0) {
-                    domainListEl.innerHTML = `<li class="empty-state">${i18n.t('text_no_domains') || i18n.t('text_no_nodes')}</li>`;
-                } else {
-                    const maxRate = Math.max(1, ...top_domains.map(d => (d.tx_rate || 0) + (d.rx_rate || 0)));
-                    top_domains.forEach(d => {
-                        const li = document.createElement('li');
-                        const tx = formatBytesSmart(d.tx_rate || 0, true);
-                        const rx = formatBytesSmart(d.rx_rate || 0, true);
-                        const txPct = (d.tx_rate || 0) / maxRate * 100;
-                        const rxPct = (d.rx_rate || 0) / maxRate * 100;
-                        li.innerHTML = `
-                            <div style="display:flex; justify-content:space-between; width:100%; margin-bottom: 4px;">
-                                <span class="domain-name" style="font-weight: 500;">${d.domain}</span>
-                                <span class="domain-rates" style="font-size: 0.85em; opacity: 0.8;">
-                                    <span style="color: var(--accent-blue);">↑${tx}</span> / <span style="color: var(--danger);">↓${rx}</span>
-                                </span>
-                            </div>
-                            <div class="progress-bar" style="width:100%; background:rgba(255,255,255,0.1); height:4px; border-radius:2px; overflow:hidden; display:flex;">
-                                <div style="background:var(--accent-blue); width:${txPct}%;"></div>
-                                <div style="background:var(--danger); width:${rxPct}%;"></div>
-                            </div>
-                        `;
-                        domainListEl.appendChild(li);
-                    });
-                }
+            if (state.status.running) {
+                ind?.classList.add('connected');
+                if (txt) txt.textContent = i18n.t('status_connected');
+                const runningNode = state.nodes.find(n => n.id === state.status.running_node);
+                if (nodeTxt) nodeTxt.textContent = runningNode ? `${i18n.t('status_node_prefix')}: ${runningNode.name}` : '-';
+                if (startBtn) startBtn.style.display = 'none';
+                if (stopBtn) stopBtn.style.display = 'inline-flex';
+            } else {
+                ind?.classList.remove('connected');
+                if (txt) txt.textContent = i18n.t('status_disconnected');
+                if (nodeTxt) nodeTxt.textContent = '-';
+                if (startBtn) startBtn.style.display = 'inline-flex';
+                if (stopBtn) stopBtn.style.display = 'none';
             }
         },
         nodes: () => {
             const list = el('node-list');
+            if (!list) return;
             list.innerHTML = '';
-            if (!Array.isArray(state.nodes) || state.nodes.length === 0) {
-                list.innerHTML = `<p style="text-align:center; color: #aaa;">${i18n.t('text_no_nodes')}</p>`;
+            if (!state.nodes || state.nodes.length === 0) {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.style.gridColumn = '1/-1';
+                emptyDiv.style.textAlign = 'center';
+                emptyDiv.style.padding = '40px 0';
+                emptyDiv.style.color = 'var(--text-muted)';
+                emptyDiv.textContent = i18n.t('text_no_nodes');
+                list.appendChild(emptyDiv);
                 return;
             }
-            const runningId = state.status.running_node;
+
             state.nodes.forEach(node => {
-                const item = document.createElement('div');
-                item.className = 'node-item';
-                item.dataset.id = node.id;
-                if (state.selectedNodeId === node.id) {
-                    item.classList.add('selected');
+                const isRunning = state.status.running && state.status.running_node === node.id;
+                const isSelected = state.selectedNodeId === node.id;
+
+                const nodeCard = document.createElement('div');
+                nodeCard.className = `card node-item ${isRunning ? 'running' : ''} ${isSelected ? 'selected' : ''}`;
+                nodeCard.dataset.id = node.id;
+
+                const nodeHeader = document.createElement('div');
+                nodeHeader.className = 'node-header';
+
+                const nodeTitle = document.createElement('h3');
+                nodeTitle.className = 'node-title';
+                nodeTitle.textContent = node.name;
+
+                const badgesWrapper = document.createElement('div');
+                badgesWrapper.style.display = 'flex';
+                badgesWrapper.style.gap = '6px';
+
+                if (isRunning) {
+                    const runBadge = document.createElement('span');
+                    runBadge.className = 'badge running';
+                    runBadge.textContent = i18n.t('badge_running') || 'Running';
+                    badgesWrapper.appendChild(runBadge);
                 }
-                const isRunning = !!runningId && runningId === node.id;
-                if (isRunning) item.classList.add('running');
-                item.innerHTML = `
-                    <div class="node-item-info">
-                        <h4>${node.name} <span class="node-tag">${node.tunnelType || 'base'}</span>${isRunning ? `<span class="node-running-badge">${i18n.t('badge_running')}</span>` : ''}</h4>
-                        <p>${node.user}@${node.sshAddr}</p>
-                    </div>
-                    <div class="node-actions">
-                        ${!isRunning ? `<button class="btn btn-sm accent" data-action="start" data-id="${node.id}" title="${i18n.t('btn_start')}" style="display:inline-flex; align-items:center; gap:4px;">
-                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                            ${i18n.t('btn_start')}
-                        </button>` : ''}
-                        <button class="btn btn-sm" data-action="edit" data-id="${node.id}" title="${i18n.t('btn_edit')}" style="display:inline-flex; align-items:center; gap:4px;">
-                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                            ${i18n.t('btn_edit')}
-                        </button>
-                        <button class="btn btn-sm danger" data-action="delete" data-id="${node.id}" title="${i18n.t('btn_delete')}" style="display:inline-flex; align-items:center; gap:4px;">
-                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-                            ${i18n.t('btn_delete')}
-                        </button>
-                    </div>
-                `;
-                list.appendChild(item);
+
+                const typeBadge = document.createElement('span');
+                typeBadge.className = 'badge';
+                typeBadge.textContent = (node.tunnelType || 'BASE').toUpperCase();
+                badgesWrapper.appendChild(typeBadge);
+
+                nodeHeader.appendChild(nodeTitle);
+                nodeHeader.appendChild(badgesWrapper);
+
+                const infoAddr = document.createElement('div');
+                infoAddr.className = 'node-info-row';
+                const addrLabel = document.createElement('span');
+                addrLabel.textContent = i18n.t('label_ssh_addr');
+                const addrVal = document.createElement('span');
+                addrVal.textContent = node.sshAddr;
+                infoAddr.appendChild(addrLabel);
+                infoAddr.appendChild(addrVal);
+
+                const infoUser = document.createElement('div');
+                infoUser.className = 'node-info-row';
+                const userLabel = document.createElement('span');
+                userLabel.textContent = i18n.t('label_ssh_user');
+                const userVal = document.createElement('span');
+                userVal.textContent = node.user;
+                infoUser.appendChild(userLabel);
+                infoUser.appendChild(userVal);
+
+                const infoTraffic = document.createElement('div');
+                infoTraffic.className = 'node-info-row';
+                const trafLabel = document.createElement('span');
+                trafLabel.textContent = `${i18n.t('stat.total_tx')} / ${i18n.t('stat.total_rx')}`;
+                const trafVal = document.createElement('span');
+                trafVal.textContent = `↑${formatBytesSmart(node.totalTx || 0)} ↓${formatBytesSmart(node.totalRx || 0)}`;
+                infoTraffic.appendChild(trafLabel);
+                infoTraffic.appendChild(trafVal);
+
+                const actions = document.createElement('div');
+                actions.className = 'node-actions';
+
+                if (!isRunning) {
+                    const startBtn = document.createElement('button');
+                    startBtn.className = 'btn btn-sm accent';
+                    startBtn.dataset.action = 'start';
+                    startBtn.dataset.id = node.id;
+                    startBtn.textContent = i18n.t('btn_start') || 'Start';
+                    actions.appendChild(startBtn);
+                }
+
+                const editBtn = document.createElement('button');
+                editBtn.className = 'btn btn-sm';
+                editBtn.dataset.action = 'edit';
+                editBtn.dataset.id = node.id;
+                editBtn.textContent = i18n.t('title_edit_node');
+
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn btn-sm danger';
+                delBtn.dataset.action = 'delete';
+                delBtn.dataset.id = node.id;
+                delBtn.textContent = i18n.t('btn_delete');
+
+                actions.appendChild(editBtn);
+                actions.appendChild(delBtn);
+
+                nodeCard.appendChild(nodeHeader);
+                nodeCard.appendChild(infoAddr);
+                nodeCard.appendChild(infoUser);
+                nodeCard.appendChild(infoTraffic);
+                nodeCard.appendChild(actions);
+
+                list.appendChild(nodeCard);
             });
         },
-        logs: (isIncremental) => {
-            const logsEl = el('logs');
-            if (isIncremental) logsEl.textContent += state.logs.content;
-            else logsEl.textContent = state.logs.content;
-            logsEl.scrollTop = logsEl.scrollHeight;
+        settings: () => {
+            const form = el('settings-form');
+            if (!form) return;
+            for (const key in state.settings) {
+                const input = form.elements[key];
+                if (input) {
+                    if (Array.isArray(state.settings[key])) {
+                        input.value = state.settings[key].join(', ');
+                    } else {
+                        input.value = state.settings[key];
+                    }
+                }
+            }
         },
+        logs: (isIncremental = false) => {
+            const logPre = el('logs');
+            if (!logPre) return;
+            if (isIncremental) {
+                logPre.textContent += state.logs.content;
+            } else {
+                logPre.textContent = state.logs.content;
+            }
+            logPre.scrollTop = logPre.scrollHeight;
+        }
     };
 
-    // --- Modal Logic ---
-    
-// Custom async confirm replacing native confirm
-const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => {
-    return new Promise((resolve) => {
-        const overlay = el('ios-confirm-overlay');
-        if (!overlay) {
-            resolve(confirm(message));
-            return;
-        }
-        const titleEl = el('ios-confirm-title');
-        const msgEl = el('ios-confirm-message');
-        const btnCancel = el('ios-confirm-cancel');
-        const btnOk = el('ios-confirm-ok');
-
-        titleEl.textContent = title;
-        msgEl.textContent = message;
-        
-        btnCancel.textContent = i18n.t('btn_cancel') || 'Cancel';
-        btnOk.textContent = i18n.t('btn_confirm') || 'OK';
-
-        const close = (result) => {
-            overlay.classList.remove('active');
-            setTimeout(() => { overlay.style.display = 'none'; }, 300);
-            btnCancel.onclick = null;
-            btnOk.onclick = null;
-            resolve(result);
-        };
-
-        btnCancel.onclick = () => close(false);
-        btnOk.onclick = () => close(true);
-
-        overlay.style.display = 'flex';
-        void overlay.offsetWidth;
-        overlay.classList.add('active');
-    });
-};
-
+    // --- Modal Management ---
     const modal = {
         open: (node = null) => {
             const form = el('node-form');
             form.reset();
             state.currentNodeId = node ? node.id : null;
             el('modal-title').textContent = node ? i18n.t('title_edit_node') : i18n.t('title_add_node');
+
             if (node) {
                 for (const key in node) {
                     const input = form.elements[key];
                     if (input) {
-                        if (input.type === 'checkbox') input.checked = node[key];
-                        else input.value = node[key];
+                        if (input.type === 'checkbox') input.checked = !!node[key];
+                        else input.value = node[key] ?? '';
                     }
                 }
             }
@@ -311,7 +373,7 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
         close: () => {
             const nodeModal = el('node-modal');
             nodeModal.classList.remove('active');
-            setTimeout(() => { nodeModal.style.display = 'none'; }, 300);
+            setTimeout(() => { nodeModal.style.display = 'none'; }, 250);
         },
         updateVisibility: () => {
             const authType = el('authType').value;
@@ -360,6 +422,37 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
         }
     };
 
+    // --- iOS Confirm Helper ---
+    const asyncConfirm = (message) => {
+        return new Promise((resolve) => {
+            const overlay = el('ios-confirm-overlay');
+            const msgEl = el('ios-confirm-message');
+            const cancelBtn = el('ios-confirm-cancel');
+            const okBtn = el('ios-confirm-ok');
+
+            if (!overlay || !msgEl) {
+                resolve(confirm(message));
+                return;
+            }
+
+            msgEl.textContent = message;
+            overlay.classList.add('active');
+
+            const cleanup = (result) => {
+                overlay.classList.remove('active');
+                cancelBtn.removeEventListener('click', onCancel);
+                okBtn.removeEventListener('click', onOk);
+                resolve(result);
+            };
+
+            const onCancel = () => cleanup(false);
+            const onOk = () => cleanup(true);
+
+            cancelBtn.addEventListener('click', onCancel);
+            okBtn.addEventListener('click', onOk);
+        });
+    };
+
     // --- Event Handlers ---
     const handlers = {
         loginSubmit: async (e) => {
@@ -385,8 +478,9 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
         navigate: (e) => {
             const tab = e.target.closest('.nav-tab');
             if (tab) {
-                document.querySelectorAll('.panel-section, .nav-tab').forEach(el => el.classList.remove('active'));
-                el(tab.dataset.panel + '-panel').classList.add('active');
+                document.querySelectorAll('.panel-section, .nav-tab').forEach(item => item.classList.remove('active'));
+                const targetPanel = el(tab.dataset.panel + '-panel');
+                if (targetPanel) targetPanel.classList.add('active');
                 tab.classList.add('active');
             }
         },
@@ -413,7 +507,7 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
                 const nodeItem = e.target.closest('.node-item');
                 if (nodeItem) {
                     state.selectedNodeId = nodeItem.dataset.id;
-                    document.querySelectorAll('.node-item').forEach(el => el.classList.remove('selected'));
+                    document.querySelectorAll('.node-item').forEach(item => item.classList.remove('selected'));
                     nodeItem.classList.add('selected');
                 }
                 return;
@@ -421,7 +515,7 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
             const { action, id } = button.dataset;
             if (action === 'start') {
                 state.selectedNodeId = id;
-                document.querySelectorAll('.node-item').forEach(el => el.classList.remove('selected'));
+                document.querySelectorAll('.node-item').forEach(item => item.classList.remove('selected'));
                 e.target.closest('.node-item')?.classList.add('selected');
                 await handlers.startProxy();
             } else if (action === 'edit') {
@@ -447,105 +541,162 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
             const formData = new FormData(form);
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
-            if (nodeData.filterMode) nodeData.filterMode = parseInt(nodeData.filterMode, 10);
             
-            const res = state.currentNodeId ? await api.put(`/nodes/${state.currentNodeId}`, nodeData) : await api.post('/nodes', nodeData);
-            if (res.error) {
-                showToast(`${i18n.t('alert_save_failed')}: ${res.error}`, 'error');
+            let res;
+            if (state.currentNodeId) {
+                res = await api.put(`/nodes/${state.currentNodeId}`, nodeData);
             } else {
+                res = await api.post('/nodes', nodeData);
+            }
+
+            if (res.message) {
                 showToast(i18n.t('alert_save_success'), 'success');
                 modal.close();
                 await actions.fetchNodes();
-            }
-        },
-        clearLogs: async () => {
-            if (await asyncConfirm(i18n.t('alert_confirm_clear_log'))) {
-                const res = await api.post('/log-clear');
-                if (res.message) {
-                    state.logs.content = '';
-                    render.logs(false);
-                    showToast(i18n.t('alert_log_cleared'), 'success');
-                }
-            }
-        },
-        exportNodes: async () => {
-            const res = await fetch('/api/v1/nodes/export', { headers: getHeaders() });
-            if (!res.ok) return handleAuthError(res);
-            const blob = await res.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'myssh_profiles.json';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            window.URL.revokeObjectURL(url);
-        },
-        handleImport: async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const formData = new FormData();
-            formData.append('file', file);
-            const res = await fetch('/api/v1/nodes/import', { method: 'POST', headers: getHeaders(true), body: formData });
-            const data = await res.json();
-            if (res.ok) {
-                showToast(data.message, 'success');
-                await actions.fetchNodes();
             } else {
-                showToast(`${i18n.t('alert_import_failed')}: ${data.error}`, 'error');
-            }
-            e.target.value = '';
-        },
-        stopProxy: async () => {
-            const res = await api.post('/stop');
-            if (res.message) {
-                showToast(i18n.t('alert_stopped'), 'success');
-                await actions.fetchStatus();
-            } else {
-                showToast(`${i18n.t('alert_stop_failed')}: ${res.error}`, 'error');
+                showToast(`${i18n.t('alert_save_failed')}: ${res.error}`, 'error');
             }
         },
         startProxy: async () => {
             if (!state.selectedNodeId) {
-                showToast(i18n.t('alert_select_node_to_start'), 'error');
+                showToast(i18n.t('alert_select_node_to_start'), 'info');
+                return;
+            }
+            if (state.status.running) {
+                showToast(i18n.t('alert_already_running') || 'Proxy is already running', 'info');
                 return;
             }
             setControlsLocked(true);
+            showToast(i18n.t('alert_starting_proxy'), 'info');
             const res = await api.post('/start', { node_id: state.selectedNodeId });
             if (res.message) {
-                showToast(i18n.t('alert_starting_proxy'), 'info');
+                showToast(i18n.t('status_connected'), 'success');
                 await actions.fetchStatus();
-            } else if (res.error && /already running/i.test(res.error)) {
-                showToast(i18n.t('alert_already_running'), 'info');
-                await actions.fetchStatus();
+                state.logs.lastFetchFull = true;
+                await actions.fetchLogs();
             } else {
                 showToast(`${i18n.t('alert_start_failed')}: ${res.error}`, 'error');
             }
             setControlsLocked(false);
         },
+        stopProxy: async () => {
+            setControlsLocked(true);
+            const res = await api.post('/stop', {});
+            if (res.message) {
+                showToast(i18n.t('alert_stopped'), 'info');
+                await actions.fetchStatus();
+            } else {
+                showToast(`${i18n.t('alert_stop_failed')}: ${res.error}`, 'error');
+            }
+            setControlsLocked(false);
+        },
+        clearLogs: async () => {
+            if (await asyncConfirm(i18n.t('alert_confirm_clear_log'))) {
+                const res = await api.post('/clear-log', {});
+                if (res.message) {
+                    showToast(i18n.t('alert_log_cleared'), 'info');
+                    state.logs.content = '';
+                    render.logs(false);
+                } else {
+                    showToast(res.error, 'error');
+                }
+            }
+        },
+        exportNodes: async () => {
+            const res = await api.get('/nodes');
+            if (Array.isArray(res)) {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(res, null, 2));
+                const downloadAnchor = document.createElement('a');
+                downloadAnchor.setAttribute("href", dataStr);
+                downloadAnchor.setAttribute("download", `myssh_nodes_${new Date().toISOString().slice(0, 10)}.json`);
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                downloadAnchor.remove();
+            } else {
+                showToast(i18n.t('alert_export_failed') || 'Export failed', 'error');
+            }
+        },
+        handleImport: (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                try {
+                    const importedNodes = JSON.parse(event.target.result);
+                    if (!Array.isArray(importedNodes)) {
+                        showToast(i18n.t('alert_import_invalid_json'), 'error');
+                        return;
+                    }
+                    const res = await api.post('/nodes/import', importedNodes);
+                    if (res.message) {
+                        showToast(i18n.t('alert_import_success'), 'success');
+                        await actions.fetchNodes();
+                    } else {
+                        showToast(`${i18n.t('alert_import_failed')}: ${res.error}`, 'error');
+                    }
+                } catch (err) {
+                    showToast(`${i18n.t('alert_import_error')}: ${err.message}`, 'error');
+                }
+                e.target.value = '';
+            };
+            reader.readAsText(file);
+        }
     };
 
-    // --- Main Actions ---
+    // --- Actions ---
     const actions = {
-        fetchStatus: async () => {
-            const prevRunning = state.status.running_node;
-            state.status = await api.get('/dashboard-stats');
-            render.status();
-            // 仅当运行中节点变化时才重渲染节点列表，避免每 5s 重建 DOM
-            if (state.status.running_node !== prevRunning) render.nodes();
-        },
-        fetchNodes: async () => { 
-            const data = await api.get('/nodes');
-            state.nodes = Array.isArray(data) ? data : []; 
-            render.nodes(); 
-            render.status(); 
+        fetchNodes: async () => {
+            const res = await api.get('/nodes');
+            if (Array.isArray(res)) {
+                state.nodes = res;
+                render.nodes();
+            }
         },
         fetchSettings: async () => {
-            state.settings = await api.get('/settings');
-            const form = el('settings-form');
-            for (const key in state.settings) {
-                const input = form.elements[key];
-                if (input) input.value = Array.isArray(state.settings[key]) ? state.settings[key].join(',') : state.settings[key];
+            const res = await api.get('/settings');
+            if (res && !res.error) {
+                state.settings = res;
+                render.settings();
+            }
+        },
+        fetchStatus: async () => {
+            const res = await api.get('/status');
+            if (res && !res.error) {
+                state.status = res;
+                render.status();
+                if (res.metrics) {
+                    if (el('sysCpu')) el('sysCpu').textContent = `${(res.metrics.cpu_usage || 0).toFixed(1)}%`;
+                    if (el('sysMem')) el('sysMem').textContent = `${(res.metrics.memory_alloc || 0).toFixed(1)} / ${(res.metrics.memory_sys || 0).toFixed(1)} MB`;
+                    if (el('sysGoroutine')) el('sysGoroutine').textContent = res.metrics.goroutines || 0;
+                    if (el('trafRateTx')) el('trafRateTx').textContent = formatBytesSmart(res.metrics.bytes_sent_per_sec || 0, true);
+                    if (el('trafRateRx')) el('trafRateRx').textContent = formatBytesSmart(res.metrics.bytes_recv_per_sec || 0, true);
+                    if (el('trafTotalTx')) el('trafTotalTx').textContent = formatBytesSmart(res.metrics.total_bytes_sent || 0);
+                    if (el('trafTotalRx')) el('trafTotalRx').textContent = formatBytesSmart(res.metrics.total_bytes_recv || 0);
+                    if (el('trafConnsActive')) el('trafConnsActive').textContent = `${res.metrics.active_conns || 0} / ${res.metrics.total_conns || 0}`;
+
+                    const domainList = el('domainList');
+                    if (domainList) {
+                        domainList.innerHTML = '';
+                        if (res.metrics.top_domains && res.metrics.top_domains.length > 0) {
+                            res.metrics.top_domains.forEach(d => {
+                                const li = document.createElement('li');
+                                li.className = 'domain-item';
+                                const dSpan = document.createElement('span');
+                                dSpan.textContent = d.domain;
+                                const cSpan = document.createElement('span');
+                                cSpan.textContent = d.count;
+                                li.appendChild(dSpan);
+                                li.appendChild(cSpan);
+                                domainList.appendChild(li);
+                            });
+                        } else {
+                            const li = document.createElement('li');
+                            li.className = 'domain-item';
+                            li.textContent = i18n.t('text_no_domains') || 'No active domains';
+                            domainList.appendChild(li);
+                        }
+                    }
+                }
             }
         },
         fetchLogs: async () => {
@@ -560,6 +711,9 @@ const asyncConfirm = (message, title = i18n.t('title_confirm') || 'Confirm') => 
             state.logs.lastFetchFull = false;
         },
         init: async () => {
+            // 初始化主题
+            theme.init();
+
             try {
                 const res = await fetch('/static/locales.json');
                 translations = await res.json();
