@@ -9,12 +9,12 @@ import (
 	"time"
 )
 
-// TestTun2proxyUdpgwConn_WriteRead 验证 UdpgwConn 的读写封装/解封装逻辑
+// TestTun2proxyUdpgwConn_WriteRead  info  UdpgwConn  info / info
 func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
-	// 1. 模拟底层连接
+	// 1.  info
 	clientPipe, serverPipe := net.Pipe()
 
-	// 2. 模拟客户端 (UdpgwConn)
+	// 2.  info client (UdpgwConn)
 	targetIP := net.ParseIP("1.2.3.4")
 	targetPort := uint16(8080)
 	portBytes := make([]byte, 2)
@@ -29,7 +29,7 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 	}
 	defer udpgwConn.Close()
 
-	// --- 测试 Write ---
+	// ---  info  Write ---
 	go func() {
 		payload := []byte("hello")
 		n, err := udpgwConn.Write(payload)
@@ -41,21 +41,21 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 		}
 	}()
 
-	// 3. 模拟服务端，验证接收到的数据
-	// 读取 2 字节长度前缀 (大端序)
+	// 3.  info ， info received info
+	//  info  2 bytes info  ( info )
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(serverPipe, lenBuf); err != nil {
 		t.Fatalf("Server failed to read length prefix: %v", err)
 	}
 	frameLen := binary.BigEndian.Uint16(lenBuf)
 
-	// 读取整个帧
+	//  info
 	frameBuf := make([]byte, frameLen)
 	if _, err := io.ReadFull(serverPipe, frameBuf); err != nil {
 		t.Fatalf("Server failed to read frame body: %v", err)
 	}
 
-	// 解析帧
+	//  info
 	// Flag(1) + ConnID(2) + ATYP(1) + Addr(4) + Port(2) + Payload
 	expectedHeaderLen := 1 + 2 + 1 + 4 + 2
 	if len(frameBuf) < expectedHeaderLen {
@@ -92,11 +92,11 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 		t.Errorf("Expected payload 'hello', got '%s'", receivedPayload)
 	}
 
-	// --- 测试 Read ---
+	// ---  info  Read ---
 	go func() {
-		// 模拟服务端发送响应
+		//  info send info
 		respPayload := []byte("world")
-		// 响应帧格式: Flag(1) + ConnID(2) + ATYP(1) + Addr(4) + Port(2) + Payload
+		//  info : Flag(1) + ConnID(2) + ATYP(1) + Addr(4) + Port(2) + Payload
 		respPacket := make([]byte, 1+2+1+4+2+len(respPayload))
 		respPacket[0] = UdpgwFlagData
 		binary.BigEndian.PutUint16(respPacket[1:3], 1) // ConnID
@@ -105,7 +105,7 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 		binary.BigEndian.PutUint16(respPacket[8:10], targetPort)
 		copy(respPacket[10:], respPayload)
 
-		// 封装 tun2proxy 帧
+		//  info  tun2proxy  info
 		respLenBuf := make([]byte, 2)
 		binary.BigEndian.PutUint16(respLenBuf, uint16(len(respPacket)))
 
@@ -114,7 +114,7 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 	}()
 
 	readBuf := make([]byte, 1024)
-	udpgwConn.SetReadDeadline(time.Now().Add(2 * time.Second)) // 设置超时
+	udpgwConn.SetReadDeadline(time.Now().Add(2 * time.Second)) //  info timeout
 	n, err := udpgwConn.Read(readBuf)
 	if err != nil {
 		t.Fatalf("UdpgwConn.Read() error = %v", err)

@@ -3,14 +3,16 @@ package myssh
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
-// startTestDnsServer 在 loopback UDP 上启动一个隧道权威 DNS 服务端，返回服务端实例、DNS Server 与可达地址。
+// startTestDnsServer  info  loopback UDP  info tunnel info  DNS  info ， info 、DNS Server  info address。
 func startTestDnsServer(t *testing.T) (*DNSTunnelServer, *dns.Server, string) {
 	t.Helper()
 	srv := NewDNSTunnelServer("tunnel.test.")
@@ -27,10 +29,10 @@ func startTestDnsServer(t *testing.T) (*DNSTunnelServer, *dns.Server, string) {
 func stopTestDnsServer(t *testing.T, dnsSrv *dns.Server) {
 	t.Helper()
 	_ = dnsSrv.Shutdown()
-	time.Sleep(30 * time.Millisecond) // 等待 serve 协程退出，避免 goleak 误报
+	time.Sleep(30 * time.Millisecond) //  info  serve  info ， info  goleak  info
 }
 
-// readSessionN 从隧道服务端精确读取 n 字节（后端视角）。
+// readSessionN  info tunnel info  n bytes（ info ）。
 func readSessionN(t *testing.T, srv *DNSTunnelServer, sess string, n int) []byte {
 	t.Helper()
 	out := make([]byte, 0, n)
@@ -44,7 +46,7 @@ func readSessionN(t *testing.T, srv *DNSTunnelServer, sess string, n int) []byte
 	return out
 }
 
-// readConnN 从 net.Conn 精确读取 n 字节（客户端视角）。
+// readConnN  info  net.Conn  info  n bytes（client info ）。
 func readConnN(t *testing.T, c net.Conn, n int) []byte {
 	t.Helper()
 	buf := make([]byte, n)
@@ -66,7 +68,7 @@ func TestDNSTunnelRoundTrip(t *testing.T) {
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{addr}, "tunnel.test.", dns.TypeTXT, "sess1")
 	defer tunnel.Close()
 
-	// 客户端 -> 服务端
+	// client ->  info
 	msg := []byte("client-hello-over-dns")
 	if _, err := tunnel.Write(msg); err != nil {
 		t.Fatalf("tunnel write: %v", err)
@@ -79,7 +81,7 @@ func TestDNSTunnelRoundTrip(t *testing.T) {
 		t.Fatalf("client->server mismatch: got %q want %q", got, msg)
 	}
 
-	// 服务端 -> 客户端
+	//  info  -> client
 	reply := []byte("server-world-over-dns-0123456789")
 	srv.WriteSession(sess, reply)
 	buf := make([]byte, 256)
@@ -122,7 +124,7 @@ func TestDNSTunnelFailover(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
 
-	// 第一个上游不可达，应自动故障转移到真实 addr
+	//  info ， info  addr
 	servers := []string{"127.0.0.1:1", addr}
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, servers, "tunnel.test.", dns.TypeTXT, "sessF")
 	defer tunnel.Close()
@@ -150,11 +152,11 @@ func TestDNSTunnelTypeA(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
 
-	// A 记录仅能承载 4 字节，验证最小可用通路
+	// A  info  4 bytes， info
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{addr}, "tunnel.test.", dns.TypeA, "sessA")
 	defer tunnel.Close()
 
-	msg := []byte("abcd") // 恰好 4 字节，可完整放进 A 记录
+	msg := []byte("abcd") //  info  4 bytes， info  A  info
 	if _, err := tunnel.Write(msg); err != nil {
 		t.Fatalf("tunnel write (A): %v", err)
 	}
@@ -162,8 +164,69 @@ func TestDNSTunnelTypeA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait session (A): %v", err)
 	}
-	// 服务端回的数据同样是 A(4 字节)，这里仅验证上行落地
+	//  info  A(4 bytes)， info uplink info
 	if got := readSessionN(t, srv, sess, len(msg)); !bytes.Equal(got, msg) {
 		t.Fatalf("A client->server mismatch: got %q want %q", got, msg)
 	}
 }
+
+func TestDNSTunnelDoHTransport(t *testing.T) {
+	srv, dnsSrv, _ := startTestDnsServer(t)
+	defer stopTestDnsServer(t, dnsSrv)
+
+	//  info  DoH  info server info  srv
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen doh: %v", err)
+	}
+	defer ln.Close()
+
+	httpSrv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			reqMsg := new(dns.Msg)
+			if err := reqMsg.Unpack(body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			respWriter := &dohTestResponseWriter{msgChan: make(chan *dns.Msg, 1)}
+			srv.ServeDNS(respWriter, reqMsg)
+			reply := <-respWriter.msgChan
+			replyBytes, _ := reply.Pack()
+			w.Header().Set("Content-Type", "application/dns-message")
+			w.WriteHeader(http.StatusOK)
+			w.Write(replyBytes)
+		}),
+	}
+	go func() { _ = httpSrv.Serve(ln) }()
+	defer httpSrv.Close()
+
+	dohURL := "http://" + ln.Addr().String() + "/dns-query"
+	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{dohURL}, "tunnel.test.", dns.TypeTXT, "sessDoH")
+	defer tunnel.Close()
+
+	msg := []byte("doh-test-payload")
+	if _, err := tunnel.Write(msg); err != nil {
+		t.Fatalf("tunnel write (DoH): %v", err)
+	}
+	sess, err := srv.WaitForSession(3 * time.Second)
+	if err != nil {
+		t.Fatalf("wait session (DoH): %v", err)
+	}
+	if got := readSessionN(t, srv, sess, len(msg)); !bytes.Equal(got, msg) {
+		t.Fatalf("DoH client->server mismatch: got %q want %q", got, msg)
+	}
+}
+
+type dohTestResponseWriter struct {
+	msgChan chan *dns.Msg
+}
+
+func (w *dohTestResponseWriter) LocalAddr() net.Addr       { return &net.IPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+func (w *dohTestResponseWriter) RemoteAddr() net.Addr      { return &net.IPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+func (w *dohTestResponseWriter) WriteMsg(m *dns.Msg) error { w.msgChan <- m; return nil }
+func (w *dohTestResponseWriter) Write([]byte) (int, error) { return 0, nil }
+func (w *dohTestResponseWriter) Close() error              { return nil }
+func (w *dohTestResponseWriter) TsigStatus() error         { return nil }
+func (w *dohTestResponseWriter) TsigTimersOnly(bool)       {}
+func (w *dohTestResponseWriter) Hijack()                   {}

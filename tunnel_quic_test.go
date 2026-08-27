@@ -19,8 +19,8 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// newTestQUICTLSConfig 生成自签名证书，供 QUIC 回声服务端使用。
-// 客户端隧道默认 InsecureSkipVerify=true，因此自签名即可，无需可信链。
+// newTestQUICTLSConfig  info ， info  QUIC  info 。
+// clienttunneldefault InsecureSkipVerify=true， info ， info 。
 func newTestQUICTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -54,14 +54,14 @@ func newTestQUICTLSConfig(t *testing.T) *tls.Config {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"h3"}, // 与客户端 ALPN 伪裝保持一致
+		NextProtos:   []string{"h3"}, //  info client ALPN  info
 	}
 }
 
-// TestQUICEchoRoundTrip 验证 quic 隧道：通过真实 QUIC 服务端回声，确认握手、
-// 双向字节流透传以及 Padding 封装均正常。
+// TestQUICEchoRoundTrip  info  quic tunnel： info  QUIC  info ， info 、
+// bidirectionalbytes info  Padding  info 。
 func TestQUICEchoRoundTrip(t *testing.T) {
-	// 重置全局连接缓存，避免复用上一用例的物理连接。
+	//  info ， info 。
 	quicConnCache = sync.Map{}
 	defer func() { quicConnCache = sync.Map{} }()
 
@@ -76,7 +76,7 @@ func TestQUICEchoRoundTrip(t *testing.T) {
 	serverAddr := ln.Addr().String()
 	defer ln.Close()
 
-	// 服务端：接受连接与流，原样回声（含 Padding 帧）。
+	//  info ： info ， info （ info  Padding  info ）。
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -92,7 +92,7 @@ func TestQUICEchoRoundTrip(t *testing.T) {
 		_, _ = io.Copy(stream, stream)
 	}()
 
-	// 客户端：baseConn 必须是 *net.UDPConn，handler 在其上做 QUIC 拨号。
+	// client：baseConn  info  *net.UDPConn，handler  info  QUIC  info 。
 	baseConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
@@ -113,7 +113,7 @@ func TestQUICEchoRoundTrip(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// 双向并发回声：上行写 -> 服务端回声 -> 下行读。
+	// bidirectional info ：uplink info  ->  info  -> downlink info 。
 	up := []byte("SSH-2.0-myssh-quic-roundtrip-11223344556677889900AABBCCDDEEFF")
 	writeDone := make(chan error, 1)
 	go func() {
@@ -139,7 +139,7 @@ func TestQUICEchoRoundTrip(t *testing.T) {
 		t.Fatalf("echo mismatch: got %q want %q", got, up)
 	}
 
-	// 清理底层 QUIC 连接（handler 刻意保留供多工复用，不会随 conn.Close 关闭），避免 goleak 报泄漏。
+	// cleanup info  QUIC  info （handler  info ， info  conn.Close closed）， info  goleak  info 。
 	defer func() {
 		if v, ok := quicConnCache.Load(serverAddr); ok {
 			_ = v.(*quic.Conn).CloseWithError(0, "test end")
@@ -149,8 +149,9 @@ func TestQUICEchoRoundTrip(t *testing.T) {
 	}()
 }
 
-// TestQUICNonUDPConn 验证当底层 baseConn 不是 *net.UDPConn 时，handler 立即返回错误，
-// 而非尝试在错误类型上做 QUIC 拨号（保护 socket 类型前置检查分支）。
+// TestQUICNonUDPConn  info  baseConn  info  *net.UDPConn  info ，handler  info ，
+//
+//	info  QUIC  info （ info  socket  info ）。
 func TestQUICNonUDPConn(t *testing.T) {
 	quicConnCache = sync.Map{}
 	defer func() { quicConnCache = sync.Map{} }()
@@ -159,13 +160,13 @@ func TestQUICNonUDPConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTunnel(quic): %v", err)
 	}
-	// fakeConn 实现 net.Conn 但不是 *net.UDPConn。
+	// fakeConn  info  net.Conn  info  *net.UDPConn。
 	if _, err := proto.Handler(context.Background(), ProxyConfig{ProxyAddr: "127.0.0.1:443"}, &fakeConn{}); err == nil {
 		t.Fatal("expected error for non-UDPConn baseConn, got nil")
 	}
 }
 
-// TestQUICRegistration 验证 quic 协议已注册且底层网络类型为 udp。
+// TestQUICRegistration  info  quic  info  udp。
 func TestQUICRegistration(t *testing.T) {
 	proto, err := GetTunnel("quic")
 	if err != nil {

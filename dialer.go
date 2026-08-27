@@ -23,33 +23,33 @@ func dialProtected(ctx context.Context, cfg ProxyConfig, network, address string
 	return newProtectedDialer(cfg, timeout).DialContext(ctx, network, address)
 }
 
-// 針對 TCP 連線進行底層 Socket 最佳化
-// 關閉 Nagle 演算法 (SetNoDelay) 以保證極低延遲 (適用於 SSH/即時指令)
-// 擴大作業系統讀寫緩衝區至 4MB，以適應跨國高 BDP (頻寬延遲乘積) 網路
-// 设置keepalive 为15s
+// info  TCP  info  Socket  info
+// info  Nagle  info  (SetNoDelay)  info  ( info  SSH/ info )
+// info  4MB， info  BDP ( info )  info
+// info keepalive  info 15s
 func applyOptimiseForTcpConnection(conn net.Conn) {
-	// 嘗試將 net.Conn 轉型為底層的 *net.TCPConn
+	//  info  net.Conn  info  *net.TCPConn
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		// 關閉 Nagle 演算法
+		//  info  Nagle  info
 		if err := tcpConn.SetNoDelay(true); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to set NoDelay: %v", TAG, err)
 		}
 
-		// 設定讀取緩衝區
+		//  info
 		if err := tcpConn.SetReadBuffer(tcpOptimizeBufferSize); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to set ReadBuffer: %v", TAG, err)
 		}
 
-		// 設定寫入緩衝區
+		//  info
 		if err := tcpConn.SetWriteBuffer(tcpOptimizeBufferSize); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to set WriteBuffer: %v", TAG, err)
 		}
 
-		// 啟用 TCP Keep-Alive
+		//  info  TCP Keep-Alive
 		if err := tcpConn.SetKeepAlive(true); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to enable KeepAlive: %v", TAG, err)
 		} else {
-			// 設定 KeepAlive 週期為 15 秒
+			//  info  KeepAlive  info  15  info
 			if err := tcpConn.SetKeepAlivePeriod(time.Duration(tcpKeepaliveIntervalSec) * time.Second); err != nil {
 				zlog.Warnf("%s [TCP Tune] Failed to set KeepAlive period: %v", TAG, err)
 			}
@@ -105,7 +105,7 @@ func dialUDP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, err
 	return dialSocket(ctx, cfg, "udp", target)
 }
 
-// dialTunnel 是隧道建立的统一入口，负责策略分发
+// dialTunnel  info tunnel info ， info
 func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	tunnelType := strings.ToLower(cfg.TunnelType)
 	if tunnelType == "" {
@@ -127,12 +127,20 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	var baseConn net.Conn
 	var err error
 
-	// 根据协议要求调用拆分好的拨号函数
+	//  info
 	switch proto.Network {
 	case "tcp":
 		baseConn, err = dialTCP(ctx, cfg, target)
 	case "udp":
-		baseConn, err = dialUDP(ctx, cfg, target)
+		if tunnelType == "udp_custom" {
+			// udp_custom supports a UDP destination-port range in the server
+			// address (e.g. "1.1.1.1:1024-23000,25000-30000"). When present we
+			// open an unconnected UDP socket and spread every packet across the
+			// range to defeat per-(dst-IP,dst-port) UDP rate limiting.
+			baseConn, err = dialUDPRange(ctx, cfg, target)
+		} else {
+			baseConn, err = dialUDP(ctx, cfg, target)
+		}
 	case "custom":
 		zlog.Infof("%s [Tunnel] ⚡ Underlying dialing taken over by protocol (on-demand lazy loading)", TAG)
 		baseConn = nil
@@ -140,12 +148,12 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		baseConn = nil
 	}
 
-	// 如果前置物理连接建立失败，直接阻断，无需进入 Handler
+	//  info Failed to establish， info ， info  Handler
 	if err != nil {
 		return nil, err
 	}
 
-	// 将底层的 baseConn 移交给具体的隧道协议处理器 (如 HTTP/3, WebSocket, Base SSH 等)
+	//  info  baseConn  info tunnel info  ( info  HTTP/3, WebSocket, Base SSH  info )
 	targetConn, err := proto.Handler(ctx, cfg, baseConn)
 	if err == nil {
 		//if Debug {

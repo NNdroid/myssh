@@ -17,10 +17,10 @@ type SocketProtector interface {
 var (
 	globalProtector SocketProtector
 	protectorMutex  sync.RWMutex
-	protectReqCount uint64 // 用于追踪请求的唯一 ID
+	protectReqCount uint64 //  info  ID
 )
 
-// RegisterProtector 线程安全地注册 Protector
+// RegisterProtector  info  Protector
 func RegisterProtector(p SocketProtector) {
 	protectorMutex.Lock()
 	defer protectorMutex.Unlock()
@@ -28,28 +28,18 @@ func RegisterProtector(p SocketProtector) {
 	zlog.Infof("[Protect-Init] ✅ SocketProtector registered (Go layer)")
 }
 
-// getProtector 线程安全地获取 Protector
+// getProtector  info  Protector
 func getProtector() SocketProtector {
 	protectorMutex.RLock()
 	defer protectorMutex.RUnlock()
 	return globalProtector
 }
 
-// wrapAndroidProtect 复制并返回一个具有 protect 能力的新 Dialer
-// 避免就地修改 Dialer 引发并发竞争
-func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
-	zlog.Debugf("%s [Dialer] 🛡️ Applying VpnService protection mechanism...", TAG)
-	if dialer == nil {
-		dialer = &net.Dialer{}
-	}
-
-	// 浅拷贝一份 Dialer，确保并发安全
-	clonedDialer := *dialer
-	originalControl := clonedDialer.Control
-
-	zlog.Debugf("[Protect-Wrap] 🔍 Wrapping Dialer... (Control=%v)", originalControl != nil)
-
-	clonedDialer.Control = func(network, address string, c syscall.RawConn) error {
+// androidProtectControl  info  VpnService  info  info  info  Control  info 。
+//
+//	info  Dialer  info  ListenConfig 信息  info 信息 信息 ， info  info  fd 信息  info 。
+func androidProtectControl() func(network, address string, c syscall.RawConn) error {
+	return func(network, address string, c syscall.RawConn) error {
 		reqID := atomic.AddUint64(&protectReqCount, 1)
 
 		zlog.Debugf("[Protect-%d] ➡️ Intercepted socket creation request: network=%s, address=%s", reqID, network, address)
@@ -63,7 +53,7 @@ func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
 			if protector != nil {
 				zlog.Debugf("[Protect-%d] ⏳ Calling Java layer ProtectSocket(fd=%d)...", reqID, fd)
 
-				// 注意：底层 ProtectSocket 必须处理 JNI 线程 Attach 逻辑！
+				//  info ： info  ProtectSocket  info  JNI  info  Attach  info ！
 				success := protector.ProtectSocket(int32(fd))
 				if !success {
 					zlog.Errorf("[Protect-%d] ❌ Failed: ProtectSocket(fd=%d) returned false", reqID, fd)
@@ -76,7 +66,6 @@ func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
 			}
 		})
 
-		// 优先返回 protect 阶段的错误
 		if protectErr != nil {
 			zlog.Errorf("[Protect-%d] ❌ Control internal Protect error exit: %v", reqID, protectErr)
 			return protectErr
@@ -86,27 +75,52 @@ func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
 			return err
 		}
 
-		// 链式调用原始的 Control（如果有）
+		zlog.Debugf("[Protect-%d] 🏁 Current Socket processing flow completed", reqID)
+		return nil
+	}
+}
+
+// wrapAndroidProtect  info  protect  info  Dialer
+//
+//	info  Dialer  info
+func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
+	zlog.Debugf("%s [Dialer] 🛡️ Applying VpnService protection mechanism...", TAG)
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
+
+	//  info  Dialer， info
+	clonedDialer := *dialer
+	originalControl := clonedDialer.Control
+
+	zlog.Debugf("[Protect-Wrap] 🔍 Wrapping Dialer... (Control=%v)", originalControl != nil)
+
+	clonedDialer.Control = func(network, address string, c syscall.RawConn) error {
+		if err := androidProtectControl()(network, address, c); err != nil {
+			return err
+		}
+		//  info  Control（ info ）
 		if originalControl != nil {
-			zlog.Debugf("[Protect-%d] 🔗 Chaining call to original dialer.Control...", reqID)
+			zlog.Debugf("[Protect-Wrap] 🔗 Chaining call to original dialer.Control...")
 			origErr := originalControl(network, address, c)
 			if origErr != nil {
-				zlog.Errorf("[Protect-%d] ❌ Original dialer.Control execution error: %v", reqID, origErr)
+				zlog.Errorf("[Protect-Wrap] ❌ Original dialer.Control execution error: %v", origErr)
 			}
 			return origErr
 		}
-
-		zlog.Debugf("[Protect-%d] 🏁 Current Socket processing flow completed", reqID)
 		return nil
 	}
 
 	return &clonedDialer
 }
 
-// bindDevice 尝试将 Dialer 绑定到指定的网卡接口。
-// 在 Android 平台上，普通应用没有 CAP_NET_RAW 权限，无法直接使用 SO_BINDTODEVICE。
-// Android 的底层套接字保护和路由需要依赖 Java 层的 VpnService.protect() (已由 wrapAndroidProtect 处理)。
-// 因此这里作为一个安全的降级存根 (Stub)。
+// bindDevice  info  Dialer  info 。
+//
+//	info  Android  info ， info  CAP_NET_RAW  info ， info  SO_BINDTODEVICE。
+//
+// Android  info  Java  info  VpnService.protect() ( info  wrapAndroidProtect  info )。
+//
+//	info  (Stub)。
 func bindDevice(dialer *net.Dialer, ifaceName string) {
 	if ifaceName != "" {
 		zlog.Warnf("%s [Tunnel] ⚠️ Android does not support SO_BINDTODEVICE without root. Ignoring bind request to: %s", TAG, ifaceName)

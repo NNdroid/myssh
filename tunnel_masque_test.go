@@ -22,7 +22,7 @@ func TestMasqueTunnel_Registration(t *testing.T) {
 }
 
 func TestMasqueTunnel_H2_Success(t *testing.T) {
-	// 启动一个本地的 HTTP/2 测试服务器
+	//  info  HTTP/2  info server
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			t.Errorf("Expected CONNECT method, got %s", r.Method)
@@ -34,7 +34,7 @@ func TestMasqueTunnel_H2_Success(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 
-		// 读写一些数据模拟隧道，并手动 Flush 保证客户端能及时收到数据
+		//  info tunnel， info  Flush  info client info
 		buf := make([]byte, 1024)
 		for {
 			n, err := r.Body.Read(buf)
@@ -51,7 +51,7 @@ func TestMasqueTunnel_H2_Success(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 
-	// 提取出地址
+	//  info address
 	proxyAddr := strings.TrimPrefix(server.URL, "https://")
 
 	proto, _ := GetTunnel("masque")
@@ -72,7 +72,7 @@ func TestMasqueTunnel_H2_Success(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// 测试读写
+	//  info
 	go func() {
 		conn.Write([]byte("ping"))
 	}()
@@ -111,5 +111,61 @@ func TestMasqueTunnel_H2_Reject(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "masque proxy returned status 403") {
 		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+func TestMasqueTunnel_AutoFallback(t *testing.T) {
+	//  info support HTTP/2  info server
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		buf := make([]byte, 1024)
+		for {
+			n, err := r.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				w.(http.Flusher).Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	proxyAddr := strings.TrimPrefix(server.URL, "https://")
+	proto, _ := GetTunnel("masque")
+
+	//  info  "h3,h2"  info mode：H3(QUIC)  info  TCP Server  info failed info  H2
+	cfg := ProxyConfig{
+		Alpn:       "h3,h2",
+		ProxyAddr:  proxyAddr,
+		SshAddr:    "10.0.0.1:22",
+		CustomPath: "/.well-known/masque/tcp",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn, err := proto.Handler(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("MASQUE auto-fallback handler failed: %v", err)
+	}
+	defer conn.Close()
+
+	go func() {
+		conn.Write([]byte("pong"))
+	}()
+
+	buf := make([]byte, 4)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("Failed to read from fallback masque conn: %v", err)
+	}
+	if string(buf[:n]) != "pong" {
+		t.Errorf("Expected 'pong', got '%s'", string(buf[:n]))
 	}
 }

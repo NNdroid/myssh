@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestH3Registration 验证 h3 协议已注册且底层网络类型为 custom（自行接管 socket）。
+// TestH3Registration  info  h3  info  custom（ info  socket）。
 func TestH3Registration(t *testing.T) {
 	proto, err := GetTunnel("h3")
 	if err != nil {
@@ -19,8 +19,9 @@ func TestH3Registration(t *testing.T) {
 	}
 }
 
-// TestH3ConnAddrs 验证 h3Conn 的地址方法行为符合预期：远端地址来自配置，
-// 本地地址为零值 UDP（QUIC 隧道不暴露真实 TCP 地址）。
+// TestH3ConnAddrs  info  h3Conn  info address info ： info address info config，
+//
+//	info address info  UDP（QUIC tunnel info  TCP address）。
 func TestH3ConnAddrs(t *testing.T) {
 	s := &h3Conn{remoteAddr: "198.51.100.7:443"}
 	remote := s.RemoteAddr()
@@ -33,7 +34,7 @@ func TestH3ConnAddrs(t *testing.T) {
 	}
 }
 
-// TestH3HandshakeError 验证 h3 隧道在底层 UDP 拨号失败（非法地址）时快速返回错误，而非挂死。
+// TestH3HandshakeError  info  h3 tunnel info  UDP  info failed（ info address） info ， info 。
 func TestH3HandshakeError(t *testing.T) {
 	h3TransportCache = sync.Map{}
 	defer func() { h3TransportCache = sync.Map{} }()
@@ -45,7 +46,7 @@ func TestH3HandshakeError(t *testing.T) {
 	cfg := ProxyConfig{ProxyAddr: "127.0.0.1:notaport", ServerName: "localhost"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// h3 协议 network=custom，由协议自行建连，baseConn 传 nil 即可。
+	// h3  info  network=custom， info ，baseConn  info  nil  info 。
 	if _, err := proto.Handler(ctx, cfg, nil); err == nil {
 		t.Fatal("expected h3 handshake to fail on invalid proxy addr, got nil")
 	}

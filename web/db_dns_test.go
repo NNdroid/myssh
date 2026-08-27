@@ -41,7 +41,7 @@ func TestBuildProxyConfigJSON_DnsTunnel(t *testing.T) {
 		Name:             "dns-node",
 		SshAddr:          "1.2.3.4:22",
 		User:             "u",
-		TunnelType:       "dns",
+		TunnelType:       "dns_custom",
 		DnsTunnelDomain:  "tunnel.example.com",
 		DnsTunnelServers: "8.8.8.8:53, 1.1.1.1:53",
 		DnsTunnelType:    "txt",
@@ -85,8 +85,8 @@ func TestBuildProxyConfigJSON_DnsTunnel(t *testing.T) {
 	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
 		t.Fatalf("unmarshal ProxyConfig: %v", err)
 	}
-	if cfg.TunnelType != "dns" {
-		t.Fatalf("TunnelType = %q, want dns", cfg.TunnelType)
+	if cfg.TunnelType != "dns_custom" {
+		t.Fatalf("TunnelType = %q, want dns_custom", cfg.TunnelType)
 	}
 	if cfg.DnsTunnelDomain != "tunnel.example.com" {
 		t.Fatalf("DnsTunnelDomain = %q", cfg.DnsTunnelDomain)
@@ -129,9 +129,9 @@ func TestBuildProxyConfigJSON_LegacyVaydnsTranslate(t *testing.T) {
 	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Legacy "vaydns" must be translated to the real "dns" tunnel.
-	if cfg.TunnelType != "dns" {
-		t.Fatalf("legacy vaydns should translate to dns, got %q", cfg.TunnelType)
+	// Legacy "vaydns" must be translated to the real "dns_custom" tunnel.
+	if cfg.TunnelType != "dns_custom" {
+		t.Fatalf("legacy vaydns should translate to dns_custom, got %q", cfg.TunnelType)
 	}
 	wantServers := []string{"8.8.4.4:53", "1.0.0.1:53"}
 	if len(cfg.DnsTunnelServers) != len(wantServers) {

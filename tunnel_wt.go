@@ -13,16 +13,22 @@ import (
 	"github.com/quic-go/webtransport-go"
 )
 
-// WebTransport 全局会话池
+// WebTransport  info
 var (
 	wtSessionCache sync.Map
 	wtMutex        sync.Mutex
 )
 
-// getWTSession 获取或新建一个复用的 WebTransport 会话 (懒加载拨号)
+// getWTSession 获取或新建 WebTransport 会话 (带断线自愈检测)
 func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error) {
 	if val, ok := wtSessionCache.Load(cfg.ProxyAddr); ok {
-		return val.(*webtransport.Session), nil
+		sess := val.(*webtransport.Session)
+		select {
+		case <-sess.Context().Done():
+			wtSessionCache.Delete(cfg.ProxyAddr)
+		default:
+			return sess, nil
+		}
 	}
 
 	wtMutex.Lock()
@@ -30,7 +36,13 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 
 	// Double-check
 	if val, ok := wtSessionCache.Load(cfg.ProxyAddr); ok {
-		return val.(*webtransport.Session), nil
+		sess := val.(*webtransport.Session)
+		select {
+		case <-sess.Context().Done():
+			wtSessionCache.Delete(cfg.ProxyAddr)
+		default:
+			return sess, nil
+		}
 	}
 
 	zlog.Infof("%s [Tunnel-WT] ⚡ Cache miss, establishing brand new underlying WebTransport session...", TAG)
@@ -70,7 +82,7 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 		KeepAlivePeriod:                  8 * time.Second,
 	}
 
-	// 將 dialCtx 傳入，確保 10 秒超時能強制中斷卡死的網路
+	//  info  dialCtx  info ， info  10  info
 	qconn, err := quic.DialEarly(dialCtx, udpConn, udpAddr, tlsConf, quicConf)
 	if err != nil {
 		udpConn.Close()
@@ -96,10 +108,10 @@ func getWTSession(cfg ProxyConfig, reqUrl string) (*webtransport.Session, error)
 		headers.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
 	}
 
-	// 將 dialCtx 傳入，確保 WebTransport 握手也有超時保護
+	//  info  dialCtx  info ， info  WebTransport  info
 	_, session, err := dialer.Dial(dialCtx, reqUrl, headers)
 	if err != nil {
-		// 先關閉 QUIC 連線釋放內部協程，再關 UDP
+		//  info  QUIC  info ， info  UDP
 		qconn.CloseWithError(1, "wt dial failed")
 		udpConn.Close()
 		return nil, err
@@ -141,8 +153,8 @@ func init() {
 		var stream *webtransport.Stream
 		var err error
 
-		// 真正的無感自動重試機制 (最多嘗試 2 次)
-		// 解決舊版本遇到殭屍連線時「假重試真報錯」的問題
+		//  info  ( info  2  info )
+		//  info 「 info 」 info
 		for attempt := 1; attempt <= 2; attempt++ {
 			session, err = getWTSession(cfg, reqUrl)
 			if err != nil {
@@ -152,15 +164,15 @@ func init() {
 
 			stream, err = session.OpenStreamSync(parentCtx)
 			if err == nil {
-				break // 成功開啟 Stream，跳出重試迴圈
+				break // successfully info  Stream， info
 			}
 
-			// 如果是第一次失敗，清理快取並準備下一輪迴圈重試
+			//  info ，cleanup info
 			zlog.Warnf("%s [Tunnel] ⚠️ Detected WebTransport zombie session (Attempt %d/2), cleaning up and retrying...", TAG, attempt)
 			wtSessionCache.Delete(cfg.ProxyAddr)
 			session.CloseWithError(1, "stream open failed due to dead session")
 
-			// 如果第二次還是失敗，就真的報錯返回
+			//  info ， info
 			if attempt == 2 {
 				return nil, fmt.Errorf("open stream failed after retry: %w", err)
 			}

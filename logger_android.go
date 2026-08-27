@@ -10,9 +10,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// --- 接口定义 ---
+// ---  info  ---
 
-// LogReceiver 是由 Android 端实现的接口
+// LogReceiver  info  Android  info
 type LogReceiver interface {
 	Receive(level int, tag, msg string)
 }
@@ -21,9 +21,31 @@ var (
 	globalReceiver LogReceiver
 	logChan                           = make(chan logItem, 1000)
 	zlog           *zap.SugaredLogger = zap.NewNop().Sugar()
+	atomicLogLevel                    = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
 
-// --- 常量与辅助函数 ---
+// SetLogLevel dynamically updates Go engine log level in real-time
+func SetLogLevel(logLevelStr string) {
+	var level zapcore.Level
+	switch strings.ToUpper(strings.TrimSpace(logLevelStr)) {
+	case "DEBUG":
+		level = zapcore.DebugLevel
+	case "INFO":
+		level = zapcore.InfoLevel
+	case "WARN", "WARNING":
+		level = zapcore.WarnLevel
+	case "ERROR":
+		level = zapcore.ErrorLevel
+	default:
+		level = zapcore.InfoLevel
+	}
+	atomicLogLevel.SetLevel(level)
+	if zlog != nil {
+		zlog.Infof("[Logger] Dynamic log level updated to: %s", level.String())
+	}
+}
+
+// ---  info  ---
 
 const (
 	AndroidLogDebug = 0
@@ -59,16 +81,16 @@ type logItem struct {
 	msg   string
 }
 
-// --- 核心逻辑 ---
+// ---  info  ---
 
-// SetLogReceiver 由 Android 调用，传入实现接口的 Kotlin 对象
+// SetLogReceiver  info  Android  info ， info  Kotlin  info
 func SetLogReceiver(r LogReceiver) {
 	globalReceiver = r
-	// 启动异步日志消费泵
+	//  info
 	go func() {
 		for item := range logChan {
 			if globalReceiver != nil {
-				// gomobile 会自动处理线程切换和接口调用
+				// gomobile  info
 				globalReceiver.Receive(item.level, item.tag, item.msg)
 			}
 		}
@@ -87,7 +109,7 @@ func (c *stunCore) With(fields []zapcore.Field) zapcore.Core {
 		encoder:      c.encoder.Clone(),
 		tag:          c.tag,
 	}
-	// 将 With 传入的字段提前写入 encoder，提高 Write 性能
+	//  info  With  info  encoder， info  Write  info
 	for i := range fields {
 		fields[i].AddTo(clone.encoder)
 	}
@@ -102,23 +124,23 @@ func (c *stunCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.C
 }
 
 func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
-	// 1. 注入更多系统级参数
+	// 1.  info
 	additionalFields := []zapcore.Field{
-		zap.Int("pid", os.Getpid()), // 进程ID，排查多进程冲突
+		zap.Int("pid", os.Getpid()), //  info ID， info
 		zap.Int("uid", os.Getuid()),
 		zap.String("version", Version),
 	}
 
-	// 合并 fields
+	//  info  fields
 	allFields := append(fields, additionalFields...)
 
-	// 2. 编码条目
+	// 2.  info
 	buf, err := c.encoder.EncodeEntry(ent, allFields)
 	if err != nil {
 		return err
 	}
 
-	// 3. 异步丢入队列
+	// 3.  info
 	select {
 	case logChan <- logItem{
 		level: zapToStunLevel(ent.Level),
@@ -126,29 +148,17 @@ func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		msg:   buf.String(),
 	}:
 	default:
-		// 队列满则静默丢弃
+		//  info discarded
 	}
 	buf.Free()
 	return nil
 }
 func (c *stunCore) Sync() error { return nil }
 
-// --- 初始化 ---
+// ---  info  ---
 
 func InitLogger(logPath string, logLevelStr string) int {
-	var level zapcore.Level
-	switch strings.ToUpper(logLevelStr) {
-	case "DEBUG":
-		level = zapcore.DebugLevel
-	case "INFO":
-		level = zapcore.InfoLevel
-	case "WARN":
-		level = zapcore.WarnLevel
-	case "ERROR":
-		level = zapcore.ErrorLevel
-	default:
-		level = zapcore.InfoLevel
-	}
+	SetLogLevel(logLevelStr)
 
 	zapEncoderConfig := zapcore.EncoderConfig{
 		TimeKey:        "timestamp",
@@ -166,17 +176,17 @@ func InitLogger(logPath string, logLevelStr string) int {
 	consoleEncoder := zapcore.NewConsoleEncoder(zapEncoderConfig)
 	jsonEncoder := zapcore.NewJSONEncoder(zapEncoderConfig)
 
-	// 文件输出
+	//  info
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
 	if err != nil {
 		return -1
 	}
-	fileCore := zapcore.NewCore(consoleEncoder.Clone(), zapcore.AddSync(file), level) //使用控制台输出格式
+	fileCore := zapcore.NewCore(consoleEncoder.Clone(), zapcore.AddSync(file), atomicLogLevel)
 
-	// 安卓 UI 输出
+	//  info  UI  info
 	androidCoreInstance := &stunCore{
-		LevelEnabler: level,
-		encoder:      jsonEncoder.Clone(), //使用json格式
+		LevelEnabler: atomicLogLevel,
+		encoder:      jsonEncoder.Clone(), // info json info
 		tag:          "Stun-Go",
 	}
 

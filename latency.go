@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,36 +18,37 @@ type PingRequest struct {
 	Config ProxyConfig `json:"config"`
 }
 
-// PingResult 结构化测速结果，供 Android 直接按字段渲染（着色/分类），
-// 取代原先的 "123 ms" / "Error: ..." 字符串拼装。
 type PingResult struct {
 	Id        string `json:"id"`
 	Ok        bool   `json:"ok"`
 	LatencyMs int64  `json:"latencyMs"`
-	Error     string `json:"error"`     // 完整错误信息（不截断）
-	ErrorType string `json:"errorType"` // timeout|connrefused|tls|dns|http|other|""
+	Error     string `json:"error"`
+	ErrorType string `json:"errorType"` // timeout|connrefused|auth|hostkey|tcpforward|tls|dns|http|other|""
 }
 
-// pingCancel 支持安卓中途取消正在进行的测速（CancelPing）。
-var pingCancel atomic.Value // context.CancelFunc
+var pingCancel atomic.Value
 
-// CancelPing 取消正在进行的 pingNodes 测速。
 func CancelPing() {
 	if f, ok := pingCancel.Load().(context.CancelFunc); ok && f != nil {
 		f()
 	}
 }
 
-// PingNodes 测试一组节点的真实访问延迟 (True Proxy Ping + VpnProtect)。
-// 返回 []PingResult 的 JSON；解析请求失败返回 "[]"。
 func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 	var reqs []PingRequest
 	if err := json.Unmarshal([]byte(profilesJson), &reqs); err != nil {
-		zlog.Errorf("[Latency] 解析测速请求失败: %v", err)
+		zlog.Errorf("[Latency] json unmarshal failed: %v", err)
 		return "[]"
 	}
 
-	zlog.Infof("[Latency] 接收到测速请求，目标: %s，超时: %d ms，节点数: %d", targetUrl, timeoutMs, len(reqs))
+	if timeoutMs <= 0 {
+		timeoutMs = 8000
+	}
+	if strings.TrimSpace(targetUrl) == "" {
+		targetUrl = "http://cp.cloudflare.com/generate_204"
+	}
+
+	zlog.Infof("[Latency] ping batch start: target=%s, timeout=%dms, count=%d", targetUrl, timeoutMs, len(reqs))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	pingCancel.Store(cancel)
@@ -56,7 +56,6 @@ func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 
 	resCh := make(chan PingResult, len(reqs))
 	var wg sync.WaitGroup
-	// 控制并发度，防止同时建立太多 SSH 隧道拖垮手机 CPU
 	sem := make(chan struct{}, 4)
 
 	for _, req := range reqs {
@@ -66,14 +65,13 @@ func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			zlog.Infof("[Latency] 开始测速节点: %s", r.Id)
 			latency, err := testSingleNodeTrueLatency(ctx, r.Config, targetUrl, time.Duration(timeoutMs)*time.Millisecond)
 			if err != nil {
-				zlog.Errorf("[Latency] 节点 %s 测速失败: %v", r.Id, err)
+				zlog.Errorf("[Latency] node %s failed: %v", r.Id, err)
 				resCh <- PingResult{Id: r.Id, Ok: false, Error: err.Error(), ErrorType: classifyPingError(err)}
 				return
 			}
-			zlog.Infof("[Latency] 节点 %s 测速成功: %d ms", r.Id, latency)
+			zlog.Infof("[Latency] node %s success: %d ms", r.Id, latency)
 			resCh <- PingResult{Id: r.Id, Ok: true, LatencyMs: latency}
 		}(req)
 	}
@@ -90,57 +88,39 @@ func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 	return string(out)
 }
 
-// testSingleNodeTrueLatency 为单节点建立受保护隧道并完成一次真实 HTTP 请求，
-// 返回从拨号到拿到 2xx 响应的耗时（毫秒）。耗时含 SSH 握手+隧道建立+首字节，
-// 即“经该节点的真实首包延迟”，适合作为节点选择依据。
-// ctx 可被 CancelPing 取消；context 超时被归类为 timeout。
 func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl string, timeout time.Duration) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
 
-	// 1. 建立受保护的底层隧道并完成 SSH 握手
-	sshClient, conn, err := DialNode(ctx, cfg, false)
+	sshClient, conn, err := DialNode(ctx, cfg, true)
 	if err != nil {
 		return 0, err
 	}
 	defer conn.Close()
 	defer sshClient.Close()
 
-	// 2. 解析测试网页的地址
-	u, err := url.Parse(targetUrl)
-	if err != nil {
-		return 0, fmt.Errorf("url err: %w", err)
-	}
-	hostPort := u.Host
-	if !strings.Contains(hostPort, ":") {
-		if u.Scheme == "https" {
-			hostPort += ":443"
-		} else {
-			hostPort += ":80"
-		}
+	if !strings.HasPrefix(targetUrl, "http://") && !strings.HasPrefix(targetUrl, "https://") {
+		targetUrl = "http://" + targetUrl
 	}
 
-	// 3. 通过 SSH 隧道建立到目标网页的 TCP 连接
-	targetConn, err := sshClient.Dial("tcp", hostPort)
-	if err != nil {
-		return 0, fmt.Errorf("proxy dial err: %w", err)
-	}
-	defer targetConn.Close()
-
-	// 4. 发起 HTTP 请求
 	req, err := http.NewRequestWithContext(ctx, "GET", targetUrl, nil)
 	if err != nil {
 		return 0, err
 	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/Ping")
 
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return targetConn, nil
+				return sshClient.Dial("tcp", addr)
 			},
-			DisableKeepAlives: true,
+			DisableKeepAlives:     true,
+			ResponseHeaderTimeout: timeout,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
 		Timeout: timeout,
 	}
@@ -158,8 +138,6 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 	return time.Since(start).Milliseconds(), nil
 }
 
-// classifyPingError 将底层错误归类为可读类型，供安卓 UI 着色/展示。
-// 优先按错误链判定超时（net.Error），再按关键字匹配。
 func classifyPingError(err error) string {
 	if err == nil {
 		return ""
@@ -170,15 +148,21 @@ func classifyPingError(err error) string {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline"):
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline"), strings.Contains(msg, "context canceled"):
 		return "timeout"
 	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "connect: "):
 		return "connrefused"
+	case strings.Contains(msg, "unable to authenticate"), strings.Contains(msg, "auth failed"), strings.Contains(msg, "password"), strings.Contains(msg, "private key"):
+		return "auth"
+	case strings.Contains(msg, "host key") && strings.Contains(msg, "mismatch"):
+		return "hostkey"
+	case strings.Contains(msg, "administratively prohibited"), strings.Contains(msg, "forwarding"):
+		return "tcpforward"
 	case strings.Contains(msg, "x509"), strings.Contains(msg, "certificate"), strings.Contains(msg, "tls"):
 		return "tls"
 	case strings.Contains(msg, "no such host"), strings.Contains(msg, "lookup"), strings.Contains(msg, "dns"):
 		return "dns"
-	case strings.HasPrefix(msg, "status "):
+	case strings.HasPrefix(msg, "status "), strings.Contains(msg, "status "):
 		return "http"
 	default:
 		return "other"

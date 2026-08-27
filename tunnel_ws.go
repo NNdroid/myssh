@@ -33,12 +33,12 @@ func init() {
 			"User-Agent": []string{"Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36"},
 		}
 
-		// 用户认证逻辑
+		//  info
 		if cfg.ProxyAuthRequired {
 			auth := cfg.ProxyAuthUser + ":" + cfg.ProxyAuthPass
 			encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
-			// 在 WS 握手中，标准通常使用 Proxy-Authorization 或 Authorization
-			// 大多数 CDN 或代理服务器（如 Nginx, Cloudflare）识别这个头
+			//  info  WS  info ， info  Proxy-Authorization  info  Authorization
+			//  info  CDN  info server（ info  Nginx, Cloudflare） info
 			fakeHeaders.Set("Proxy-Authorization", "Basic "+encodedAuth)
 			zlog.Infof("%s [Tunnel] Injected authentication info for WS handshake (User: %s)", TAG, cfg.ProxyAuthUser)
 		}
@@ -73,7 +73,7 @@ func init() {
 
 		wsConn, resp, err := websocket.Dial(dialCtx, u.String(), opts)
 		if err != nil {
-			// 认证失败
+			// Authentication failed
 			if resp != nil && (resp.StatusCode == 401 || resp.StatusCode == 407) {
 				zlog.Errorf("%s [Tunnel] ❌ WebSocket authentication failed, status code: %d", TAG, resp.StatusCode)
 			}
@@ -84,7 +84,7 @@ func init() {
 
 		zlog.Infof("%s [Tunnel] ✅ WebSocket handshake successful (Status: %d), Negotiated protocol: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
 		wsConn.SetReadLimit(-1)
-		return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
+		return websocket.NetConn(parentCtx, wsConn, websocket.MessageBinary), nil
 	}
 
 	RegisterTunnel("ws", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {

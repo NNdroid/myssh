@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestWTRegistration 验证 wt（WebTransport）协议已注册且底层网络类型为 custom。
+// TestWTRegistration  info  wt（WebTransport） info  custom。
 func TestWTRegistration(t *testing.T) {
 	proto, err := GetTunnel("wt")
 	if err != nil {
@@ -19,8 +19,8 @@ func TestWTRegistration(t *testing.T) {
 	}
 }
 
-// TestWTConnAddrs 验证 wtConn 的地址方法行为：远端地址来自配置，本地为零值 UDP。
-// wtConn 内嵌 *webtransport.Stream，但地址方法不依赖 Stream，可安全单独构造测试。
+// TestWTConnAddrs  info  wtConn  info address info ： info address info config， info  UDP。
+// wtConn  info  *webtransport.Stream， info address info  Stream， info 。
 func TestWTConnAddrs(t *testing.T) {
 	w := &wtConn{remoteAddr: "203.0.113.9:443"}
 	remote := w.RemoteAddr()
@@ -33,7 +33,7 @@ func TestWTConnAddrs(t *testing.T) {
 	}
 }
 
-// TestWTHandshakeError 验证 wt 隧道在底层 UDP 拨号失败（非法地址）时快速返回错误。
+// TestWTHandshakeError  info  wt tunnel info  UDP  info failed（ info address） info 。
 func TestWTHandshakeError(t *testing.T) {
 	wtSessionCache = sync.Map{}
 	defer func() { wtSessionCache = sync.Map{} }()

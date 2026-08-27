@@ -6,12 +6,12 @@ import (
 )
 
 func init() {
-	// 基础直连
+	//  info
 	RegisterTunnel("base", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return baseConn, nil
 	})
 
-	// TLS (利用 uTLS 消除指纹)
+	// TLS ( info  uTLS  info )
 	RegisterTunnel("tls", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		zlog.Infof("%s [Tunnel] 2. Preparing TLS (utls SNI Proxy) handshake, Spoofed SNI: %s", TAG, cfg.ServerName)
 

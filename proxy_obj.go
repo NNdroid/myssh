@@ -1,45 +1,62 @@
 package myssh
 
-// SshTProxy 是引擎的对象化句柄。
+// SshTProxy  info 。
 //
-// 说明：底层引擎为单例（全局状态 socksServer/sshClient/engineCancel 等），
-// 因此所有 SshTProxy 实例共享同一引擎；NewSshTProxy 返回的是该引擎的句柄。
-// 这棵“对象化”主要是为了给 Android 一个类型安全、带回调的入口，
-// 而不必再散落地调用一组过程式全局函数。若未来需要多实例并发隧道，
-// 则需把全局状态搬进结构体（属长期演进，不在本次范围）。
+//	info ： info （ info  socksServer/sshClient/engineCancel  info ），
+//	info  SshTProxy  info ；NewSshTProxy  info 。
+//	info “ info ” info  Android  info 、 info ，
+//	info 。 info tunnel，
+//	info （ info ， info ）。
 type SshTProxy struct{}
 
-// NewSshTProxy 创建引擎句柄。
+// NewSshTProxy  info 。
 func NewSshTProxy() *SshTProxy {
 	return &SshTProxy{}
 }
 
-// SetEngineCallback 注册引擎事件回调（等价于 registerEngineCallback）。
+// SetEngineCallback  info （ info  registerEngineCallback）。
 func (p *SshTProxy) SetEngineCallback(cb EngineCallback) {
 	registerEngineCallback(cb)
 }
 
-// Start 启动代理引擎，入参为 ProxyConfig 的 JSON。返回值：0 成功，<0 失败码。
+// Start  info ， info  ProxyConfig  info  JSON。 info ：0 successfully，<0 failed info 。
 func (p *SshTProxy) Start(configJson string) int {
 	return startSshTProxy(configJson)
 }
 
-// Stop 停止代理引擎并清理所有连接。
+// Stop  info cleanup info 。
 func (p *SshTProxy) Stop() {
 	stopSshTProxy()
 }
 
-// LoadGlobalConfig 载入全局配置（DNS/Geo 路由等），入参为 GlobalConfig 的 JSON。
+// LoadGlobalConfig  info config（DNS/Geo  info ）， info  GlobalConfig  info  JSON。
 func (p *SshTProxy) LoadGlobalConfig(configJson string) int {
 	return loadGlobalConfigFromJson(configJson)
 }
 
-// PingNodes 测一组节点的真实访问延迟，返回结构化 JSON 数组（见 PingResult）。
+// PingNodes  info ， info  JSON  info （ info  PingResult）。
 func (p *SshTProxy) PingNodes(profilesJson, targetUrl string, timeoutMs int) string {
 	return pingNodes(profilesJson, targetUrl, timeoutMs)
 }
 
-// WgWait 阻塞等待引擎所有 goroutine 退出（供 Android 主循环使用）。
+// WgWait  info  goroutine  info （ info  Android  info ）。
 func (p *SshTProxy) WgWait() {
 	wgWait()
+}
+
+// InitCrashOutput redirects fatal runtime crashes to logPath.
+func (p *SshTProxy) InitCrashOutput(logPath string) {
+	_ = InitCrashOutput(logPath)
+}
+
+// TriggerTestCrash triggers a simulated panic in a protected goroutine for testing UI popup.
+func (p *SshTProxy) TriggerTestCrash(tag string) {
+	SafeGo(tag, func() {
+		panic("simulated test panic in Go engine core")
+	})
+}
+
+// SetLogLevel updates the engine log level dynamically in real-time.
+func (p *SshTProxy) SetLogLevel(levelStr string) {
+	SetLogLevel(levelStr)
 }

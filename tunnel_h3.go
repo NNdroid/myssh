@@ -15,14 +15,14 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-// ----- HTTP/3 (QUIC) 隧道实现 -----
+// ----- HTTP/3 (QUIC) tunnel info  -----
 
 var (
 	h3TransportCache sync.Map
 	clientMu         sync.Mutex
 )
 
-// getH3Transport 获取或初始化复用的 HTTP/3 传输层 (懒加载拨号)
+// getH3Transport  info  HTTP/3  info  ( info )
 func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 	proxyAddr := cfg.ProxyAddr
 
@@ -80,7 +80,7 @@ func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 		MaxIncomingUniStreams:            1000,
 	}
 
-	qconn, err := quic.DialEarly(context.Background(), udpConn, udpAddr, tlsConf, quicConf)
+	qconn, err := quic.DialEarly(dialCtx, udpConn, udpAddr, tlsConf, quicConf)
 	if err != nil {
 		udpConn.Close()
 		return nil, fmt.Errorf("quic dial failed: %w", err)
@@ -90,7 +90,13 @@ func getH3Transport(cfg ProxyConfig) (*http3.Transport, error) {
 		TLSClientConfig: tlsConf,
 		QUICConfig:      quicConf,
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			return qconn, nil
+			select {
+			case <-qconn.Context().Done():
+				h3TransportCache.Delete(proxyAddr)
+				return nil, fmt.Errorf("quic connection closed")
+			default:
+				return qconn, nil
+			}
 		},
 	}
 
@@ -190,14 +196,21 @@ func init() {
 		select {
 		case err := <-errChan:
 			cancel()
+			pw.CloseWithError(err)
+			pr.CloseWithError(err)
 			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 handshake request failed: %v", TAG, err)
 			h3TransportCache.Delete(cfg.ProxyAddr)
 			return nil, err
 		case resp := <-respChan:
 			if resp.StatusCode != http.StatusOK {
 				cancel()
+				resp.Body.Close()
+				rejErr := fmt.Errorf("HTTP status: %d", resp.StatusCode)
+				pw.CloseWithError(rejErr)
+				pr.CloseWithError(rejErr)
+				h3TransportCache.Delete(cfg.ProxyAddr)
 				zlog.Errorf("%s [Tunnel] ❌ HTTP/3 server rejected, status code: %d", TAG, resp.StatusCode)
-				return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
+				return nil, rejErr
 			}
 			zlog.Infof("%s [Tunnel] ✅ HTTP/3 tunnel handshake successful, data stream ready", TAG)
 
@@ -212,9 +225,12 @@ func init() {
 
 		case <-time.After(15 * time.Second):
 			cancel()
+			timeoutErr := fmt.Errorf("h3 handshake timeout")
+			pw.CloseWithError(timeoutErr)
+			pr.CloseWithError(timeoutErr)
 			zlog.Errorf("%s [Tunnel] ❌ HTTP/3 handshake timeout", TAG)
 			h3TransportCache.Delete(cfg.ProxyAddr)
-			return nil, fmt.Errorf("h3 handshake timeout")
+			return nil, timeoutErr
 		}
 	})
 }

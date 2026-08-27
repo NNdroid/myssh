@@ -11,7 +11,7 @@ import (
 	"nhooyr.io/websocket"
 )
 
-// startWSEchoServer 启动一个 WebSocket 回声服务端，覆盖 ws 隧道握手与双向流。
+// startWSEchoServer  info  WebSocket  info ， info  ws tunnel info bidirectional info 。
 func startWSEchoServer(t *testing.T) (addr string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -29,7 +29,7 @@ func startWSEchoServer(t *testing.T) (addr string, stop func()) {
 				return
 			}
 			defer c.Close(websocket.StatusNormalClosure, "")
-			// 将 WS 连接当成 net.Conn 使用，回声原样写回。
+			//  info  WS  info  net.Conn  info ， info 。
 			nc := websocket.NetConn(context.Background(), c, websocket.MessageBinary)
 			_, _ = io.Copy(nc, nc)
 		}),
@@ -38,7 +38,7 @@ func startWSEchoServer(t *testing.T) (addr string, stop func()) {
 	return ln.Addr().String(), func() { _ = srv.Close(); _ = ln.Close() }
 }
 
-// TestWebSocketEchoRoundTrip 验证 ws（明文）隧道能完成握手并透传任意字节。
+// TestWebSocketEchoRoundTrip  info  ws（ info ）tunnel info completed info bytes。
 func TestWebSocketEchoRoundTrip(t *testing.T) {
 	addr, stop := startWSEchoServer(t)
 	defer stop()
@@ -85,7 +85,7 @@ func TestWebSocketEchoRoundTrip(t *testing.T) {
 	}
 }
 
-// TestWebSocketAuthFailure 验证当服务端返回 401 时，ws 隧道握手应返回错误。
+// TestWebSocketAuthFailure  info  401  info ，ws tunnel info 。
 func TestWebSocketAuthFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -93,7 +93,7 @@ func TestWebSocketAuthFailure(t *testing.T) {
 	}
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 直接拒绝，触发客户端 401 认证失败分支。
+			//  info ， info client 401 Authentication failed info 。
 			w.WriteHeader(http.StatusUnauthorized)
 		}),
 	}
@@ -130,7 +130,7 @@ func TestWebSocketAuthFailure(t *testing.T) {
 	}
 }
 
-// TestWebSocketRegistration 验证 ws/wss 均已在 init 阶段正确注册。
+// TestWebSocketRegistration  info  ws/wss  info  init  info 。
 func TestWebSocketRegistration(t *testing.T) {
 	for _, name := range []string{"ws", "wss"} {
 		proto, err := GetTunnel(name)

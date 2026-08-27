@@ -11,29 +11,39 @@ import (
 )
 
 var (
-	// 全局可用的 SugarLogger，默认给一个 Nop 避免未初始化时引发空指针 Panic
-	zlog *zap.SugaredLogger = zap.NewNop().Sugar()
+	//  info  SugarLogger，default info  Nop  info  Panic
+	zlog           *zap.SugaredLogger = zap.NewNop().Sugar()
+	atomicLogLevel                    = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
 
-// InitLogger 初始化通用日志记录器
-// logPath: 日志文件存放路径，如果为空字符串 ""，则只输出到控制台
-// logLevelStr: 日志级别 (DEBUG, INFO, WARN, ERROR)
-func InitLogger(logPath string, logLevelStr string) int {
+// SetLogLevel dynamically updates generic log level in real-time
+func SetLogLevel(logLevelStr string) {
 	var level zapcore.Level
-	switch strings.ToUpper(logLevelStr) {
+	switch strings.ToUpper(strings.TrimSpace(logLevelStr)) {
 	case "DEBUG":
 		level = zapcore.DebugLevel
 	case "INFO":
 		level = zapcore.InfoLevel
-	case "WARN":
+	case "WARN", "WARNING":
 		level = zapcore.WarnLevel
 	case "ERROR":
 		level = zapcore.ErrorLevel
 	default:
 		level = zapcore.InfoLevel
 	}
+	atomicLogLevel.SetLevel(level)
+	if zlog != nil {
+		zlog.Infof("[Logger] Generic log level updated to: %s", level.String())
+	}
+}
 
-	// 统一的日志格式配置
+// InitLogger  info
+// logPath:  info ， info  ""， info
+// logLevelStr:  info  (DEBUG, INFO, WARN, ERROR)
+func InitLogger(logPath string, logLevelStr string) int {
+	SetLogLevel(logLevelStr)
+
+	//  info config
 	encoderConfig := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
@@ -49,47 +59,47 @@ func InitLogger(logPath string, logLevelStr string) int {
 
 	var cores []zapcore.Core
 
-	// 1. 控制台输出配置 (附带颜色，方便在 Linux 终端查看)
+	// 1.  info config ( info ， info  Linux  info )
 	consoleEncoderConfig := encoderConfig
 	consoleEncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	consoleEncoder := zapcore.NewConsoleEncoder(consoleEncoderConfig)
 
-	// 标准输出 (Stdout)，Systemd 等守护进程会自动捕获这里的内容
-	consoleCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level)
+	//  info  (Stdout)，Systemd  info
+	consoleCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), atomicLogLevel)
 	cores = append(cores, consoleCore)
 
-	// 2. 文件输出配置 (如果有传入路径)
+	// 2.  info config ( info )
 	if logPath != "" {
-		// 文件输出不需要颜色代码，否则用 tail/cat 看会出现乱码
+		//  info ， info  tail/cat  info
 		fileEncoderConfig := encoderConfig
 		fileEncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
-		// 这里保留了你原代码中对文件的 Console 格式偏好，如果你喜欢 JSON 可以换成 NewJSONEncoder
+		//  info  Console  info ， info  JSON  info  NewJSONEncoder
 		fileEncoder := zapcore.NewConsoleEncoder(fileEncoderConfig)
 
-		// 使用 O_APPEND 追加模式，而不是 O_TRUNC 清空模式，防止程序重启丢失历史日志
+		//  info  O_APPEND  info mode， info  O_TRUNC  info mode， info
 		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
 		if err != nil {
-			// 文件打开失败返回错误码
+			//  info failed info
 			return -1
 		}
-		fileCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(file), level)
+		fileCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(file), atomicLogLevel)
 		cores = append(cores, fileCore)
 	}
 
-	// 将多个输出核心组合在一起
+	//  info
 	combinedCore := zapcore.NewTee(cores...)
 
-	// 实例化 logger，开启调用者行号显示
+	//  info  logger， info
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zap.ReplaceGlobals(logger)
 	zlog = logger.Sugar()
 
-	zlog.Infof("[Logger] Generic log system initialization completed | Level: %s | File: %s", level.String(), logPath)
+	zlog.Infof("[Logger] Generic log system initialization completed | Level: %s | File: %s", atomicLogLevel.Level().String(), logPath)
 
 	return 0
 }
 
-// SyncLogger 暴露给 main 函数，在程序退出前确保缓冲区日志落盘
+// SyncLogger  info  main  info ， info
 func SyncLogger() {
 	if zlog != nil {
 		_ = zlog.Sync()

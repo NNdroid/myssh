@@ -14,22 +14,22 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// tun2proxy UDPGW 协议常量定义
+// tun2proxy UDPGW  info
 const (
-	UdpgwFlagKeepalive = 0x01 // 心跳包 (无地址无数据)
-	UdpgwFlagData      = 0x02 // 数据包 (含地址和数据)
-	UdpgwFlagError     = 0x20 // 错误包 (无地址无数据)
+	UdpgwFlagKeepalive = 0x01 //  info  ( info address info )
+	UdpgwFlagData      = 0x02 //  info  ( info address info )
+	UdpgwFlagError     = 0x20 //  info  ( info address info )
 
-	UdpgwAtypIPv4   = 0x01 // SOCKS5 标准 IPv4
-	UdpgwAtypDomain = 0x03 // SOCKS5 标准 Domain
-	UdpgwAtypIPv6   = 0x04 // SOCKS5 标准 IPv6
+	UdpgwAtypIPv4   = 0x01 // SOCKS5  info  IPv4
+	UdpgwAtypDomain = 0x03 // SOCKS5  info  Domain
+	UdpgwAtypIPv6   = 0x04 // SOCKS5  info  IPv6
 )
 
-// UdpgwConn 将 SSH TCP 隧道包装为逻辑上的 UDPGW 连接
+// UdpgwConn  info  SSH TCP tunnel info  UDPGW  info
 type UdpgwConn struct {
 	net.Conn
-	targetAddressData []byte // 序列化后的目标 IP
-	targetPortData    []byte // 目标端口 (2字节)
+	targetAddressData []byte //  info target IP
+	targetPortData    []byte // targetport (2bytes)
 	addressType       byte   // ATYP
 
 	readLock  sync.Mutex
@@ -44,7 +44,7 @@ type UdpgwConn struct {
 	lastActive int64
 }
 
-// DialTun2proxyUdpgw 是基于 SSH 隧道的 UDPGW 协议拨号器
+// DialTun2proxyUdpgw  info  SSH tunnel info  UDPGW  info
 func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
 	if sshClient == nil {
 		return nil, fmt.Errorf("ssh client is not initialized")
@@ -107,7 +107,7 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		}
 	} else {
 		addrType = UdpgwAtypDomain
-		// 防御性拦截：SOCKS5 标准中域名的长度字段仅有 1 字节，超长域名会引发 byte() 强转溢出
+		//  info ：SOCKS5  info  1 bytes， info  byte()  info
 		if len(host) > 255 {
 			underlyingConn.Close()
 			return nil, fmt.Errorf("domain name too long: %d bytes", len(host))
@@ -126,23 +126,23 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 	}
 	atomic.StoreInt64(&c.lastActive, time.Now().Unix())
 
-	// 启动后台心跳守护
+	//  info
 	go c.keepAliveLoop()
 
 	return c, nil
 }
 
 func (c *UdpgwConn) keepAliveLoop() {
-	// tun2proxy Keepalive 格式: [LEN: 3] [FLAG: 0x01] [CONN_ID: 1]
+	// tun2proxy Keepalive  info : [LEN: 3] [FLAG: 0x01] [CONN_ID: 1]
 	keepalivePkt := []byte{0x00, 0x03, UdpgwFlagKeepalive, 0x00, 0x01}
 
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	// 给予远端建连缓冲时间，最多重试 3 次
+	//  info ， info retry 3  info
 	var initialErr error
 	for i := 0; i < 3; i++ {
-		// 稍微等一下，让子弹飞一会儿 (第一次循环也会等，正好给 SSH 握手留时间)
+		//  info ， info  ( info ， info  SSH  info )
 		time.Sleep(time.Duration(i+1) * time.Millisecond * 100)
 
 		c.writeLock.Lock()
@@ -150,14 +150,14 @@ func (c *UdpgwConn) keepAliveLoop() {
 		c.writeLock.Unlock()
 
 		if initialErr == nil {
-			break // 成功了就跳出循环
+			break // successfully info
 		}
 		if Debug {
 			zlog.Warnf("%s [UDPGW-Daemon] ⚠️ Initial Keepalive attempt %d failed: %v", TAG, i+1, initialErr)
 		}
 	}
 
-	// 如果 3 次都失败了，说明通道真的坏了
+	//  info  3  info failed info ， info channel info
 	if initialErr != nil {
 		zlog.Errorf("%s [UDPGW-Daemon] ❌ Failed to send initial Keepalive after retries: %v", TAG, initialErr)
 		c.Close()
@@ -175,7 +175,7 @@ func (c *UdpgwConn) keepAliveLoop() {
 			return
 		}
 
-		// 双向检测，45秒没下行包直接判定假死
+		// bidirectional info ，45 info downlink info
 		last := atomic.LoadInt64(&c.lastActive)
 		if time.Now().Unix()-last > 45 {
 			zlog.Errorf("%s [UDPGW-Daemon] ❌ Server heartbeat timeout (45s), connection dead", TAG)
@@ -183,16 +183,16 @@ func (c *UdpgwConn) keepAliveLoop() {
 			return
 		}
 
-		// 发送心跳包
+		// send info
 		c.writeLock.Lock()
 		_, err := c.Conn.Write(keepalivePkt)
 		c.writeLock.Unlock()
 
-		// 捕获断线错误并自动关闭重连
+		//  info closed info
 		if err != nil {
 			select {
 			case <-c.closed:
-				return // 正常下线
+				return //  info
 			default:
 			}
 			zlog.Errorf("%s [UDPGW-Daemon] ❌ Failed to write Keepalive: %v", TAG, err)
@@ -209,7 +209,7 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	dataLen := len(payload)
 	// headerLen = 1(FLAG) + 2(CONN_ID) + 1(ATYP) + addrLen + 2(PORT)
 	headerLen := 3 + (1 + len(c.targetAddressData) + 2)
-	totalSize := headerLen + dataLen // 不包含 LEN 字段本身的长度
+	totalSize := headerLen + dataLen //  info  LEN  info
 
 	bufPtr := udpBufPool.Get().(*[]byte)
 	buffer := (*bufPtr)[:cap(*bufPtr)]
@@ -221,7 +221,7 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 
 	packet := buffer[:2+totalSize]
 	binary.BigEndian.PutUint16(packet[0:2], uint16(totalSize))
-	packet[2] = UdpgwFlagData                  // tun2proxy 数据包 Flag: 0x02
+	packet[2] = UdpgwFlagData                  // tun2proxy  info  Flag: 0x02
 	binary.BigEndian.PutUint16(packet[3:5], 1) // CONN_ID: 1
 
 	packet[5] = c.addressType
@@ -276,7 +276,7 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 		}
 
 		if pLen == 0 {
-			continue // 防御性拦截：空包直接丢弃，防止下方 body[0] 触发 index out of range 崩溃
+			continue //  info ： info discarded， info  body[0]  info  index out of range  info
 		}
 
 		body := bodyBuf[:pLen]
@@ -289,13 +289,13 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet payload: %v", TAG, err)
 			return 0, err
 		}
-		// 只要完整读取到了包（不管是心跳、数据还是Error），说明连接存活，立刻刷新
+		//  info （ info 、 info Error）， info ， info
 		atomic.StoreInt64(&c.lastActive, time.Now().Unix())
 
 		flag := body[0]
 		switch flag {
-		case UdpgwFlagData: // 0x02 数据包
-			offset := 3 // 跳过 FLAG(1) + CONN_ID(2)
+		case UdpgwFlagData: // 0x02  info
+			offset := 3 //  info  FLAG(1) + CONN_ID(2)
 			if offset >= int(pLen) {
 				continue
 			}
@@ -310,11 +310,11 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 				offset += 16
 			case UdpgwAtypDomain:
 				if offset >= int(pLen) {
-					break // 防御性拦截：提前跳出，让下方的越界校验去处理丢包，防止 body[offset] 触发 Panic
+					break //  info ： info ， info ， info  body[offset]  info  Panic
 				}
 				offset += int(body[offset]) + 1
 			}
-			offset += 2 // 跳过 DST.PORT(2)
+			offset += 2 //  info  DST.PORT(2)
 
 			if offset > int(pLen) {
 				zlog.Errorf("%s [UDPGW-Read] ❌ Packet out of bounds, safely discarded", TAG)
@@ -330,15 +330,15 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			}
 			return n, nil
 
-		case UdpgwFlagKeepalive: // 0x01 心跳回包
+		case UdpgwFlagKeepalive: // 0x01  info
 			if Debug {
 				zlog.Debugf("%s [UDPGW-Read] 💓 Received remote Keepalive response", TAG)
 			}
 			continue
 
-		case UdpgwFlagError: // 0x20 远端错误
+		case UdpgwFlagError: // 0x20  info
 			zlog.Errorf("%s [UDPGW-Read] ❌ Received remote UDPGW error (Flag: 0x20)! Target may be unreachable or resolution failed", TAG)
-			// 不要继续循环，这会导致调用者永久阻塞。立即返回错误，让上层清理会话。
+			//  info ， info 。 info ， info cleanup info 。
 			return 0, fmt.Errorf("remote udpgw server reported error (flag 0x20)")
 
 		default:

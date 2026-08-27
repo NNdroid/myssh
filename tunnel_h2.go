@@ -15,17 +15,17 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// 全域 HTTP/2 連線快取，實現真正的多工複用 (Multiplexing)
+// info  HTTP/2  info ， info  (Multiplexing)
 var h2TransportCache sync.Map
 
 // ==========================================
-// HTTP/2 雙向流轉 net.Conn 适配器
+// HTTP/2  info  net.Conn  info
 // ==========================================
 type streamConn struct {
 	pw       *io.PipeWriter
 	respBody io.ReadCloser
 	cancel   context.CancelFunc
-	remote   string // 儲存遠端地址，取代實體的 net.Conn
+	remote   string //  info address， info  net.Conn
 }
 
 func (s *streamConn) Read(b []byte) (n int, err error)  { return s.respBody.Read(b) }
@@ -34,7 +34,7 @@ func (s *streamConn) Close() error {
 	s.cancel()
 	s.pw.Close()
 	return s.respBody.Close()
-	// 🚨 絕對不可在此關閉實體 TCP 連線，因為它是多工複用共享的！
+	// 🚨  info  TCP  info ， info ！
 }
 func (s *streamConn) LocalAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
 func (s *streamConn) RemoteAddr() net.Addr {
@@ -49,13 +49,13 @@ func (s *streamConn) SetReadDeadline(t time.Time) error  { return nil }
 func (s *streamConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // ==========================================
-// gRPC 数据帧封装器
+// gRPC  info
 // ==========================================
 
-// gRPC 專用的零分配記憶體池，完美解決高頻率發送時的 GC 壓力
+// gRPC  info ， info  GC  info
 var grpcBufPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, 32*1024+5) // 預設 32KB + 5 bytes Header
+		b := make([]byte, 32*1024+5) //  info  32KB + 5 bytes Header
 		return &b
 	},
 }
@@ -72,10 +72,10 @@ func (g *grpcWriter) Write(p []byte) (n int, err error) {
 	bufPtr := grpcBufPool.Get().(*[]byte)
 	buf := *bufPtr
 
-	// 將 Header 與 Payload 合併寫入，確保底層 H2 Framer 只發送一個 DATA 幀
+	//  info  Header  info  Payload  info ， info  H2 Framer  info  DATA  info
 	totalLen := len(p) + 5
 	if totalLen > cap(buf) {
-		buf = make([]byte, totalLen) // 若超載則臨時分配
+		buf = make([]byte, totalLen) //  info
 	} else {
 		buf = buf[:totalLen]
 	}
@@ -85,7 +85,7 @@ func (g *grpcWriter) Write(p []byte) (n int, err error) {
 
 	_, err = g.w.Write(buf)
 
-	if cap(buf) <= 64*1024 { // 保護機制：不回收異常巨大的記憶體塊
+	if cap(buf) <= 64*1024 { //  info ： info
 		grpcBufPool.Put(bufPtr)
 	}
 
@@ -129,31 +129,31 @@ func (g *grpcConn) Read(b []byte) (n int, err error)  { return g.gr.Read(b) }
 func (g *grpcConn) Write(b []byte) (n int, err error) { return g.gw.Write(b) }
 
 // ==========================================
-// 核心握手逻辑与注册
+//  info
 // ==========================================
 
-// acquireH2Transport 获取或复用一条 HTTP/2（含 gRPC）多工传输通道。
+// acquireH2Transport  info  HTTP/2（ info  gRPC） info channel。
 //
-// 命中缓存时关闭外层多余的 baseConn 并直接复用共享 Transport；未命中时基于 baseConn
-// 构建新的 Transport 并写入全局缓存。返回的 *http.Client 由调用方用于发起隧道握手请求。
+//	info closed info  baseConn  info  Transport； info  baseConn
+//	info  Transport  info 。 info  *http.Client  info tunnel info 。
 func acquireH2Transport(ctx context.Context, cacheKey string, isTLS bool, cfg ProxyConfig, baseConn net.Conn) (*http.Client, error) {
 	if cached, ok := h2TransportCache.Load(cacheKey); ok {
-		// 命中缓存：释放外层多余的 TCP 连接，直接复用现有高速通道
+		//  info ： info  TCP  info ， info channel
 		baseConn.Close()
 		zlog.Debugf("%s [Tunnel] ⚡ Reused cached multiplexing transport", TAG)
 		return cached.(*http.Client), nil
 	}
 
-	// 缓存未命中：建立新的 Transport
+	//  info ： info  Transport
 	var firstConnUsed int32
 	transport := &http2.Transport{}
 
-	// 智慧拨号器：第一次握手消耗 baseConn，若未来断线重连则自动拨号新连接
+	//  info ： info  baseConn， info
 	smartDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var c net.Conn
 		var dialErr error
 		if atomic.CompareAndSwapInt32(&firstConnUsed, 0, 1) {
-			c = baseConn // 充分利用外层已建立的 Socket
+			c = baseConn //  info  Socket
 		} else {
 			c, dialErr = dialTCP(ctx, cfg, cfg.ProxyAddr)
 			if dialErr != nil {
@@ -184,8 +184,11 @@ func acquireH2Transport(ctx context.Context, cacheKey string, isTLS bool, cfg Pr
 		transport.AllowHTTP = true
 		transport.DialTLSContext = func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
 			c, err := smartDialer(ctx, network, addr)
-			c.SetDeadline(time.Time{}) // 清除超时
-			return c, err
+			if err != nil {
+				return nil, err
+			}
+			c.SetDeadline(time.Time{}) //  info timeout
+			return c, nil
 		}
 	}
 
@@ -243,7 +246,7 @@ func init() {
 		}
 
 		// ==========================================
-		// 多工複用快取機制與 Zero-Waste 撥號
+		//  info  Zero-Waste  info
 		// ==========================================
 		cacheKey := cfg.ProxyAddr + "|" + protoName
 		client, err := acquireH2Transport(ctx, cacheKey, isTLS, cfg, baseConn)
@@ -270,7 +273,7 @@ func init() {
 			cancel()
 			pw.CloseWithError(err)
 			pr.CloseWithError(err)
-			h2TransportCache.Delete(cacheKey) // 發生網路底層錯誤時，主動剔除失效快取
+			h2TransportCache.Delete(cacheKey) //  info ， info
 			zlog.Errorf("%s [Tunnel] ❌ %s handshake request failed: %v", TAG, protoName, err)
 			return nil, err
 
@@ -280,14 +283,14 @@ func init() {
 				resp.Body.Close()
 				pw.CloseWithError(fmt.Errorf("status %d", resp.StatusCode))
 				pr.CloseWithError(fmt.Errorf("status %d", resp.StatusCode))
-				h2TransportCache.Delete(cacheKey) // 剔除失效快取
+				h2TransportCache.Delete(cacheKey) //  info
 				zlog.Errorf("%s [Tunnel] ❌ %s server rejected, status code: %d", TAG, protoName, resp.StatusCode)
 				return nil, fmt.Errorf("HTTP status: %d", resp.StatusCode)
 			}
 			zlog.Infof("%s [Tunnel] ✅ %s tunnel handshake successful", TAG, protoName)
 
 			sConn := &streamConn{
-				remote:   cfg.ProxyAddr, // 傳入遠端地址
+				remote:   cfg.ProxyAddr, //  info address
 				pw:       pw,
 				respBody: resp.Body,
 				cancel:   cancel,
@@ -310,7 +313,7 @@ func init() {
 			timeoutErr := fmt.Errorf("%s handshake timeout", protoName)
 			pw.CloseWithError(timeoutErr)
 			pr.CloseWithError(timeoutErr)
-			h2TransportCache.Delete(cacheKey) // 剔除失效快取
+			h2TransportCache.Delete(cacheKey) //  info
 			zlog.Errorf("%s [Tunnel] ❌ %s handshake timeout", TAG, protoName)
 			return nil, timeoutErr
 		}

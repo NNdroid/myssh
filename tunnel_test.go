@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// fakeConn 是一个仅用于测试的 net.Conn 桩实现。
-// 隧道层测试不需要真实网络，只关心 Close 的副作用（缓存命中时应被关闭）。
+// fakeConn  info  net.Conn  info 。
+// tunnel info ， info  Close  info （ info closed）。
 type fakeConn struct {
 	closed bool
 }
@@ -24,8 +24,9 @@ func (c *fakeConn) SetDeadline(t time.Time) error      { return nil }
 func (c *fakeConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *fakeConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// TestTunnelRegistry 验证核心隧道协议均在 init 阶段正确注册，
-// 并返回预期的 network 与非空 handler；未知协议应报错。
+// TestTunnelRegistry  info tunnel info  init  info ，
+//
+//	info  network  info  handler；unknown info 。
 func TestTunnelRegistry(t *testing.T) {
 	tests := []struct {
 		key         string
@@ -63,9 +64,9 @@ func TestTunnelRegistry(t *testing.T) {
 	}
 }
 
-// TestAcquireH2Transport 验证 H2/gRPC 传输通道的缓存语义：
-//   - 首次调用（缓存未命中）返回非空的 *http.Client；
-//   - 同 key 第二次调用应命中缓存并返回同一指针，同时关闭新传入的 baseConn。
+// TestAcquireH2Transport  info  H2/gRPC  info channel info ：
+//   - info （ info ） info  *http.Client；
+//   - info  key  info ， info closed info  baseConn。
 func TestAcquireH2Transport(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -76,7 +77,7 @@ func TestAcquireH2Transport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 重置全局缓存，保证用例相互独立。
+			//  info ， info 。
 			h2TransportCache = sync.Map{}
 			cacheKey := "proxy.example.com:443|" + tt.name
 			cfg := ProxyConfig{
@@ -93,7 +94,7 @@ func TestAcquireH2Transport(t *testing.T) {
 				t.Fatal("expected non-nil client with a Transport")
 			}
 
-			// 第二次同 key 应命中缓存，复用同一 client，并关闭新传入的 baseConn。
+			//  info  key  info ， info  client， info closed info  baseConn。
 			base2 := &fakeConn{}
 			client2, err := acquireH2Transport(context.Background(), cacheKey, tt.isTLS, cfg, base2)
 			if err != nil {
@@ -109,8 +110,8 @@ func TestAcquireH2Transport(t *testing.T) {
 	}
 }
 
-// TestBuildUTLSConfig 验证 uTLS 配置构造正确：ServerName、InsecureSkipVerify、
-// ALPN（NextProtos）以及证书校验回调均按预期设置。
+// TestBuildUTLSConfig  info  uTLS config info ：ServerName、InsecureSkipVerify、
+// ALPN（NextProtos） info 。
 func TestBuildUTLSConfig(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -156,8 +157,9 @@ func TestBuildUTLSConfig(t *testing.T) {
 	}
 }
 
-// TestGRPCFramingRoundTrip 对 gRPC 数据帧封装/解封装做表驱动往返测试，
-// 覆盖小包、中包、32KB 边界、超大包与二进制数据，验证零拷贝帧格式正确还原。
+// TestGRPCFramingRoundTrip  info  gRPC  info / info ，
+//
+//	info 、 info 、32KB  info 、 info ， info 。
 func TestGRPCFramingRoundTrip(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -201,8 +203,9 @@ func TestGRPCFramingRoundTrip(t *testing.T) {
 	}
 }
 
-// TestStreamConnAddr 验证 streamConn 的地址解析：
-// 合法地址应解析为对应 *net.TCPAddr；非法地址应回退到默认 443 端口。
+// TestStreamConnAddr  info  streamConn  info address info ：
+//
+//	info address info  *net.TCPAddr； info address info default 443 port。
 func TestStreamConnAddr(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -226,7 +229,7 @@ func TestStreamConnAddr(t *testing.T) {
 				t.Errorf("RemoteAddr().Port = %d, want %d", tcp.Port, tt.wantPort)
 			}
 
-			// LocalAddr 应始终返回零值地址。
+			// LocalAddr  info address。
 			la := s.LocalAddr()
 			if la.String() != (&net.TCPAddr{IP: net.IPv4zero, Port: 0}).String() {
 				t.Errorf("LocalAddr() = %v, want zero TCP addr", la)

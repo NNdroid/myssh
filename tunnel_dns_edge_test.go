@@ -14,16 +14,17 @@ import (
 )
 
 // =============================================================
-// tunnel_dns.go 的边缘场景与错误路径测试
+// tunnel_dns_custom.go  info
 //
-// 本文件补充 tunnel_dns_test.go 未覆盖的分支：空写入、读超时/截止时间、
-// 关闭后行为、服务端关闭会话→EOF、NULL/CNAME 记录类型双向、并发读写、
-// TCP 传输，以及 NewDNSTunnel 的配置错误分支。
-// 复用同包内的 startTestDnsServer / readSessionN / readConnN / stopTestDnsServer。
+//  info  tunnel_dns_test.go  info ： info 、 info timeout/ info 、
+// closed info 、 info closed info →EOF、NULL/CNAME  info bidirectional、 info 、
+// TCP  info ， info  NewDNSTunnel  info config info 。
+//  info  startTestDnsServer / readSessionN / readConnN / stopTestDnsServer。
 // =============================================================
 
-// startTestDnsServerTCP 在 loopback TCP 上启动隧道权威 DNS 服务端，
-// 返回服务端实例、DNS Server 与带 tcp:// 前缀的可达地址（供 dns_tunnel_servers 使用）。
+// startTestDnsServerTCP  info  loopback TCP  info tunnel info  DNS  info ，
+//
+//	info 、DNS Server  info  tcp://  info address（ info  dns_tunnel_servers  info ）。
 func startTestDnsServerTCP(t *testing.T) (*DNSTunnelServer, *dns.Server, string) {
 	t.Helper()
 	srv := NewDNSTunnelServer("tunnel.test.")
@@ -37,7 +38,7 @@ func startTestDnsServerTCP(t *testing.T) (*DNSTunnelServer, *dns.Server, string)
 	return srv, dnsSrv, addr
 }
 
-// TestDNSTunnelEmptyWrite 验证写入空切片时不发送任何查询、不报错，且隧道仍可正常使用。
+// TestDNSTunnelEmptyWrite  info send info 、 info ， info tunnel info 。
 func TestDNSTunnelEmptyWrite(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
@@ -45,7 +46,7 @@ func TestDNSTunnelEmptyWrite(t *testing.T) {
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{addr}, "tunnel.test.", dns.TypeTXT, "sessEmpty")
 	defer tunnel.Close()
 
-	// 空写入：循环体不执行，应直接返回 (0, nil)，不触发任何上行查询
+	//  info ： info ， info  (0, nil)， info uplink info
 	n, err := tunnel.Write(nil)
 	if err != nil {
 		t.Fatalf("empty write should not error: %v", err)
@@ -54,7 +55,7 @@ func TestDNSTunnelEmptyWrite(t *testing.T) {
 		t.Fatalf("empty write should return 0 bytes, got %d", n)
 	}
 
-	// 隧道仍可用：随后写入应正常落地
+	// tunnel info ： info
 	msg := []byte("after-empty-ok")
 	if _, err := tunnel.Write(msg); err != nil {
 		t.Fatalf("write after empty: %v", err)
@@ -68,12 +69,12 @@ func TestDNSTunnelEmptyWrite(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelReadDeadline 验证 SetReadDeadline 到过去时间时，Read 立即返回截止错误。
+// TestDNSTunnelReadDeadline  info  SetReadDeadline  info ，Read  info 。
 func TestDNSTunnelReadDeadline(t *testing.T) {
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{"127.0.0.1:1"}, "tunnel.test.", dns.TypeTXT, "sessDL")
 	defer tunnel.Close()
 
-	// 截止时间设在过去，Read 不应阻塞或上行任何查询
+	//  info ，Read  info uplink info
 	tunnel.SetReadDeadline(time.Now().Add(-time.Second))
 
 	buf := make([]byte, 16)
@@ -86,10 +87,10 @@ func TestDNSTunnelReadDeadline(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelReadAfterClose 验证关闭后 Read/Write 立即返回 net.ErrClosed，不触发上行。
+// TestDNSTunnelReadAfterClose  info closed info  Read/Write  info  net.ErrClosed， info uplink。
 func TestDNSTunnelReadAfterClose(t *testing.T) {
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{"127.0.0.1:1"}, "tunnel.test.", dns.TypeTXT, "sessRC")
-	// 先关闭（内部 attempt 关闭查询被忽略错误）
+	//  info closed（ info  attempt closed info ignored info ）
 	if err := tunnel.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestDNSTunnelReadAfterClose(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelServerCloseEOF 验证客户端关闭后，服务端 ReadSession 返回 io.EOF。
+// TestDNSTunnelServerCloseEOF  info clientclosed info ， info  ReadSession  info  io.EOF。
 func TestDNSTunnelServerCloseEOF(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
@@ -123,17 +124,17 @@ func TestDNSTunnelServerCloseEOF(t *testing.T) {
 		t.Fatalf("client->server mismatch: got %q want %q", got, msg)
 	}
 
-	// 客户端关闭会话（同步发送关闭查询，服务端 markClosed 后才返回）
+	// clientclosed info （ info sendclosed info ， info  markClosed  info ）
 	if err := tunnel.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	// 服务端后续读取应得到 EOF
+	//  info  EOF
 	if _, err := srv.ReadSession(sess, 8); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected io.EOF after close, got %v", err)
 	}
 }
 
-// TestDNSTunnelTypeNULL 验证 NULL 记录类型双向传输（含多片分块：300 字节）。
+// TestDNSTunnelTypeNULL  info  NULL  info bidirectional info （ info ：300 bytes）。
 func TestDNSTunnelTypeNULL(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
@@ -160,7 +161,7 @@ func TestDNSTunnelTypeNULL(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelTypeCNAME 验证 CNAME 记录类型双向传输（小负载，因单标签上限 ~39 字节）。
+// TestDNSTunnelTypeCNAME  info  CNAME  info bidirectional info （ info ， info  ~39 bytes）。
 func TestDNSTunnelTypeCNAME(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
@@ -168,7 +169,7 @@ func TestDNSTunnelTypeCNAME(t *testing.T) {
 	tunnel := newDNSTunnel(context.Background(), ProxyConfig{}, []string{addr}, "tunnel.test.", dns.TypeCNAME, "sessCNAME")
 	defer tunnel.Close()
 
-	payload := bytes.Repeat([]byte("C"), 20) // 20 字节 < 39 字节上限
+	payload := bytes.Repeat([]byte("C"), 20) // 20 bytes < 39 bytes info
 	if _, err := tunnel.Write(payload); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestDNSTunnelTypeCNAME(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelConcurrentRW 验证同一隧道上客户端「并发写 + 并发读（回显）」不丢数据、不死锁。
+// TestDNSTunnelConcurrentRW  info tunnel info client「 info  +  info （ info ）」 info 、 info 。
 func TestDNSTunnelConcurrentRW(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServer(t)
 	defer stopTestDnsServer(t, dnsSrv)
@@ -197,7 +198,7 @@ func TestDNSTunnelConcurrentRW(t *testing.T) {
 
 	payload := bytes.Repeat([]byte("Q"), 800)
 
-	// 服务端：等会话、收全量、原样回显
+	//  info ： info 、 info 、 info
 	go func() {
 		sess, err := srv.WaitForSession(5 * time.Second)
 		if err != nil {
@@ -208,7 +209,7 @@ func TestDNSTunnelConcurrentRW(t *testing.T) {
 		srv.WriteSession(sess, data)
 	}()
 
-	// 客户端：写与读并发进行（Write 发数据查询，Read 发轮询查询，共享 exchangeMu 串行化上行）
+	// client： info （Write  info ，Read  info ， info  exchangeMu  info uplink）
 	writeDone := make(chan error, 1)
 	go func() {
 		_, e := tunnel.Write(payload)
@@ -223,7 +224,7 @@ func TestDNSTunnelConcurrentRW(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelTCPTransport 验证通过 tcp:// 上游（而非默认 udp）完成完整往返。
+// TestDNSTunnelTCPTransport  info  tcp://  info （ info default udp）completed info 。
 func TestDNSTunnelTCPTransport(t *testing.T) {
 	srv, dnsSrv, addr := startTestDnsServerTCP(t)
 	defer stopTestDnsServer(t, dnsSrv)
@@ -250,7 +251,7 @@ func TestDNSTunnelTCPTransport(t *testing.T) {
 	}
 }
 
-// TestDNSTunnelConfigErrors 覆盖 NewDNSTunnel 的配置校验与 dnsTypeToQType 的 default 分支。
+// TestDNSTunnelConfigErrors  info  NewDNSTunnel  info config info  dnsTypeToQType  info  default  info 。
 func TestDNSTunnelConfigErrors(t *testing.T) {
 	cases := []struct {
 		name    string

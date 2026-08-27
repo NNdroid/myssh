@@ -9,14 +9,15 @@ import (
 	"strings"
 )
 
-// BufferedConn 包装原始 net.Conn 和 bufio.Reader
-// 确保后续的读取优先消耗掉 bufio 里残留的数据
+// BufferedConn  info  net.Conn  info  bufio.Reader
+//
+//	info  bufio  info
 type BufferedConn struct {
 	net.Conn
 	r *bufio.Reader
 }
 
-// 拦截 Read 方法，强制从 bufio.Reader 中读取
+// info  Read  info ， info  bufio.Reader  info
 func (b *BufferedConn) Read(p []byte) (int, error) {
 	return b.r.Read(p)
 }
@@ -29,14 +30,14 @@ func init() {
 			return nil, fmt.Errorf("HttpPayload is required")
 		}
 
-		// 基础变量替换
+		//  info
 		rawPayload := cfg.HttpPayload
 		rawPayload = strings.ReplaceAll(rawPayload, "[host_and_port]", cfg.SshAddr)
 		rawPayload = strings.ReplaceAll(rawPayload, "[host]", cfg.CustomHost)
 		rawPayload = strings.ReplaceAll(rawPayload, "[user_agent]", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
 		rawPayload = strings.ReplaceAll(rawPayload, "[crlf]", "\r\n")
 
-		// 用户名密码认证逻辑
+		//  info
 		if cfg.ProxyAuthRequired {
 			auth := cfg.ProxyAuthUser + ":" + cfg.ProxyAuthPass
 			encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
@@ -54,7 +55,7 @@ func init() {
 			zlog.Debugf("%s [Tunnel] 🔑 Injected authentication info (User: %s)", TAG, cfg.ProxyAuthUser)
 		}
 
-		// 提取 Method 用于日志
+		//  info  Method  info
 		method := "UNKNOWN"
 		trimmedPayload := strings.TrimSpace(rawPayload)
 		if firstSpace := strings.Index(trimmedPayload, " "); firstSpace != -1 {
@@ -62,14 +63,14 @@ func init() {
 		}
 
 		// ==========================================
-		// 打印即将发送的完整 Payload (使用 %q 显式打印 \r\n 等不可见字符)
+		//  info send info  Payload ( info  %q  info  \r\n  info )
 		// ==========================================
 		zlog.Infof("%s [Tunnel] 🚀 Preparing to send request (Method: %s)", TAG, method)
 		if Debug {
 			zlog.Debugf("%s [Tunnel] ⬆️ Sent full Payload data:\n%q", TAG, rawPayload)
 		}
 
-		// 发送请求
+		// send info
 		n, err := baseConn.Write([]byte(rawPayload))
 		if err != nil {
 			baseConn.Close()
@@ -80,7 +81,7 @@ func init() {
 			zlog.Debugf("%s [Tunnel] ⬆️ Payload sent successfully | Bytes Written: %d", TAG, n)
 		}
 
-		// 解析响应
+		//  info
 		br := bufio.NewReader(baseConn)
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -90,7 +91,7 @@ func init() {
 		}
 
 		// ==========================================
-		// 打印收到的第一行状态行
+		//  info
 		// ==========================================
 		if Debug {
 			zlog.Debugf("%s [Tunnel] ⬇️ Received proxy server response line: %q", TAG, strings.TrimSpace(line))
@@ -111,7 +112,7 @@ func init() {
 			return nil, fmt.Errorf("status line parsing error: %v", err)
 		}
 
-		// 状态校验
+		//  info
 		if !cfg.DisableStatusCheck {
 			if statusCode == 401 || statusCode == 407 {
 				baseConn.Close()
@@ -126,15 +127,20 @@ func init() {
 		}
 
 		// ==========================================
-		// 打印所有返回的 Headers，直到遇到空行
+		//  info  Headers， info
 		// ==========================================
 		if Debug {
 			zlog.Debugf("%s [Tunnel] ⬇️ Start reading the response header...", TAG)
 		}
-		// 消耗头部直到空行
+		//  info
 		for {
 			l, err := br.ReadString('\n')
-			if err != nil || l == "\r\n" || l == "\n" || l == "" {
+			if err != nil {
+				baseConn.Close()
+				zlog.Errorf("%s [Tunnel] ❌ Failed to read response header line: %v", TAG, err)
+				return nil, fmt.Errorf("failed to read header: %w", err)
+			}
+			if l == "\r\n" || l == "\n" || l == "" {
 				break
 			}
 			if Debug {
@@ -144,7 +150,7 @@ func init() {
 
 		zlog.Infof("%s [Tunnel] ✅ HTTP %s tunnel established", TAG, method)
 
-		// 返回我们包装过的 BufferedConn，把含有残留 SSH 握手数据的 br 缝合进去
+		//  info  BufferedConn， info  SSH  info  br  info
 		wrappedConn := &BufferedConn{
 			Conn: baseConn,
 			r:    br,

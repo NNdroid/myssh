@@ -384,7 +384,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const isHttp = tunnelType === 'http';
             const isBase = tunnelType === 'base';
             const isMasque = tunnelType === 'masque';
-            const isDns = tunnelType === 'dns' || tunnelType === 'vaydns';
+            const isDns = tunnelType === 'dns_custom' || tunnelType === 'dns' || tunnelType === 'vaydns';
             const isKcp = tunnelType === 'kcp';
             const isUdpCustom = tunnelType === 'udp_custom';
             const isWss = ['ws', 'wss'].includes(tunnelType);
@@ -546,6 +546,28 @@ document.addEventListener('DOMContentLoaded', () => {
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
             
+            // Validation
+            const validateAddr = (addr, fieldName, allowRange) => {
+                if (!addr) {
+                    showToast(fieldName + ' is required', 'error');
+                    return false;
+                }
+                const portRangePattern = "(\\d+(?:-\\d+)?(?:,\\d+(?:-\\d+)?)*)";
+                const singlePortPattern = "(\\d+)";
+                const portPattern = allowRange ? portRangePattern : singlePortPattern;
+                const regex = new RegExp("^(.+):" + portPattern + "$");
+                if (!regex.test(addr)) {
+                    showToast(allowRange ? i18n.t('error_invalid_address') : i18n.t('error_invalid_address_single_port'), 'error');
+                    return false;
+                }
+                return true;
+            };
+
+            if (!validateAddr(nodeData.sshAddr, 'SSH Address', false)) return;
+            if (nodeData.tunnelType !== 'base' && nodeData.tunnelType !== 'dns_custom') {
+                if (!validateAddr(nodeData.proxyAddr, 'Proxy Address', nodeData.tunnelType === 'udp_custom')) return;
+            }
+
             let res;
             if (state.currentNodeId) {
                 res = await api.put(`/nodes/${state.currentNodeId}`, nodeData);

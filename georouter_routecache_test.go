@@ -4,9 +4,9 @@ import (
 	"testing"
 )
 
-// TestGeoRouter_ShouldDirect_IPRule 验证命中 GeoIP CIDR 前缀树的 IP 直接返回直连。
+// TestGeoRouter_ShouldDirect_IPRule  info  GeoIP CIDR  info  IP  info 。
 func TestGeoRouter_ShouldDirect_IPRule(t *testing.T) {
-	r := setupTestRouter() // 已插入 8.8.8.8/32 与 192.168.0.0/16
+	r := setupTestRouter() //  info  8.8.8.8/32  info  192.168.0.0/16
 
 	tests := []struct {
 		name string
@@ -28,7 +28,7 @@ func TestGeoRouter_ShouldDirect_IPRule(t *testing.T) {
 	}
 }
 
-// TestGeoRouter_ShouldDirect_Proxy 验证未命中任何直连规则的域名走代理，并被写入路由解析缓存。
+// TestGeoRouter_ShouldDirect_Proxy  info ， info 。
 func TestGeoRouter_ShouldDirect_Proxy(t *testing.T) {
 	r := setupTestRouter()
 	host := "www.example-not-in-rules.com"
@@ -41,7 +41,7 @@ func TestGeoRouter_ShouldDirect_Proxy(t *testing.T) {
 		t.Errorf("DialHost = %q, want %q", got.DialHost, host)
 	}
 
-	// 二次调用应命中路由解析缓存（routeIPCache），行为保持一致且不再触发同步解析
+	//  info （routeIPCache）， info
 	if _, ok := r.routeIPCache.Load(host); !ok {
 		t.Errorf("expected host %q to be populated in routeIPCache after first ShouldDirect call", host)
 	}
@@ -51,7 +51,7 @@ func TestGeoRouter_ShouldDirect_Proxy(t *testing.T) {
 	}
 }
 
-// TestGeoRouter_ShouldDirect_ResetCache 验证 ResetCacheAndStats 会清空路由解析缓存。
+// TestGeoRouter_ShouldDirect_ResetCache  info  ResetCacheAndStats  info 。
 func TestGeoRouter_ShouldDirect_ResetCache(t *testing.T) {
 	r := setupTestRouter()
 	host := "www.example-reset-test.com"
@@ -66,7 +66,7 @@ func TestGeoRouter_ShouldDirect_ResetCache(t *testing.T) {
 	}
 }
 
-// TestGeoRouter_ShouldDirect_Empty 验证空输入被安全拒绝（不 panic）。
+// TestGeoRouter_ShouldDirect_Empty  info （ info  panic）。
 func TestGeoRouter_ShouldDirect_Empty(t *testing.T) {
 	r := setupTestRouter()
 	if got := r.ShouldDirect(""); got.IsDirect {

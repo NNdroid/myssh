@@ -234,14 +234,15 @@
                                 <option value="wt" data-i18n="opt_wt">WebTransport</option>
                                 <option value="xhttpc" data-i18n="opt_xhttpc">XHTTP Cleartext</option>
                                 <option value="xhttp" data-i18n="opt_xhttp">XHTTP TLS</option>
-                                <option value="dns" data-i18n="opt_dns_tunnel">DNS Tunnel (SSH-over-DNS)</option>
+                                <option value="dns_custom" data-i18n="opt_dns_tunnel">DNS Tunnel (SSH-over-DNS)</option>
                                 <option value="kcp" data-i18n="opt_kcp">KCP (SSH over UDP)</option>
                                 <option value="udp_custom" data-i18n="opt_udp_custom">UDP Custom (HTTP Custom Compatible)</option>
                             </select>
                         </div>
                         <div class="form-group" data-visibility-key="proxyAddr">
                             <label data-i18n="label_proxy_addr">Proxy Address</label>
-                            <input type="text" name="proxyAddr" class="form-control">
+                            <input type="text" name="proxyAddr" class="form-control" data-i18n-placeholder="ph_proxy_addr">
+                            <small class="field-hint" data-i18n="hint_proxy_range"></small>
                         </div>
 
                         <!-- KCP Fields -->
@@ -278,9 +279,13 @@
                         </div>
 
                         <!-- UDP Custom Fields -->
-                        <div class="form-group grid-full" data-visibility-key="udpCustomFields">
-                            <label data-i18n="label_udp_custom_payload">UDP Custom Payload / Header (Optional)</label>
-                            <textarea name="udpCustomPayload" class="form-control" rows="2"></textarea>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_psk">UDP Custom PSK (Pre-shared Key)</label>
+                            <input type="password" name="udpCustomPsk" class="form-control" data-i18n-placeholder="ph_udp_custom_psk">
+                        </div>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_magic">Magic String</label>
+                            <input type="text" name="udpCustomMagic" class="form-control" value="UDPC" data-i18n-placeholder="ph_udp_custom_magic">
                         </div>
 
                         <!-- DNS Tunnel (SSH-over-DNS) Fields -->

@@ -8,16 +8,17 @@ import (
 	"testing"
 )
 
-// TestXHTTPFrameRoundTrip 验证 xhttpFramedConn 的帧封装/解封装在任意字节上往返一致，
-// 且支持双向并发（客户端↔服务端各持一端 net.Pipe）。
+// TestXHTTPFrameRoundTrip  info  xhttpFramedConn  info / info bytes info ，
+//
+//	info supportbidirectional info （client↔ info  net.Pipe）。
 func TestXHTTPFrameRoundTrip(t *testing.T) {
 	a, b := net.Pipe()
 	la := &net.TCPAddr{IP: net.IPv4zero, Port: 0}
 
 	ca := newXhttpFramedConn(a, a, func() error { return nil }, la, la)
 	cb := newXhttpFramedConn(b, b, func() error { return nil }, la, la)
-	// 先关闭底层 pipe 再关闭连接：close 帧写入已关闭的 pipe 会立即报错返回，
-	// 避免两端互相等待读取而永久阻塞（生产环境对端始终在读，无此问题）。
+	//  info closed info  pipe  info closed info ：close  info closed info  pipe  info ，
+	//  info （ info ， info ）。
 	defer func() {
 		_ = a.Close()
 		_ = b.Close()
@@ -25,7 +26,7 @@ func TestXHTTPFrameRoundTrip(t *testing.T) {
 		_ = cb.Close()
 	}()
 
-	// a → b：大包（触发分帧 + 动态 padding）
+	// a → b： info （ info  +  info  padding）
 	msgAB := bytes.Repeat([]byte("A"), 5000)
 	go func() {
 		if _, err := ca.Write(msgAB); err != nil {
@@ -40,7 +41,7 @@ func TestXHTTPFrameRoundTrip(t *testing.T) {
 		t.Fatal("a→b frame round-trip mismatch")
 	}
 
-	// b → a：小包
+	// b → a： info
 	msgBA := []byte("small-ba-payload")
 	go func() {
 		if _, err := cb.Write(msgBA); err != nil {
@@ -56,12 +57,12 @@ func TestXHTTPFrameRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMeekVirtualConnReorder 验证乱序到达时 PutReadData 能正确重组为连续流。
+// TestMeekVirtualConnReorder  info  PutReadData  info 。
 func TestMeekVirtualConnReorder(t *testing.T) {
 	vc := newMeekVirtualConn(context.Background(), "sess", &net.TCPAddr{}, &net.TCPAddr{})
 	defer vc.Close()
 
-	// 先到 seq=5（乱序），再到 seq=0（补齐），应重组为 "helloworld"。
+	//  info  seq=5（ info ）， info  seq=0（ info ）， info  "helloworld"。
 	vc.PutReadData(5, []byte("world"))
 	vc.PutReadData(0, []byte("hello"))
 
@@ -74,7 +75,7 @@ func TestMeekVirtualConnReorder(t *testing.T) {
 	}
 }
 
-// TestMeekVirtualConnClosed 验证关闭后 Read 立即返回 EOF、Write 返回 ErrClosedPipe。
+// TestMeekVirtualConnClosed  info closed info  Read  info  EOF、Write  info  ErrClosedPipe。
 func TestMeekVirtualConnClosed(t *testing.T) {
 	vc := newMeekVirtualConn(context.Background(), "sess", &net.TCPAddr{}, &net.TCPAddr{})
 	vc.Close()
@@ -88,23 +89,23 @@ func TestMeekVirtualConnClosed(t *testing.T) {
 	}
 }
 
-// TestReliableBuffer 验证可靠缓冲区的写入、按偏移切片取出、Ack 清理逻辑。
+// TestReliableBuffer  info 、 info 、Ack cleanup info 。
 func TestReliableBuffer(t *testing.T) {
 	rb := newReliableBuffer(1024)
-	// 小数据写入是同步的（不会触发 cond.Wait 阻塞），无需放在 goroutine 中，
-	// 否则 GetSlice 可能在写入完成前读取到空缓冲区。
+	//  info （ info  cond.Wait  info ）， info  goroutine  info ，
+	//  info  GetSlice  info completed info 。
 	if _, err := rb.Write([]byte("abc")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	// 取出从偏移 0 开始的切片（返回从统一 Pool 分配的拷贝，用完需归还）。
+	//  info  0  info （ info  Pool  info ， info ）。
 	data, _, bufPtr := rb.GetSlice(0, 0, 100)
 	if string(data) != "abc" {
 		t.Fatalf("GetSlice: got %q want %q", data, "abc")
 	}
 	safelyPutBuf(xhttpFrameBufPool, bufPtr)
 
-	// Ack=3 清理已确认数据后，缓冲区应为空。
+	// Ack=3 cleanup info ， info 。
 	rb.GetSlice(3, 3, 100)
 	if rb.Len() != 0 {
 		t.Fatalf("after ack, Len = %d, want 0", rb.Len())
@@ -116,7 +117,7 @@ func TestReliableBuffer(t *testing.T) {
 	}
 }
 
-// TestBoundedBufPool 验证带上限的缓冲池 Get/Put 不 panic 且能正常复用。
+// TestBoundedBufPool  info  Get/Put  info  panic  info 。
 func TestBoundedBufPool(t *testing.T) {
 	p := newBoundedBufPool(4, 1<<20, 256)
 
@@ -133,7 +134,7 @@ func TestBoundedBufPool(t *testing.T) {
 	}
 	p.Put(b2)
 
-	// 超过 maxIdle 时 Put 仅丢弃，Get 仍能返回（新建），不应 panic。
+	//  info  maxIdle  info  Put  info discarded，Get  info （ info ）， info  panic。
 	for i := 0; i < 8; i++ {
 		bp := p.Get()
 		*bp = (*bp)[:8]
@@ -141,7 +142,7 @@ func TestBoundedBufPool(t *testing.T) {
 	}
 }
 
-// TestRetryEnqueue 验证重传队列按 seq 升序有序插入。
+// TestRetryEnqueue  info  seq  info 。
 func TestRetryEnqueue(t *testing.T) {
 	var q []retryChunk
 	q = retryEnqueue(q, retryChunk{seq: 3, data: []byte("c")})

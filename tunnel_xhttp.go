@@ -26,33 +26,34 @@ import (
 )
 
 const (
-	xhttpHeaderSize     = 6     // 头部固定 6 字节 (4字节长度 + 2字节Padding长度)
-	xhttpMaxPaddingSize = 65535 // 最大 padding
+	xhttpHeaderSize     = 6     //  info  6 bytes (4bytes info  + 2bytesPadding info )
+	xhttpMaxPaddingSize = 65535 //  info  padding
 )
 
 var (
-	xhttpMaxsendBufSize = 512 * 1000 // 降低单次发送包的大小，避开 Nginx 1MB 拦截
+	xhttpMaxsendBufSize = 512 * 1000 //  info send info ， info  Nginx 1MB  info
 	xhttpMaxframeSize   = xhttpMaxsendBufSize + xhttpMaxPaddingSize + xhttpHeaderSize
 )
 
 // ==========================================
-// 统一 BufPool 管理（限制空闲池大小）
+//  info  BufPool  info （ info ）
 // ==========================================
 
-// boundedBufPool 是对 sync.Pool 的封装，额外用一个带缓冲 channel 来限制
-// 池中空闲 *[]byte 的最大数量，防止内存无限积压。
+// boundedBufPool  info  sync.Pool  info ， info  channel  info
 //
-// 设计思路：
-//   - channel 充当"令牌桶"：Put 时先往 channel 写一个令牌，写满则丢弃（让 GC 回收）。
-//   - Get 时先尝试从 channel 取令牌；若 channel 为空说明池中无闲置对象，走 newFn 新建。
-//   - 这样既保留了 sync.Pool 对 GC 压力的减缓作用，又能严格限制空闲内存上限。
+//	info  *[]byte  info ， info 。
 //
-// maxIdle：池中最多保留多少个空闲 *[]byte（超出部分直接丢弃给 GC）。
-// maxCapBytes：单个 *[]byte 允许归还的最大底层容量；超出则视为"超大"对象，直接丢弃。
+//	info ：
+//	 - channel  info " info "：Put  info  channel  info ， info discarded（ info  GC  info ）。
+//	 - Get  info  channel  info ； info  channel  info ， info  newFn  info 。
+//	 -  info  sync.Pool  info  GC  info ， info 。
+//
+// maxIdle： info  *[]byte（ info discarded info  GC）。
+// maxCapBytes： info  *[]byte  info ； info " info " info ， info discarded。
 type boundedBufPool struct {
 	pool       sync.Pool
-	tokens     chan struct{} // 令牌桶，容量 = maxIdle
-	maxCapByte int           // 单个 buf 允许入池的最大 cap（字节）
+	tokens     chan struct{} //  info ， info  = maxIdle
+	maxCapByte int           //  info  buf  info  cap（bytes）
 }
 
 func newBoundedBufPool(maxIdle int, maxCapBytes int, newBufSize int) *boundedBufPool {
@@ -67,59 +68,61 @@ func newBoundedBufPool(maxIdle int, maxCapBytes int, newBufSize int) *boundedBuf
 	return p
 }
 
-// Get 从池中取出一个 *[]byte（长度已重置为 0）。
+// Get  info  *[]byte（ info  0）。
 func (p *boundedBufPool) Get() *[]byte {
 	select {
 	case <-p.tokens:
-		// 有令牌：从 sync.Pool 取（可能拿到刚 Put 进去的对象）
+		//  info ： info  sync.Pool  info （ info  Put  info ）
 		bp := p.pool.Get().(*[]byte)
 		*bp = (*bp)[:0]
 		return bp
 	default:
-		// 令牌桶为空，说明当前空闲池中无对象，直接新建
+		//  info ， info ， info
 		bp := p.pool.New().(*[]byte)
 		*bp = (*bp)[:0]
 		return bp
 	}
 }
 
-// Put 将 *[]byte 归还池中。若容量超限或池已满，直接丢弃。
+// Put  info  *[]byte  info 。 info ， info discarded。
 func (p *boundedBufPool) Put(bp *[]byte) {
-	if bp == nil || *bp == nil {
+	if bp == nil || *bp == nil || cap(*bp) == 0 {
 		return
 	}
 	if cap(*bp) > p.maxCapByte {
-		return // 超大对象，丢弃让 GC 回收
+		return //  info ，discarded info  GC  info
 	}
 	*bp = (*bp)[:0]
 	select {
 	case p.tokens <- struct{}{}:
 		p.pool.Put(bp)
 	default:
-		// 池已满，丢弃
+		//  info ，discarded
 	}
 }
 
 // ==========================================
-// 全局统一 Pool 实例
+//  info  Pool  info
 // ==========================================
 
-// xhttpFrameBufPool 统一管理帧缓冲（frame buf）和上行数据（up buf）。
-// 在第二个 init() 中完成真正初始化（确保 xhttpMaxframeSize 已计算完毕）。
-// maxIdle=64：最多同时保留 64 个空闲 buf（约 64 × ~577 KB ≈ 36 MB 上限）。
-// maxCapBytes = xhttpMaxframeSize × 2：超大对象直接丢给 GC，不污染池。
+// xhttpFrameBufPool  info （frame buf） info uplink info （up buf）。
+//
+//	info  init()  info completed info （ info  xhttpMaxframeSize  info ）。
+//
+// maxIdle=64： info  64  info  buf（ info  64 × ~577 KB ≈ 36 MB  info ）。
+// maxCapBytes = xhttpMaxframeSize × 2： info  GC， info 。
 var xhttpFrameBufPool *boundedBufPool
 
 func init() {
 	xhttpFrameBufPool = newBoundedBufPool(64, xhttpMaxframeSize*2, xhttpMaxframeSize)
 }
 
-// getBufFromPool 从 boundedBufPool 中安全地取出 *[]byte
+// getBufFromPool  info  boundedBufPool  info  *[]byte
 func getBufFromPool(pool *boundedBufPool) *[]byte {
 	return pool.Get()
 }
 
-// safelyPutBuf 安全地将 *[]byte 归还给 boundedBufPool（统一入口）
+// safelyPutBuf  info  *[]byte  info  boundedBufPool（ info ）
 func safelyPutBuf(pool *boundedBufPool, bp *[]byte) {
 	if bp == nil {
 		return
@@ -127,11 +130,11 @@ func safelyPutBuf(pool *boundedBufPool, bp *[]byte) {
 	pool.Put(bp)
 }
 
-// getDownBuf 取一个用于接收响应体的 *bytes.Buffer
+// getDownBuf  info  *bytes.Buffer
 func getDownBuf() *bytes.Buffer {
-	// downBufPool 存储 *bytes.Buffer（复用其底层 []byte）
-	// 此处直接用 sync.Pool 的原始接口即可，boundedBufPool 只管 *[]byte
-	// 所以 downBuf 保持原有 bytesBufPool 接口，但放在这里统一管理
+	// downBufPool  info  *bytes.Buffer（ info  []byte）
+	//  info  sync.Pool  info ，boundedBufPool  info  *[]byte
+	//  info  downBuf  info  bytesBufPool  info ， info
 	buf := bytesBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	return buf
@@ -144,11 +147,11 @@ func putDownBuf(buf *bytes.Buffer) {
 	if buf.Cap() <= 2*1024*1024 {
 		bytesBufPool.Put(buf)
 	}
-	// 超大的直接丢弃
+	//  info discarded
 }
 
 // ==========================================
-// 高性能可靠传输缓冲区 (Seq/Ack 机制)
+//  info  (Seq/Ack  info )
 // ==========================================
 
 type reliableBuffer struct {
@@ -162,7 +165,7 @@ type reliableBuffer struct {
 
 func newReliableBuffer(maxSize int) *reliableBuffer {
 	if maxSize == 0 {
-		maxSize = 4 * 1024 * 1024 // 默认 4MB
+		maxSize = 4 * 1024 * 1024 // default 4MB
 	}
 	rb := &reliableBuffer{maxSize: maxSize}
 	rb.cond = sync.NewCond(&rb.mu)
@@ -177,7 +180,7 @@ func (rb *reliableBuffer) Write(p []byte) (int, error) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
-	// 硬上限保护，防止单个连接内存失控
+	//  info ， info
 	const hardMax = 8 * 1024 * 1024
 	if len(rb.data) >= hardMax && !rb.closed {
 		zlog.Warnf("[reliableBuffer] Buffer reaching hard limit (%d bytes), waiting...", len(rb.data))
@@ -191,14 +194,14 @@ func (rb *reliableBuffer) Write(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 
-	// grow 策略：减少 append 时的多次 realloc
+	// grow  info ： info  append  info  realloc
 	needed := len(rb.data) + len(p)
 	if cap(rb.data) < needed {
 		newCap := needed
 		if newCap < 64*1024 {
 			newCap = 64 * 1024
 		} else if newCap > 2*1024*1024 {
-			newCap = (needed + 1024*1024) & ^(1024*1024 - 1) // 对齐到 1MB
+			newCap = (needed + 1024*1024) & ^(1024*1024 - 1) //  info  1MB
 		}
 		newData := make([]byte, len(rb.data), newCap)
 		copy(newData, rb.data)
@@ -209,19 +212,20 @@ func (rb *reliableBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// GetSlice 获取从指定偏移量开始的数据，并清理掉已被对端确认 (Ack) 的旧数据。
-// 返回的 []byte 是从 xhttpFrameBufPool 中分配的拷贝，调用方用完须调用 safelyPutBuf 归还。
+// GetSlice  info ， info cleanup info  (Ack)  info 。
+//
+//	info  []byte  info  xhttpFrameBufPool  info ， info  safelyPutBuf  info 。
 func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen int) ([]byte, uint64, *[]byte) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
-	// 清理对端已确认数据
+	// cleanup info
 	if remoteAck > rb.baseOffset {
 		skip := remoteAck - rb.baseOffset
 		if skip <= uint64(len(rb.data)) {
 			rb.data = rb.data[skip:]
 			rb.baseOffset = remoteAck
-			// 惰性紧缩：底层数组超 2MB 且空间浪费过半才释放
+			//  info ： info  2MB  info
 			if cap(rb.data) > 2*1024*1024 && len(rb.data) < cap(rb.data)/2 {
 				newData := make([]byte, len(rb.data))
 				copy(newData, rb.data)
@@ -249,7 +253,7 @@ func (rb *reliableBuffer) GetSlice(remoteAck uint64, dispatchSeq uint64, maxLen 
 		length = maxLen
 	}
 
-	// 从统一 Pool 分配拷贝缓冲
+	//  info  Pool  info
 	bufPtr := xhttpFrameBufPool.Get()
 	if cap(*bufPtr) < length {
 		newCap := length
@@ -279,7 +283,7 @@ func (rb *reliableBuffer) Close() {
 }
 
 // ==========================================
-// Meek 虚拟连接 (集成可靠传输)
+// Meek  info  ( info )
 // ==========================================
 type retryChunk struct {
 	seq    uint64
@@ -335,7 +339,7 @@ func (c *meekVirtualConn) Read(p []byte) (int, error) {
 
 	n, err := c.readBuf.Read(p)
 
-	// 滞留内存释放：读空后若底层容量过大，换一个新 Buffer
+	//  info ： info ， info  Buffer
 	if c.readBuf.Len() == 0 && c.readBuf.Cap() > 512*1024 {
 		c.readBuf = bytes.Buffer{}
 	}
@@ -354,12 +358,12 @@ func (c *meekVirtualConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// PutReadData 乱序重组
+// PutReadData  info
 func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 	c.readCond.L.Lock()
 	defer c.readCond.L.Unlock()
 
-	if len(data) == 0 {
+	if c.closed || len(data) == 0 {
 		return c.nextReadSeq
 	}
 
@@ -410,15 +414,22 @@ func (c *meekVirtualConn) Close() error {
 	c.closed = true
 
 	if c.oooBuf != nil {
-		for _, v := range c.oooBuf {
-			_ = v
-		}
 		c.oooBuf = nil
 	}
 	c.oooBytesSize = 0
 
 	c.readCond.Broadcast()
 	c.readCond.L.Unlock()
+
+	c.retryMu.Lock()
+	for i := range c.retryQ {
+		if c.retryQ[i].bufPtr != nil {
+			safelyPutBuf(xhttpFrameBufPool, c.retryQ[i].bufPtr)
+		}
+		c.retryQ[i] = retryChunk{}
+	}
+	c.retryQ = nil
+	c.retryMu.Unlock()
 
 	if c.writeBuf != nil {
 		c.writeBuf.Close()
@@ -433,7 +444,7 @@ func (c *meekVirtualConn) SetReadDeadline(t time.Time) error  { return nil }
 func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // ==========================================
-// 动态 Padding 与 0xFFFF 信令装甲
+//  info  Padding  info  0xFFFF  info
 // ==========================================
 
 type xhttpFramedConn struct {
@@ -531,9 +542,15 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 }
 
 func (c *xhttpFramedConn) Write(p []byte) (int, error) {
+	if atomic.LoadInt32(&c.closedFlag) == 1 {
+		return 0, io.ErrClosedPipe
+	}
 	atomic.StoreInt64(&c.lastWriteTime, time.Now().Unix())
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if atomic.LoadInt32(&c.closedFlag) == 1 || c.frameBufPtr == nil {
+		return 0, io.ErrClosedPipe
+	}
 	if len(p) == 0 {
 		return 0, c.writeSingleFrame(nil)
 	}
@@ -567,6 +584,14 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 		}
 		rawPayloadLen := binary.BigEndian.Uint32(c.hdrBuf[0:4])
 		padLen := int(binary.BigEndian.Uint16(c.hdrBuf[4:6]))
+
+		if padLen > xhttpMaxPaddingSize {
+			return 0, fmt.Errorf("xhttp: invalid padding length %d exceeds max %d", padLen, xhttpMaxPaddingSize)
+		}
+
+		if rawPayloadLen != uint32(0xFFFFFFFF) && rawPayloadLen > uint32(xhttpMaxframeSize*4) {
+			return 0, fmt.Errorf("xhttp: frame payload length %d exceeds safety limit", rawPayloadLen)
+		}
 
 		pBuf := *c.payloadBufPtr
 
@@ -624,11 +649,12 @@ func (c *xhttpFramedConn) Close() error {
 		c.mu.Lock()
 		frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00}
 		c.w.Write(frame)
+		c.readBuf = nil
 		c.mu.Unlock()
 
 		close(c.closeCh)
 
-		// 统一归还到 xhttpFrameBufPool
+		//  info  xhttpFrameBufPool
 		if c.frameBufPtr != nil {
 			xhttpFrameBufPool.Put(c.frameBufPtr)
 			c.frameBufPtr = nil
@@ -663,8 +689,9 @@ func drainAndCloseBody(body io.ReadCloser) {
 	body.Close()
 }
 
-// retryEnqueue 有序插入重传队列（按 seq 升序），O(n) 但 n 通常极小。
-// 相比原来的全量 slices.SortFunc，避免了每次都完整排序。
+// retryEnqueue  info （ info  seq  info ），O(n)  info  n  info 。
+//
+//	info  slices.SortFunc， info 。
 func retryEnqueue(q []retryChunk, chunk retryChunk) []retryChunk {
 	i := len(q)
 	for i > 0 && q[i-1].seq > chunk.seq {
@@ -677,7 +704,9 @@ func retryEnqueue(q []retryChunk, chunk retryChunk) []retryChunk {
 }
 
 // ==========================================
-// 注册
+//
+//	info
+//
 // ==========================================
 func init() {
 
@@ -711,7 +740,7 @@ func init() {
 
 		if isTLS {
 			// ==========================================
-			// 优先探测 HTTP/3 (QUIC)
+			//  info  HTTP/3 (QUIC)
 			// ==========================================
 			if slices.Contains(alpnList, "h3") {
 				tr3, h3Err := getH3Transport(cfg)
@@ -731,7 +760,7 @@ func init() {
 			}
 
 			// ==========================================
-			// TCP ALPN 探测 (h2 / http/1.1)
+			// TCP ALPN  info  (h2 / http/1.1)
 			// ==========================================
 			if client == nil {
 				var tcpConn net.Conn
@@ -789,7 +818,7 @@ func init() {
 						return cachedConn, nil
 					}
 
-					tc, err := dialTCP(parentCtx, cfg, cfg.ProxyAddr)
+					tc, err := dialTCP(ctx, cfg, cfg.ProxyAddr)
 					if err != nil {
 						return nil, fmt.Errorf("dial proxy tcp failed: %w", err)
 					}
@@ -834,7 +863,7 @@ func init() {
 			}
 		} else {
 			// ==========================================
-			// 纯 TCP 模式 (h2c 探测)
+			//  info  TCP mode (h2c  info )
 			// ==========================================
 			dialTCPWithBind := func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialProtected(ctx, cfg, network, addr, 10*time.Second)
@@ -869,7 +898,7 @@ func init() {
 			}
 		}
 
-		// 虚拟连接与数据泵初始化
+		//  info
 		proxyNetAddr, _ := net.ResolveTCPAddr("tcp", cfg.ProxyAddr)
 		var localNetAddr net.Addr
 		if proxyNetAddr.IP.To4() != nil {
@@ -882,12 +911,12 @@ func init() {
 
 		sessionHeaders := generateBrowserHeaders()
 
-		// 统一上行缓存回收入口
+		//  info uplink info
 		safelyPutUpBuf := func(bufPtr *[]byte) {
 			safelyPutBuf(xhttpFrameBufPool, bufPtr)
 		}
 
-		// 数据泵核心逻辑
+		//  info
 		go func() {
 			defer virtualConn.Close()
 			defer cancel()
@@ -927,15 +956,20 @@ func init() {
 				}
 				defer idleTimer.Stop()
 
-				// handleRetryEnqueue 使用有序插入代替全量 Sort
+				// handleRetryEnqueue  info  Sort
 				handleRetryEnqueue := func(seq uint64, data []byte, bufPtr *[]byte, triggerRetryPtr *int32) {
+					enqueued := false
 					if len(data) > 0 {
 						currAck := atomic.LoadUint64(&ackedByServer)
 						if seq >= currAck {
 							virtualConn.retryMu.Lock()
 							virtualConn.retryQ = retryEnqueue(virtualConn.retryQ, retryChunk{seq: seq, data: data, bufPtr: bufPtr})
 							virtualConn.retryMu.Unlock()
+							enqueued = true
 						}
+					}
+					if !enqueued && bufPtr != nil {
+						safelyPutUpBuf(bufPtr)
 					}
 					atomic.StoreInt32(triggerRetryPtr, 1)
 				}
@@ -949,6 +983,9 @@ func init() {
 					virtualConn.retryMu.Lock()
 					currAck := atomic.LoadUint64(&ackedByServer)
 					for len(virtualConn.retryQ) > 0 && virtualConn.retryQ[0].seq < currAck {
+						if virtualConn.retryQ[0].bufPtr != nil {
+							safelyPutUpBuf(virtualConn.retryQ[0].bufPtr)
+						}
 						virtualConn.retryQ[0] = retryChunk{}
 						virtualConn.retryQ = virtualConn.retryQ[1:]
 					}
@@ -1047,14 +1084,14 @@ func init() {
 
 					resp, err := client.Do(req)
 
-					// 错误分支 1
+					//  info  1
 					if err != nil {
 						reqCancel()
 						if ctx.Err() != nil {
 							safelyPutUpBuf(upBufPtr)
 							break
 						}
-						zlog.Errorf("%s [Tunnel] HTTP 请求失败 (Seq: %d): %v", TAG, currentSeq, err)
+						zlog.Errorf("%s [Tunnel] HTTP failed (Seq: %d): %v", TAG, currentSeq, err)
 						if errors.Is(err, context.Canceled) {
 							safelyPutUpBuf(upBufPtr)
 							break
@@ -1086,7 +1123,7 @@ func init() {
 						}
 					}
 
-					// 错误分支 2
+					//  info  2
 					if resp.StatusCode != http.StatusOK {
 						downBuf := getDownBuf()
 						downBuf.ReadFrom(resp.Body)
@@ -1123,7 +1160,7 @@ func init() {
 
 					reqCancel()
 
-					// 错误分支 3
+					//  info  3
 					if errBody != nil {
 						putDownBuf(downBuf)
 						handleRetryEnqueue(currentSeq, upData, upBufPtr, &triggerRetry)
@@ -1149,7 +1186,7 @@ func init() {
 					putDownBuf(downBuf)
 					safelyPutUpBuf(upBufPtr)
 
-					// 根据业务压力动态招募 Worker
+					//  info  Worker
 					if len(downData) > 0 {
 						if atomic.LoadInt32(&activeWorkers) < 4 {
 							trySpawnWorker()
@@ -1195,7 +1232,7 @@ func init() {
 		}, localNetAddr, proxyNetAddr), nil
 	}
 
-	// 注册 Tunnel
+	//  info  Tunnel
 	RegisterTunnel("xhttpc", "custom", func(ctx context.Context, cfg ProxyConfig, base net.Conn) (net.Conn, error) {
 		alpnList := strings.Split(cfg.Alpn, ",")
 		return xhttpHandler(ctx, cfg, base, false, alpnList)
@@ -1206,7 +1243,7 @@ func init() {
 	})
 }
 
-// 辅助工具函数：原子更新最大值
+// info ： info
 func updateUint64IfGreater(addr *uint64, newVal uint64) {
 	for {
 		old := atomic.LoadUint64(addr)
@@ -1216,7 +1253,7 @@ func updateUint64IfGreater(addr *uint64, newVal uint64) {
 	}
 }
 
-// 辅助工具函数：轻量级 H2C 嗅探
+// info ： info  H2C  info
 func probeH2C(ctx context.Context, cfg ProxyConfig) bool {
 	conn, err := dialProtected(ctx, cfg, "tcp", cfg.ProxyAddr, 2*time.Second)
 	if err != nil {
@@ -1238,7 +1275,9 @@ func probeH2C(ctx context.Context, cfg ProxyConfig) bool {
 }
 
 // ==========================================
-// 浏览器指纹池 (规避 CDN / WAF 拦截)
+//
+//	info  ( info  CDN / WAF  info )
+//
 // ==========================================
 func generateBrowserHeaders() map[string]string {
 	profiles := []map[string]string{

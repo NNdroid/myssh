@@ -1021,3 +1021,12 @@ textarea.form-control {
         grid-template-columns: 1fr;
     }
 }
+
+/* Inline field hint (e.g. Proxy Address port-range tip) */
+.field-hint {
+    display: block;
+    margin-top: 5px;
+    font-size: 0.74rem;
+    line-height: 1.35;
+    color: var(--text-muted);
+}

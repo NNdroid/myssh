@@ -3,7 +3,6 @@ package myssh
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -27,18 +26,18 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// PrintAndroidUserInfo 打印当前 Go 进程在 Android 上的底层身份信息
+// PrintAndroidUserInfo  info  Go  info  Android  info
 func PrintAndroidUserInfo() {
-	// 获取最底层的真实 Linux UID 和 GID
+	//  info  Linux UID  info  GID
 	realUid := os.Getuid()
 	realGid := os.Getgid()
 
-	// 逆向推算 Android 的用户空间架构
-	// Android UID 计算公式: UID = (UserID * 100000) + AppBaseID
+	//  info  Android  info
+	// Android UID  info : UID = (UserID * 100000) + AppBaseID
 	androidUserId := realUid / 100000
 	appBaseId := realUid % 100000
 
-	// 尝试获取标准的系统用户信息
+	//  info
 	var username, homeDir string
 	u, err := user.Current()
 	if err != nil {
@@ -50,7 +49,7 @@ func PrintAndroidUserInfo() {
 		homeDir = u.HomeDir
 	}
 
-	// 使用 zap 打印结构化日志
+	//  info  zap  info
 	zlog.Info("========== GO PROCESS USER INFO ==========",
 		zap.Int("real_linux_uid", realUid),
 		zap.Int("real_linux_gid", realGid),
@@ -61,11 +60,13 @@ func PrintAndroidUserInfo() {
 	)
 }
 
-// CheckIfKeyEncrypted 供 Android 调用
-// 返回值:
-// 0 - 不需要密码
-// 1 - 需要密码
-// 2 - 格式错误
+// CheckIfKeyEncrypted  info  Android  info
+//
+//	info :
+//
+// 0 -  info
+// 1 -  info
+// 2 -  info
 func CheckIfKeyEncrypted(key string) int {
 	keyBytes := []byte(key)
 	_, err := ssh.ParsePrivateKey(keyBytes)
@@ -102,17 +103,17 @@ func handshakeUTLS(ctx context.Context, conn net.Conn, utlsConfig *utls.Config) 
 	return uConn, nil
 }
 
-// ValidatePassphrase 示例：带密码解析并测试是否通过
+// ValidatePassphrase  info ： info
 func ValidatePassphrase(key string, pass string) bool {
 	_, err := ssh.ParsePrivateKeyWithPassphrase([]byte(key), []byte(pass))
 	return err == nil
 }
 
-// parsePrivateKeySshSigner 解析 SSH 私钥
+// parsePrivateKeySshSigner  info  SSH  info
 func parsePrivateKeySshSigner(privateKey []byte, passphrase []byte) (ssh.Signer, error) {
-	// 尝试直接解析
+	//  info
 	signer, err := ssh.ParsePrivateKey(privateKey)
-	// 如果报错提示需要密码 (Passphrase)
+	//  info  (Passphrase)
 	var passphraseMissingError *ssh.PassphraseMissingError
 	if errors.As(err, &passphraseMissingError) {
 		return ssh.ParsePrivateKeyWithPassphrase(privateKey, passphrase)
@@ -131,16 +132,13 @@ type CertInfo struct {
 	IsVerified bool   `json:"is_verified"`
 }
 
-// FetchCertInfo 尝试通过 TLS 或 QUIC 获取服务器证书信息
+// FetchCertInfo  info  TLS  info  QUIC  info server info
 func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 	if target == "" {
 		return nil, fmt.Errorf("empty target")
 	}
 
-	addr := target
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = target + ":443"
-	}
+	addr := ensureHostPort(target, "443")
 	host, _, _ := net.SplitHostPort(addr)
 
 	var peerCerts []*x509.Certificate
@@ -207,97 +205,7 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 	}, nil
 }
 
-// GetSSHFingerprint 连接远程 SSH 服务并获取其主机密钥的 SHA256 指纹
-func GetSSHFingerprint(sshAddr string) (string, error) {
-	if strings.TrimSpace(sshAddr) == "" {
-		return "", fmt.Errorf("empty sshAddr")
-	}
-	addr := strings.TrimSpace(sshAddr)
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, "22")
-	}
-
-	var capturedKey ssh.PublicKey
-	config := &ssh.ClientConfig{
-		User: "probe",
-		Auth: []ssh.AuthMethod{
-			ssh.Password("probe"),
-		},
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			capturedKey = key
-			return nil
-		},
-		Timeout: 6 * time.Second,
-	}
-
-	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
-	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
-	if sshConn != nil {
-		sshConn.Close()
-	}
-	_ = chans
-	_ = reqs
-
-	if capturedKey != nil {
-		return ssh.FingerprintSHA256(capturedKey), nil
-	}
-	return "", fmt.Errorf("failed to retrieve ssh host key fingerprint")
-}
-
-// GetTLSCertFingerprint 连接目标 TLS/HTTPS/WSS 端点并获取其对端证书的 SHA256 指纹 (格式: XX:XX:XX:...)
-func GetTLSCertFingerprint(target string, serverName string) (string, error) {
-	if strings.TrimSpace(target) == "" {
-		return "", fmt.Errorf("empty target")
-	}
-
-	addr := strings.TrimSpace(target)
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, "443")
-	}
-	host, _, _ := net.SplitHostPort(addr)
-
-	sni := strings.TrimSpace(serverName)
-	if sni == "" {
-		sni = host
-	}
-
-	tlsConfig := &tls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"h2", "http/1.1"},
-	}
-
-	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	peerCerts := conn.ConnectionState().PeerCertificates
-	if len(peerCerts) == 0 {
-		return "", fmt.Errorf("no certificate presented by server")
-	}
-
-	sha256Sum := sha256.Sum256(peerCerts[0].Raw)
-	var fpBuilder strings.Builder
-	for i, b := range sha256Sum {
-		if i > 0 {
-			fpBuilder.WriteString(":")
-		}
-		fmt.Fprintf(&fpBuilder, "%02X", b)
-	}
-
-	return fpBuilder.String(), nil
-}
-
-// SSHServerDetails 包含探测到的 SSH 服务端详细属性
+// SSHServerDetails  info  SSH  info
 type SSHServerDetails struct {
 	Address           string `json:"address"`
 	Banner            string `json:"banner"`
@@ -307,15 +215,12 @@ type SSHServerDetails struct {
 	LatencyMs         int64  `json:"latency_ms"`
 }
 
-// GetSSHServerDetailsJSON 查询 SSH 服务端完整详情并返回 JSON 字符串
-func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
+// probeSSHServer  info ： info  SSH  info
+func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
 	if strings.TrimSpace(sshAddr) == "" {
-		return "", fmt.Errorf("empty sshAddr")
+		return nil, fmt.Errorf("empty sshAddr")
 	}
-	addr := strings.TrimSpace(sshAddr)
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, "22")
-	}
+	addr := ensureHostPort(sshAddr, "22")
 
 	startTime := time.Now()
 	var capturedKey ssh.PublicKey
@@ -334,7 +239,7 @@ func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
 	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
 	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer conn.Close()
 
@@ -350,18 +255,34 @@ func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
 	_ = reqs
 
 	if capturedKey == nil {
-		return "", fmt.Errorf("failed to retrieve ssh host key")
+		return nil, fmt.Errorf("failed to retrieve ssh host key")
 	}
 
-	details := SSHServerDetails{
+	return &SSHServerDetails{
 		Address:           addr,
 		Banner:            serverVersion,
 		KeyType:           capturedKey.Type(),
 		FingerprintSHA256: ssh.FingerprintSHA256(capturedKey),
 		FingerprintMD5:    ssh.FingerprintLegacyMD5(capturedKey),
 		LatencyMs:         latencyMs,
-	}
+	}, nil
+}
 
+// GetSSHFingerprint  info  SSH  info  SHA256  info
+func GetSSHFingerprint(sshAddr string) (string, error) {
+	details, err := probeSSHServer(sshAddr)
+	if err != nil {
+		return "", err
+	}
+	return details.FingerprintSHA256, nil
+}
+
+// GetSSHServerDetailsJSON  info  SSH  info  JSON  info
+func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
+	details, err := probeSSHServer(sshAddr)
+	if err != nil {
+		return "", err
+	}
 	data, err := json.Marshal(details)
 	if err != nil {
 		return "", err
@@ -369,7 +290,7 @@ func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
 	return string(data), nil
 }
 
-// TLSCertDetails 包含探测到的 TLS 证书详细属性
+// TLSCertDetails  info  TLS  info
 type TLSCertDetails struct {
 	Target             string   `json:"target"`
 	SNI                string   `json:"sni"`
@@ -389,16 +310,13 @@ type TLSCertDetails struct {
 	LatencyMs          int64    `json:"latency_ms"`
 }
 
-// GetTLSCertDetailsJSON 查询 TLS 证书完整详情并返回 JSON 字符串
-func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
+// probeTLSCert  info ： info target TLS/HTTPS  info
+func probeTLSCert(target string, serverName string) (*TLSCertDetails, error) {
 	if strings.TrimSpace(target) == "" {
-		return "", fmt.Errorf("empty target")
+		return nil, fmt.Errorf("empty target")
 	}
 
-	addr := strings.TrimSpace(target)
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, "443")
-	}
+	addr := ensureHostPort(target, "443")
 	host, _, _ := net.SplitHostPort(addr)
 
 	sni := strings.TrimSpace(serverName)
@@ -416,7 +334,7 @@ func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
 	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
 	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer conn.Close()
 
@@ -424,19 +342,10 @@ func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
 	connState := conn.ConnectionState()
 	peerCerts := connState.PeerCertificates
 	if len(peerCerts) == 0 {
-		return "", fmt.Errorf("no certificate presented by server")
+		return nil, fmt.Errorf("no certificate presented by server")
 	}
 
 	cert := peerCerts[0]
-	sha256Sum := sha256.Sum256(cert.Raw)
-	var fpBuilder strings.Builder
-	for i, b := range sha256Sum {
-		if i > 0 {
-			fpBuilder.WriteString(":")
-		}
-		fmt.Fprintf(&fpBuilder, "%02X", b)
-	}
-
 	var tlsVerStr string
 	switch connState.Version {
 	case tls.VersionTLS13:
@@ -459,7 +368,7 @@ func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
 	daysRemaining := int(time.Until(cert.NotAfter).Hours() / 24)
 	isExpired := time.Now().After(cert.NotAfter)
 
-	details := TLSCertDetails{
+	return &TLSCertDetails{
 		Target:             addr,
 		SNI:                sni,
 		Subject:            cert.Subject.String(),
@@ -472,12 +381,28 @@ func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
 		IPAddresses:        ips,
 		SignatureAlgorithm: cert.SignatureAlgorithm.String(),
 		PublicKeyAlgorithm: cert.PublicKeyAlgorithm.String(),
-		FingerprintSHA256:  fpBuilder.String(),
+		FingerprintSHA256:  formatSHA256Fingerprint(cert.Raw),
 		TLSVersion:         tlsVerStr,
 		NegotiatedProtocol: connState.NegotiatedProtocol,
 		LatencyMs:          latencyMs,
-	}
+	}, nil
+}
 
+// GetTLSCertFingerprint  info target TLS/HTTPS/WSS  info  SHA256  info  ( info : XX:XX:XX:...)
+func GetTLSCertFingerprint(target string, serverName string) (string, error) {
+	details, err := probeTLSCert(target, serverName)
+	if err != nil {
+		return "", err
+	}
+	return details.FingerprintSHA256, nil
+}
+
+// GetTLSCertDetailsJSON  info  TLS  info  JSON  info
+func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
+	details, err := probeTLSCert(target, serverName)
+	if err != nil {
+		return "", err
+	}
 	data, err := json.Marshal(details)
 	if err != nil {
 		return "", err
@@ -486,10 +411,10 @@ func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
 }
 
 // ==========================================
-// 流量统计与系统监控 (支持 Android GoMobile 回调)
+//  info  (support Android GoMobile  info )
 // ==========================================
 
-// ConnInfo 记录单个连接的详细数据 (增加 json 标签供 Android 解析)
+// ConnInfo  info  ( info  json  info  Android  info )
 type ConnInfo struct {
 	ID         int64     `json:"id"`
 	TargetAddr string    `json:"target_addr"`
@@ -500,7 +425,7 @@ type ConnInfo struct {
 	WriteBytes uint64    `json:"write_bytes"`
 }
 
-// 格式化输出
+// info
 func (c *ConnInfo) String() string {
 	duration := time.Since(c.StartTime).Round(time.Second)
 	return fmt.Sprintf("[ID:%d] Target:%s | Uptime:%s | ↑%d B | ↓%d B",
@@ -508,7 +433,7 @@ func (c *ConnInfo) String() string {
 }
 
 // ==========================================
-// 域名实时流量排行榜
+//  info
 // ==========================================
 
 // domainStat is the internal struct for calculation
@@ -571,24 +496,24 @@ func (dsm *domainStatsManager) reset() {
 }
 
 // ==========================================
-// 内部核心统计引擎：TrafficManager
+//  info ：TrafficManager
 // ==========================================
 
-// 内部使用的全局管理器
+// info
 type trafficManager struct {
-	TxTotal uint64 // 总计上行流量 (Bytes)
-	RxTotal uint64 // 总计下行流量 (Bytes)
+	TxTotal uint64 //  info uplink info  (Bytes)
+	RxTotal uint64 //  info downlink info  (Bytes)
 
-	ActiveConns   int64    // 当前活跃连接数
-	TotalConns    int64    // 累计连接总数
-	activeMap     sync.Map // key: int64 (连接ID), value: *ConnInfo
-	connIDCounter int64    // 用于生成自增的唯一连接 ID
+	ActiveConns   int64    //  info
+	TotalConns    int64    //  info
+	activeMap     sync.Map // key: int64 ( info ID), value: *ConnInfo
+	connIDCounter int64    //  info  ID
 }
 
-// 实例化一个全局单例供各个连接和 init() 调用
+// info  init()  info
 var globalTrafficManager = &trafficManager{}
 
-// 速率计算专用的内部全局变量
+// info
 var (
 	lastTxTotal   uint64
 	lastRxTotal   uint64
@@ -642,14 +567,14 @@ func bytesPerSecond(delta uint64, elapsed time.Duration) uint64 {
 }
 
 // ==========================================
-// 内部网络连接包装器 (TrackedConn / TrackedPacketConn)
+//  info  (TrackedConn / TrackedPacketConn)
 // ==========================================
 
 type TrackedConn struct {
 	net.Conn
 	manager    *trafficManager
 	info       *ConnInfo
-	domainStat *domainStat // 缓存域名统计对象指针，避免每次读写都查 sync.Map
+	domainStat *domainStat //  info ， info  sync.Map
 	closeOnce  sync.Once
 	closeErr   error
 }
@@ -657,8 +582,8 @@ type TrackedConn struct {
 func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 	n, err = tc.Conn.Read(b)
 	if n > 0 {
-		atomic.AddUint64(&tc.manager.RxTotal, uint64(n)) // 增加全局下行
-		atomic.AddUint64(&tc.info.ReadBytes, uint64(n))  // 增加本连接下行
+		atomic.AddUint64(&tc.manager.RxTotal, uint64(n)) //  info downlink
+		atomic.AddUint64(&tc.info.ReadBytes, uint64(n))  //  info downlink
 		if tc.domainStat != nil {
 			atomic.AddUint64(&tc.domainStat.currentRxBytes, uint64(n))
 		}
@@ -669,8 +594,8 @@ func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 	n, err = tc.Conn.Write(b)
 	if n > 0 {
-		atomic.AddUint64(&tc.manager.TxTotal, uint64(n)) // 增加全局上行
-		atomic.AddUint64(&tc.info.WriteBytes, uint64(n)) // 增加本连接上行
+		atomic.AddUint64(&tc.manager.TxTotal, uint64(n)) //  info uplink
+		atomic.AddUint64(&tc.info.WriteBytes, uint64(n)) //  info uplink
 		if tc.domainStat != nil {
 			atomic.AddUint64(&tc.domainStat.currentTxBytes, uint64(n))
 		}
@@ -723,10 +648,10 @@ func (tc *TrackedPacketConn) Close() error {
 }
 
 // ==========================================
-// 包装 API (供你在代码中调用建立连接)
+//  info  API ( info )
 // ==========================================
 
-// DialTracked 替代 net.DialTimeout
+// DialTracked  info  net.DialTimeout
 func DialTracked(network, address string, timeout time.Duration, targetAddr string) (net.Conn, error) {
 	conn, err := dialProtected(currentEngineCtx(), ProxyConfig{}, network, address, timeout)
 	if err != nil {
@@ -735,7 +660,7 @@ func DialTracked(network, address string, timeout time.Duration, targetAddr stri
 	return WrapConn(conn, targetAddr), nil
 }
 
-// ListenPacketTracked 封装 UDP Listen
+// ListenPacketTracked  info  UDP Listen
 func ListenPacketTracked(network, address string, sessionName string) (net.PacketConn, error) {
 	conn, err := net.ListenPacket(network, address)
 	if err != nil {
@@ -744,7 +669,7 @@ func ListenPacketTracked(network, address string, sessionName string) (net.Packe
 	return WrapPacketConn(conn, sessionName), nil
 }
 
-// WrapConn 包装现有 TCP 连接
+// WrapConn  info  TCP  info
 func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	atomic.AddInt64(&globalTrafficManager.TotalConns, 1)
 	atomic.AddInt64(&globalTrafficManager.ActiveConns, 1)
@@ -768,8 +693,8 @@ func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	}
 	globalTrafficManager.activeMap.Store(id, info)
 
-	// 仅当存在目标域名时才在路由统计表里登记一次，并缓存指针。
-	// 这样 Read/Write 直接累加，省去每次收发包都做一次 sync.Map 查找与可能的分配。
+	//  info target info ， info 。
+	//  info  Read/Write  info ， info  sync.Map  info 。
 	var stat *domainStat
 	if host != "" {
 		val, _ := globalDomainStatsManager.stats.LoadOrStore(host, &domainStat{})
@@ -784,7 +709,7 @@ func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	}
 }
 
-// WrapPacketConn 包装现有 UDP 连接
+// WrapPacketConn  info  UDP  info
 func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 	atomic.AddInt64(&globalTrafficManager.TotalConns, 1)
 	atomic.AddInt64(&globalTrafficManager.ActiveConns, 1)
@@ -816,7 +741,7 @@ func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 }
 
 // ==========================================
-// GoMobile 导出的供 Android 调用的结构体与接口
+// GoMobile  info  Android  info
 // ==========================================
 
 var (
@@ -826,7 +751,7 @@ var (
 	cpuStatsMu sync.Mutex
 )
 
-// TrafficStats 供外部获取流量数据的结构体 (新增了连接数)
+// TrafficStats  info  ( info )
 type TrafficStats struct {
 	TxRate      int64
 	RxRate      int64
@@ -836,7 +761,7 @@ type TrafficStats struct {
 	TotalConns  int64
 }
 
-// SysStats 供外部获取系统资源信息的结构体
+// SysStats  info
 type SysStats struct {
 	CpuPercent float64
 	MemAllocMB float64
@@ -844,12 +769,12 @@ type SysStats struct {
 	Goroutines int
 }
 
-// TrafficCallback GoMobile 导出的安卓回调接口 (增加 activeConns, totalConns)
+// TrafficCallback GoMobile  info  ( info  activeConns, totalConns)
 type TrafficCallback interface {
 	OnTrafficUpdate(txRate int64, rxRate int64, txTotal int64, rxTotal int64, activeConns int64, totalConns int64)
 }
 
-// SysInfoCallback GoMobile 导出的安卓回调接口
+// SysInfoCallback GoMobile  info
 type SysInfoCallback interface {
 	OnSysInfoUpdate(cpuPercent float64, memAllocMB float64, memSysMB float64, goroutines int)
 }
@@ -866,7 +791,7 @@ func RegisterSysInfoCallback(cb SysInfoCallback) {
 	callbackMu.Unlock()
 }
 
-// GetTrafficStats 供外部主动调用
+// GetTrafficStats  info
 func GetTrafficStats() *TrafficStats {
 	return &TrafficStats{
 		TxRate:      uint64ToInt64(atomic.LoadUint64(&currentTxRate)),
@@ -878,7 +803,7 @@ func GetTrafficStats() *TrafficStats {
 	}
 }
 
-// GetSysStats 供外部主动调用
+// GetSysStats  info
 func GetSysStats() *SysStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -890,7 +815,7 @@ func GetSysStats() *SysStats {
 	}
 }
 
-// GetActiveConnectionsJSON 返回当前活跃连接的 JSON 字符串 (完美解决 GoMobile 无法返回结构体切片的问题)
+// GetActiveConnectionsJSON  info  JSON  info  ( info  GoMobile  info )
 func GetActiveConnectionsJSON() string {
 	var list []ConnInfo
 	globalTrafficManager.activeMap.Range(func(key, value interface{}) bool {
@@ -918,7 +843,7 @@ func GetActiveConnectionsJSON() string {
 	return string(data)
 }
 
-// GetDomainActivityJSON 返回按速度排名的顶级活动域的 JSON 字符串。
+// GetDomainActivityJSON  info  JSON  info 。
 func GetDomainActivityJSON() string {
 	globalDomainStatsManager.rankMu.RLock()
 	defer globalDomainStatsManager.rankMu.RUnlock()
@@ -933,7 +858,7 @@ func GetDomainActivityJSON() string {
 	return string(data)
 }
 
-// ResetDomainStatsAndCache 供外部 (Android) 主动调用，清空路由缓存与域名活动排行榜数据
+// ResetDomainStatsAndCache  info  (Android)  info ， info
 func ResetDomainStatsAndCache() {
 	if gr := globalRouter.Load(); gr != nil {
 		gr.ResetCacheAndStats()
@@ -942,14 +867,14 @@ func ResetDomainStatsAndCache() {
 	zlog.Infof("%s [Stats] ♻️ Domain stats ranking and route cache have been reset per UI request", TAG)
 }
 
-// RouterStats 供外部获取路由分流统计数据的结构体
+// RouterStats  info
 type RouterStats struct {
 	QueryCount    int64
 	CacheHitCount int64
 	HitRate       float64
 }
 
-// GetRouterStats 供外部 (Android) 主动调用，获取当前路由引擎的实时统计信息
+// GetRouterStats  info  (Android)  info ， info
 func GetRouterStats() *RouterStats {
 	gr := globalRouter.Load()
 	if gr == nil {
@@ -969,7 +894,7 @@ func GetRouterStats() *RouterStats {
 }
 
 // ==========================================
-// 后台定时计算器与 CPU 统计
+//  info  CPU  info
 // ==========================================
 
 var (
@@ -979,8 +904,8 @@ var (
 )
 
 func getCpuPercent() float64 {
-	// 仅 Linux/Android 拥有 /proc/self/stat；其他平台（Windows/macOS 等）直接返回 0，
-	// 避免每秒产生一次无意义的文件读取与内存分配。
+	//  info  Linux/Android  info  /proc/self/stat； info （Windows/macOS  info ） info  0，
+	//  info 。
 	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
 		return 0.0
 	}
@@ -1028,27 +953,27 @@ func init() {
 			elapsed := now.Sub(lastSampleTime)
 			lastSampleTime = now
 
-			// 当前总流量和连接数
+			//  info
 			tTx := atomic.LoadUint64(&globalTrafficManager.TxTotal)
 			tRx := atomic.LoadUint64(&globalTrafficManager.RxTotal)
 			actConns := atomic.LoadInt64(&globalTrafficManager.ActiveConns)
 			totConns := atomic.LoadInt64(&globalTrafficManager.TotalConns)
 
-			// 上一秒总流量，并替换为最新总流量
+			//  info ， info
 			lTx := atomic.SwapUint64(&lastTxTotal, tTx)
 			lRx := atomic.SwapUint64(&lastRxTotal, tRx)
 
-			// 计算当前 1 秒内产生的流量速率
+			//  info  1  info
 			txRate := bytesPerSecond(trafficDelta(tTx, lTx), elapsed)
 			rxRate := bytesPerSecond(trafficDelta(tRx, lRx), elapsed)
 
-			// 更新供主动查询使用的速率
+			//  info
 			atomic.StoreUint64(&currentTxRate, txRate)
 			atomic.StoreUint64(&currentRxRate, rxRate)
 
 			globalDomainStatsManager.calculateAndRank(elapsed)
 
-			// 触发回调给 Android
+			//  info  Android
 			if trafficCb != nil {
 				trafficCb.OnTrafficUpdate(int64(txRate), int64(rxRate), int64(tTx), int64(tRx), actConns, totConns)
 			}

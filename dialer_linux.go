@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// bindDevice 利用 Linux 的 SO_BINDTODEVICE 选项将 Socket 强行绑定到指定网卡
+// bindDevice  info  Linux  info  SO_BINDTODEVICE  info  Socket  info
 func bindDevice(dialer *net.Dialer, ifaceName string) {
 	if ifaceName == "" {
 		return
@@ -16,7 +16,7 @@ func bindDevice(dialer *net.Dialer, ifaceName string) {
 	dialer.Control = func(network, address string, c syscall.RawConn) error {
 		var operr error
 		err := c.Control(func(fd uintptr) {
-			// 将底层 Socket 描述符绑定到网卡名称
+			//  info  Socket  info
 			operr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, ifaceName)
 		})
 		if err != nil {

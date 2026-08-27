@@ -25,7 +25,7 @@ type ProxyConfig struct {
 	ServerName                   string `json:"server_name"`
 	HttpPayload                  string `json:"http_payload"`
 	CustomPath                   string `json:"custom_path"`
-	UdpgwAddr                    string `json:"udpgw_addr"` // 留空则不开启 UDPGW
+	UdpgwAddr                    string `json:"udpgw_addr"` //  info  UDPGW
 	DisableStatusCheck           bool   `json:"disable_status_check"`
 	Alpn                         string `json:"alpn"`
 	VerifyCertificateFingerprint bool   `json:"verify_certificate_finger_print"`
@@ -34,20 +34,27 @@ type ProxyConfig struct {
 	UdpgwVersion                 string `json:"udpgw_version"`
 	BindInterface                string `json:"bind_interface"`
 
-	// DNS 隧道（SSH-over-DNS）相关配置
-	DnsTunnelDomain  string   `json:"dns_tunnel_domain"`  // 委托给隧道服务端的权威域名，如 "tunnel.example.com"
-	DnsTunnelServers []string `json:"dns_tunnel_servers"` // 多个权威 DNS 服务端地址（故障转移），支持 udp(默认)/tcp:///tls:///dot://
-	DnsTunnelType    string   `json:"dns_tunnel_type"`    // 承载数据的记录类型：txt(默认)/null/cname/a
+	// DNS tunnel（SSH-over-DNS） info config
+	DnsTunnelDomain    string   `json:"dns_tunnel_domain"`     //  info tunnel info ， info  "tunnel.example.com"
+	DnsTunnelServers   []string `json:"dns_tunnel_servers"`    //  info  DNS  info address（ info ），support udp(default)/tcp:///tls:///dot:///https://
+	DnsTunnelType      string   `json:"dns_tunnel_type"`       //  info ：txt(default)/null/cname/a
+	DnsTunnelPublicKey string   `json:"dns_tunnel_public_key"` // Noise  info
 
-	// KCP 隧道（SSH-over-KCP）相关配置
-	KcpPassword     string `json:"kcp_password"`      // KCP 密码 (用于 BlockCrypt 加密)
-	KcpCrypt        string `json:"kcp_crypt"`         // KCP 加密方式: none(默认)/aes/aes-128/chacha20/salsa20/sm4
-	KcpNoDelay      bool   `json:"kcp_nodelay"`       // 是否启用极速模式 (nodelay=1, interval=10ms, resend=2, nc=1)
-	KcpDataShards   int    `json:"kcp_data_shards"`   // FEC 数据分片数 (默认 10)
-	KcpParityShards int    `json:"kcp_parity_shards"` // FEC 校验分片数 (默认 3)
+	// KCP tunnel（SSH-over-KCP） info config
+	KcpPassword     string `json:"kcp_password"`      // KCP  info  ( info  BlockCrypt  info )
+	KcpCrypt        string `json:"kcp_crypt"`         // KCP  info : none(default)/aes/aes-128/chacha20/salsa20/sm4
+	KcpNoDelay      bool   `json:"kcp_nodelay"`       //  info enable info mode (nodelay=1, interval=10ms, resend=2, nc=1)
+	KcpDataShards   int    `json:"kcp_data_shards"`   // FEC  info  (default 10)
+	KcpParityShards int    `json:"kcp_parity_shards"` // FEC  info  (default 3)
 
-	// UDP Custom 相关配置
-	UdpCustomPayload string `json:"udp_custom_payload"` // UDP Custom 自定义 Payload/Auth 标识
+	// UDP Custom  info config
+	UdpCustomPsk       string `json:"udp_custom_psk"`        // UDP Custom  info  (PSK)
+	UdpCustomMagic     string `json:"udp_custom_magic"`      // UDP Custom  info  4 bytes info  (default "UDPC")
+	UdpCustomPublicKey string `json:"udp_custom_public_key"` // UDP Custom Noise  info
+	UdpCustomPaths     int    `json:"udp_custom_paths"`      // UDP Custom multipath path count (client-selected random ports); 0 => 32
+
+	//  info  Noise  info
+	NoisePublicKey string `json:"noise_public_key"` //  info  Noise  info
 }
 
 type GlobalConfig struct {

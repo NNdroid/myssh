@@ -3,6 +3,7 @@ package myssh
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 	mrand "math/rand/v2"
 	"net"
@@ -13,9 +14,9 @@ import (
 var paddingGarbage [4096]byte
 var paddingWritePool = sync.Pool{
 	New: func() interface{} {
-		// 单次最大 chunk 为 1MB (1048576)
-		// Header(6) + Padding(最大不到 512)
-		// 分配 1048576 + 1024 = 1049600 字节，绝对安全且避免越界
+		//  info  chunk  info  1MB (1048576)
+		// Header(6) + Padding( info  512)
+		//  info  1048576 + 1024 = 1049600 bytes， info
 		buf := make([]byte, 1049600)
 		return &buf
 	},
@@ -25,48 +26,49 @@ func init() {
 	rand.Read(paddingGarbage[:])
 }
 
-// 快速获取随机数。
+// info 。
 //
-// 填充长度只是流量混淆用的随机量，并非密钥/令牌，不需要密码学安全随机数。
-// 原本每次调用都走 crypto/rand.Read（一次系统调用），在高速下载、按 1MB 分块写入时
-// 会产生大量 syscall 开销。改用 math/rand/v2 的全局源（并发安全），吞吐与延迟显著改善，
-// 同时保持填充长度的不可预测性（足以对抗基于长度的流量分析）。
+// info ， info / info ， info 。
+// info  crypto/rand.Read（ info ）， info 、 info  1MB  info
+// info  syscall  info 。 info  math/rand/v2  info （ info ）， info ，
+// info （ info ）。
 func fastRand(max int) int {
 	return mrand.IntN(max)
 }
 
-// calculatePadding 智能动态填充算法
-// 核心思想：反比例填充 + 块边界对齐
+// calculatePadding  info
+//
+//	info ： info  +  info
 func calculatePadding(dataLen int) int {
 	var targetPad int
 
-	// 阶梯式反比例基础填充
+	//  info
 	switch {
 	case dataLen < 128:
-		// 极小包（握手包、心跳包）：重度混淆，随机填充 128 ~ 384 字节
+		//  info （ info 、 info ）： info ， info  128 ~ 384 bytes
 		targetPad = 128 + fastRand(256)
 	case dataLen < 512:
-		// 小包（控制指令）：中度混淆，随机填充 64 ~ 192 字节
+		//  info （ info ）： info ， info  64 ~ 192 bytes
 		targetPad = 64 + fastRand(128)
 	case dataLen < 8192:
-		// 中等包：轻度混淆，随机填充 16 ~ 64 字节
+		//  info ： info ， info  16 ~ 64 bytes
 		targetPad = 16 + fastRand(48)
 	default:
-		// 大型数据流（高速下载）
+		//  info data stream（ info ）
 		targetPad = 0
 	}
 
-	// 块对齐增强 (Block Alignment)
-	// 强制让 (真实数据 + Padding) 的总长度对齐到 64 字节边界，
-	// 这会让流量看起来非常像 AES/ChaCha20 这种标准块加密算法的输出特征。
+	//  info  (Block Alignment)
+	//  info  ( info  + Padding)  info  64 bytes info ，
+	//  info  AES/ChaCha20  info 。
 	totalLen := dataLen + targetPad
 	remainder := totalLen % 64
 	if remainder != 0 {
 		targetPad += (64 - remainder)
 	}
 
-	// 绝对安全边界拦截
-	// 确保 Padding 永远不会超过我们预分配的 paddingGarbage 垃圾池大小
+	//  info
+	//  info  Padding  info  paddingGarbage  info
 	if targetPad >= len(paddingGarbage) {
 		targetPad = len(paddingGarbage) - 1
 	}
@@ -75,10 +77,10 @@ func calculatePadding(dataLen int) int {
 }
 
 // ==========================================
-// Padding 读写器核心
+// Padding  info
 // ==========================================
 
-// PaddingWriter 对标准 io.Writer 进行混淆包装
+// PaddingWriter  info  io.Writer  info
 type PaddingWriter struct {
 	w io.Writer
 }
@@ -86,35 +88,35 @@ type PaddingWriter struct {
 func (pw *PaddingWriter) Write(p []byte) (nTotal int, err error) {
 	for len(p) > 0 {
 		chunk := p
-		// 控制单帧最大限制为 1MB
+		//  info  1MB
 		if len(chunk) > 1048576 {
 			chunk = chunk[:1048576]
 		}
 
-		// 智能计算 Padding 长度
+		//  info  Padding  info
 		padLen := calculatePadding(len(chunk))
 		totalLen := 6 + len(chunk) + padLen
 
-		// 🌟 核心优化：从全局池子里“借”一块内存，坚决不用 make
+		// 🌟  info ： info “ info ” info ， info  make
 		bufPtr := paddingWritePool.Get().(*[]byte)
 		buf := *bufPtr
 
-		// 写入 6 字节 Header
+		//  info  6 bytes Header
 		binary.BigEndian.PutUint32(buf[0:4], uint32(len(chunk)))
 		binary.BigEndian.PutUint16(buf[4:6], uint16(padLen))
 
-		// 写入真实数据
+		//  info
 		copy(buf[6:], chunk)
 
-		// 写入垃圾 Padding
+		//  info  Padding
 		if padLen > 0 {
 			copy(buf[6+len(chunk):], paddingGarbage[:padLen])
 		}
 
-		// 🌟 提交给底层发送（切片截取到实际组装的 totalLen）
+		// 🌟  info send（ info  totalLen）
 		_, errW := pw.w.Write(buf[:totalLen])
 
-		// 🌟 用完立刻“还”回池子，供其他并发连接复用
+		// 🌟  info “ info ” info ， info
 		paddingWritePool.Put(bufPtr)
 
 		if errW != nil {
@@ -127,7 +129,7 @@ func (pw *PaddingWriter) Write(p []byte) (nTotal int, err error) {
 	return nTotal, nil
 }
 
-// 傳遞關閉信號到底層 Writer
+// info  Writer
 func (pw *PaddingWriter) Close() error {
 	if closer, ok := pw.w.(io.Closer); ok {
 		return closer.Close()
@@ -135,7 +137,7 @@ func (pw *PaddingWriter) Close() error {
 	return nil
 }
 
-// PaddingReader 对应的解包器
+// PaddingReader  info
 type PaddingReader struct {
 	r        io.Reader
 	leftData uint32
@@ -144,7 +146,7 @@ type PaddingReader struct {
 
 func (pr *PaddingReader) Read(p []byte) (n int, err error) {
 	for pr.leftData == 0 {
-		// 消耗掉上一帧残留的 Padding (如果有的话)
+		//  info  Padding ( info )
 		if pr.leftPad > 0 {
 			_, err := io.CopyN(io.Discard, pr.r, int64(pr.leftPad))
 			if err != nil {
@@ -153,19 +155,24 @@ func (pr *PaddingReader) Read(p []byte) (n int, err error) {
 			pr.leftPad = 0
 		}
 
-		// 读取新帧的 6 字节 Header
+		// 读取 6 字节 Header
 		var header [6]byte
 		if _, err := io.ReadFull(pr.r, header[:]); err != nil {
 			return 0, err
 		}
 		pr.leftData = binary.BigEndian.Uint32(header[0:4]) // 解析 4 字节数据长度
 		pr.leftPad = binary.BigEndian.Uint16(header[4:6])
+
+		// 边界防护：防御损坏或恶意超大报文导致内存耗尽
+		if pr.leftData > 16*1024*1024 || pr.leftPad > 16384 {
+			return 0, fmt.Errorf("corrupted padding frame: dataLen=%d, padLen=%d", pr.leftData, pr.leftPad)
+		}
 	}
 
-	// 读取真实载荷
+	//  info
 	toRead := pr.leftData
 	if uint32(len(p)) < toRead {
-		toRead = uint32(len(p)) // 防御性判断：不能超过用户传入的 slice 容量
+		toRead = uint32(len(p)) //  info ： info  slice  info
 	}
 	n, err = pr.r.Read(p[:toRead])
 	if err != nil && err != io.EOF {
@@ -175,7 +182,7 @@ func (pr *PaddingReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-// 傳遞關閉信號到底層 Reader
+// info  Reader
 func (pr *PaddingReader) Close() error {
 	if closer, ok := pr.r.(io.Closer); ok {
 		return closer.Close()
@@ -184,10 +191,10 @@ func (pr *PaddingReader) Close() error {
 }
 
 // ==========================================
-// PaddingConn 组合器 (让 Padding 变成一个 net.Conn)
+// PaddingConn  info  ( info  Padding  info  net.Conn)
 // ==========================================
 
-// paddingConn 将普通的 net.Conn 包装为带 Padding 混淆的 net.Conn
+// paddingConn  info  net.Conn  info  Padding  info  net.Conn
 type paddingConn struct {
 	net.Conn
 	pr *PaddingReader
@@ -202,7 +209,7 @@ func (p *paddingConn) Write(b []byte) (n int, err error) {
 	return p.pw.Write(b)
 }
 
-// WrapWithPadding 提供一个便捷方法来包裹底层的连接
+// WrapWithPadding  info
 func WrapWithPadding(base net.Conn) net.Conn {
 	return &paddingConn{
 		Conn: base,
@@ -211,8 +218,8 @@ func WrapWithPadding(base net.Conn) net.Conn {
 	}
 }
 
-// WrapWithPaddingForStreams 用于处理那种底层实现了 io.Reader 和 io.Writer，并且有一个关闭回调的场景
-// (主要用于那些把读和写分开，但又需要聚合成 net.Conn 的特殊情况)
+// WrapWithPaddingForStreams  info  io.Reader  info  io.Writer， info closed info
+// ( info ， info  net.Conn  info )
 type customPaddingConn struct {
 	pr         *PaddingReader
 	pw         *PaddingWriter

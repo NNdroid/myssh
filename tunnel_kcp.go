@@ -87,12 +87,12 @@ func init() {
 		sess.SetACKNoDelay(true)
 
 		if cfg.KcpNoDelay {
-			// 极速模式: nodelay=1, interval=10ms, resend=2, nc=1
+			//  info mode: nodelay=1, interval=10ms, resend=2, nc=1
 			sess.SetNoDelay(1, 10, 2, 1)
 			sess.SetWindowSize(128, 512)
 			zlog.Infof("%s [Tunnel] ⚡ KCP turbo mode (nodelay=1, interval=10ms, resend=2) enabled", TAG)
 		} else {
-			// 普通低延迟模式: nodelay=1, interval=20ms, resend=1, nc=1
+			//  info mode: nodelay=1, interval=20ms, resend=1, nc=1
 			sess.SetNoDelay(1, 20, 1, 1)
 			sess.SetWindowSize(64, 256)
 		}

@@ -18,31 +18,38 @@ var (
 	Version  = "dev"
 	DebugStr = "false"
 	Debug    = false
-	// 用于 TCP io.CopyBuffer 的 64KB 缓冲池
+	//  info  TCP io.CopyBuffer  info  64KB  info
 	tcpBufPool = sync.Pool{
 		New: func() interface{} {
 			buf := make([]byte, 64*1024+1024)
 			return &buf
 		},
 	}
-	// 用于 UDP 读取的 64KB 缓冲池
+	//  info  UDP  info  64KB  info  ( info / info )
 	udpBufPool = sync.Pool{
 		New: func() interface{} {
 			buf := make([]byte, 64*1024+1024)
 			return &buf
 		},
 	}
-	// 全局复用的 bytes.Buffer 池，接收响应体
+	//  info  MTU UDP  info  (<=1500bytes)  info  2KB  info ， info  GC  info
+	udpSmallBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 2048)
+			return &buf
+		},
+	}
+	//  info  bytes.Buffer  info ， info
 	bytesBufPool = sync.Pool{
 		New: func() interface{} {
 			return new(bytes.Buffer)
 		},
 	}
-	// 填充池
+	//  info
 	padPool    []byte
 	padPoolLen = 64 * 1024
-	// tcp: 单个连接的读写缓冲上限。
-	// 原先 4MB 在移动端/高并发下内核内存占用过大，降到 1MB 以平衡跨国高 BDP 吞吐与内存占用。
+	// tcp:  info 。
+	//  info  4MB  info / info ， info  1MB  info  BDP  info 。
 	tcpOptimizeBufferSize   = 1 * 1024 * 1024
 	tcpKeepaliveIntervalSec = 15
 )
@@ -51,7 +58,7 @@ func init() {
 	if DebugStr == "true" {
 		Debug = true
 	}
-	// 随机填充池初始化
+	//  info
 	padPool = make([]byte, padPoolLen)
 	io.ReadFull(rand.Reader, padPool)
 }
@@ -62,48 +69,72 @@ func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
 
 	defer tcpBufPool.Put(bufPtr)
 
-	// 使用 CopyBuffer，并传入我们复用的内存块
-	// 它会一直使用这块内存直到 src 读到 EOF 或出错
+	//  info  CopyBuffer， info
+	//  info  src  info  EOF  info
 	return io.CopyBuffer(dst, src, buf)
 }
 
-// MakePeerCertVerifier 验证证书指纹
+// relayStream  info ：
+//
+//	info  Linux/Android  info  splice(2)  info ；
+//	info support info  Socket  info ， info  tcpRelay  info 。
+func relayStream(dst, src net.Conn) (int64, error) {
+	if n, err := trySplice(dst, src); err == nil {
+		return n, nil
+	}
+	return tcpRelay(dst, src)
+}
+
+// formatSHA256Fingerprint  info  SHA-256  info  (XX:XX:XX:...)
+func formatSHA256Fingerprint(raw []byte) string {
+	sha256Sum := sha256.Sum256(raw)
+	var fpBuilder strings.Builder
+	for i, b := range sha256Sum {
+		if i > 0 {
+			fpBuilder.WriteString(":")
+		}
+		fmt.Fprintf(&fpBuilder, "%02X", b)
+	}
+	return fpBuilder.String()
+}
+
+// ensureHostPort  info address info port， info defaultport
+func ensureHostPort(addr, defaultPort string) string {
+	addr = strings.TrimSpace(addr)
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return net.JoinHostPort(addr, defaultPort)
+	}
+	return addr
+}
+
+// MakePeerCertVerifier  info
 func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("no certificates presented by peer")
 		}
 
-		// 无论是否开启验证，都先计算并打印实际的证书指纹，方便用户查看
-		sha256Sum := sha256.Sum256(rawCerts[0])
-		var actualFPBuilder strings.Builder
-		for i, b := range sha256Sum {
-			if i > 0 {
-				actualFPBuilder.WriteString(":")
-			}
-			fmt.Fprintf(&actualFPBuilder, "%02X", b)
-		}
-		actualFingerprint := actualFPBuilder.String()
+		//  info ， info ， info
+		actualFingerprint := formatSHA256Fingerprint(rawCerts[0])
 
-		// 实际指纹仅在调试级别打印，避免每次 TLS/QUIC 握手都产生大量 INFO 日志
+		//  info ， info  TLS/QUIC  info  INFO  info
 		zlog.Debugf("%s [Tunnel] Actual certificate fingerprint: %s", TAG, actualFingerprint)
 
 		if !verifyFingerprint {
-			return nil // 如果用户没有开启强制验证，则直接放行
+			return nil //  info ， info
 		}
 
 		zlog.Infof("%s [Tunnel] Expected certificate fingerprint: %s", TAG, expectedFingerprint)
 
-		// 标准化：转大写并移除冒号和空格
+		//  info ： info
 		cleanExpected := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(expectedFingerprint, ":", ""), " ", ""))
 		cleanActual := strings.ReplaceAll(actualFingerprint, ":", "")
 
 		if cleanExpected != cleanActual {
-			zlog.Errorf("%s [Tunnel] ❌ Certificate fingerprint mismatch! Expected: %s, Actual: %s", TAG, expectedFingerprint, actualFingerprint)
-			return fmt.Errorf("fingerprint mismatch! expected: %s, actual: %s", expectedFingerprint, actualFingerprint)
+			return fmt.Errorf("certificate fingerprint mismatch! expected: %s, got: %s", expectedFingerprint, actualFingerprint)
 		}
 
-		zlog.Infof("%s [Tunnel] ✅ Certificate fingerprint verification passed!", TAG)
+		zlog.Infof("%s [Tunnel] ✅ Peer certificate fingerprint matched successfully", TAG)
 		return nil
 	}
 }
