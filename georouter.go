@@ -128,6 +128,9 @@ func downloadFile(url string, destPath string) error {
 }
 
 type GeoRouter struct {
+	queryCount    atomic.Int64 //  info
+	cacheHitCount atomic.Int64 //  info
+
 	fullDomains  map[string]struct{}
 	subDomains   map[string]struct{}
 	keywordList  []string
@@ -136,13 +139,10 @@ type GeoRouter struct {
 	regexGrouped []*regexp.Regexp
 
 	ipTrie            *ipTrie
-	domainCache       sync.Map //  info  L1  info
-	routeIPCache      sync.Map //  info ： info → info  IP  info ， info
-	cacheCount        int32    // L1  info
-	routeIPCacheCount int32    // routeIP  info
-
-	queryCount    int64 //  info
-	cacheHitCount int64 //  info
+	domainCache       sync.Map     //  info  L1  info
+	routeIPCache      sync.Map     //  info ： info → info  IP  info ， info
+	cacheCount        atomic.Int32 // L1  info
+	routeIPCacheCount atomic.Int32 // routeIP  info
 }
 
 func newGeoRouter() *GeoRouter {
@@ -549,8 +549,8 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		}
 		//  info （ info  TTL）； info ， info
 		r.routeIPCache.Store(host, routeResolved{ips: ips, expire: time.Now().Add(routeIPCacheTTL)})
-		if atomic.AddInt32(&r.routeIPCacheCount, 1) >= 5000 {
-			if atomic.CompareAndSwapInt32(&r.routeIPCacheCount, 5000, 0) {
+		if r.routeIPCacheCount.Add(1) >= 5000 {
+			if r.routeIPCacheCount.CompareAndSwap(5000, 0) {
 				go func() {
 					now := time.Now()
 					r.routeIPCache.Range(func(key, value interface{}) bool {
@@ -583,18 +583,18 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 	//  info  L1  info  (O(1)  info )
 	//  info  App /  info ， info ， info 。
 	if val, ok := r.domainCache.Load(domain); ok {
-		atomic.AddInt64(&r.cacheHitCount, 1)
-		atomic.AddInt64(&r.queryCount, 1)
+		r.cacheHitCount.Add(1)
+		r.queryCount.Add(1)
 		return val.(bool)
 	}
 
-	atomic.AddInt64(&r.queryCount, 1)
+	r.queryCount.Add(1)
 	matched := r.doMatchDomain(domain)
 
 	//  info  10000  info ， info 。
 	//  info  CAS  info ， info 。
-	if atomic.AddInt32(&r.cacheCount, 1) >= 10000 {
-		if atomic.CompareAndSwapInt32(&r.cacheCount, 10000, 0) {
+	if r.cacheCount.Add(1) >= 10000 {
+		if r.cacheCount.CompareAndSwap(10000, 0) {
 			go func() {
 				r.domainCache.Range(func(key, value interface{}) bool {
 					r.domainCache.Delete(key)
@@ -618,16 +618,16 @@ func (r *GeoRouter) ResetCacheAndStats() {
 		r.routeIPCache.Delete(key)
 		return true
 	})
-	atomic.StoreInt32(&r.cacheCount, 0)
-	atomic.StoreInt32(&r.routeIPCacheCount, 0)
-	atomic.StoreInt64(&r.queryCount, 0)
-	atomic.StoreInt64(&r.cacheHitCount, 0)
+	r.cacheCount.Store(0)
+	r.routeIPCacheCount.Store(0)
+	r.queryCount.Store(0)
+	r.cacheHitCount.Store(0)
 	zlog.Infof("%s [Router] ♻️ Route cache and query stats manually reset", TAG)
 }
 
 // getStats  info ：( info ,  info )， info  gomobile  info
 func (r *GeoRouter) getStats() (int64, int64) {
-	return atomic.LoadInt64(&r.queryCount), atomic.LoadInt64(&r.cacheHitCount)
+	return r.queryCount.Load(), r.cacheHitCount.Load()
 }
 
 func (r *GeoRouter) doMatchDomain(domain string) bool {

@@ -225,9 +225,9 @@ func (pr *PortRange) String() string {
 // "any port per packet" contract that defeats per-destination-port UDP
 // rate limiting.
 type PortSelector struct {
+	rr   atomic.Uint64
 	pr   *PortRange
 	mode SelectorMode
-	rr   uint64
 	rng  *rand.Rand
 	mu   sync.Mutex
 }
@@ -256,7 +256,7 @@ func (s *PortSelector) Next() int {
 		return 0
 	}
 	if s.mode == SelectorRoundRobin {
-		i := atomic.AddUint64(&s.rr, 1) - 1
+		i := s.rr.Add(1) - 1
 		return s.pr.PortAt(int(i % uint64(s.pr.total)))
 	}
 	s.mu.Lock()

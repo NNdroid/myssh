@@ -4,7 +4,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -110,7 +109,7 @@ func TestUDPCConn_WriteUsesAdaptiveRTO(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	seq := atomic.LoadUint32(&c.sendSeq) - 1
+	seq := c.sendSeq.Load() - 1
 	c.unackedMu.Lock()
 	pkt, ok := c.unacked[seq]
 	c.unackedMu.Unlock()

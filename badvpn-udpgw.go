@@ -14,17 +14,17 @@ import (
 )
 
 // info  ConID  info  ( info  1  info )
-var globalConID uint32 = 0
+var globalConID atomic.Uint32
 
 // info  ConID
 func nextConID() uint16 {
 	//  info ， info
-	id := atomic.AddUint32(&globalConID, 1)
+	id := globalConID.Add(1)
 
 	//  info ， info  0  info  conid
 	res := uint16(id % 65536)
 	if res == 0 {
-		id = atomic.AddUint32(&globalConID, 1)
+		id = globalConID.Add(1)
 		res = uint16(id % 65536)
 	}
 	return res
@@ -39,6 +39,8 @@ const (
 )
 
 type BadvpnUdpgwConn struct {
+	lastActive atomic.Int64
+
 	net.Conn
 	targetIP   net.IP
 	targetPort uint16
@@ -48,8 +50,6 @@ type BadvpnUdpgwConn struct {
 	writeLock sync.Mutex
 	closed    chan struct{}
 	closeOnce sync.Once
-
-	lastActive int64
 }
 
 // DialBadvpnUdpgw  info  SSH tunnel info  Badvpn-UDPGW  info
@@ -89,7 +89,7 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		conID:      uniqueID, //  info  ID
 		closed:     make(chan struct{}),
 	}
-	atomic.StoreInt64(&c.lastActive, time.Now().Unix())
+	c.lastActive.Store(time.Now().Unix())
 
 	if Debug {
 		zlog.Debugf("%s [UDPGW-Dial] 🆕 Allocated new ConID: %d", TAG, uniqueID)
@@ -186,7 +186,7 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 		}
 
 		//  info bidirectionaltimeout info  (45 info ， info )
-		last := atomic.LoadInt64(&c.lastActive)
+		last := c.lastActive.Load()
 		if time.Now().Unix()-last > 45 {
 			zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Server heartbeat timeout (45s), connection dead", TAG)
 			c.Close() //  info
@@ -246,7 +246,7 @@ func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 		case <-c.closed:
 			return 0, io.EOF
 		default:
-		}
+			}
 		zlog.Errorf("%s [UDPGW-Write] ❌ Failed to send UDP data frame: %v", TAG, err)
 		return 0, err
 	}
@@ -288,7 +288,7 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 			return 0, err
 		}
 		//  info （ info server info ）， info
-		atomic.StoreInt64(&c.lastActive, time.Now().Unix())
+		c.lastActive.Store(time.Now().Unix())
 
 		if Debug {
 			zlog.Debugf("%s [UDPGW-Read] 📥 Received return frame | Length: %d | Hex: %s\n", TAG, pLen, hex.EncodeToString(body))

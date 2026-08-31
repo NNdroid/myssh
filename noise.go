@@ -291,8 +291,8 @@ const noiseTagSize = chacha20poly1305.Overhead
 
 // NoiseCipherState wraps one ChaCha20-Poly1305 transport key.
 type NoiseCipherState struct {
+	nonce atomic.Uint64 // only used by the legacy single-arg Encrypt/Decrypt (DNS tunnel)
 	aead  cipher.AEAD
-	nonce uint64 // only used by the legacy single-arg Encrypt/Decrypt (DNS tunnel)
 }
 
 func newNoiseCipherState(key []byte) (*NoiseCipherState, error) {
@@ -308,14 +308,14 @@ func newNoiseCipherState(key []byte) (*NoiseCipherState, error) {
 // code MUST use EncryptWithSeq / DecryptWithSeq so retransmissions open
 // correctly.
 func (s *NoiseCipherState) Encrypt(plaintext []byte) []byte {
-	nonceNum := atomic.AddUint64(&s.nonce, 1) - 1
+	nonceNum := s.nonce.Add(1) - 1
 	var nonce [12]byte
 	binary.LittleEndian.PutUint64(nonce[4:], nonceNum)
 	return s.aead.Seal(nil, nonce[:], plaintext, nil)
 }
 
 func (s *NoiseCipherState) Decrypt(ciphertext []byte) ([]byte, error) {
-	nonceNum := atomic.AddUint64(&s.nonce, 1) - 1
+	nonceNum := s.nonce.Add(1) - 1
 	var nonce [12]byte
 	binary.LittleEndian.PutUint64(nonce[4:], nonceNum)
 	return s.aead.Open(nil, nonce[:], ciphertext, nil)

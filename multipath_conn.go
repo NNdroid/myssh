@@ -35,22 +35,22 @@ type broadcaster interface {
 type multipathConn struct {
 	paths     []*pathConn
 	n         int
-	rr        uint64
+	rr        atomic.Uint64
 	readCh    chan readPkt
 	closeCh   chan struct{}
-	closed    int32
+	closed    atomic.Int32
 	readDead  time.Time
 	writeDead time.Time
 	primary   *pathConn
 }
 
 type pathConn struct {
+	sent       atomic.Uint64
+	recv       atomic.Uint64
 	conn       *net.UDPConn
 	serverPort int
 	raddr      *net.UDPAddr
 	mu         sync.Mutex
-	sent       uint64
-	recv       uint64
 }
 
 type readPkt struct {
@@ -79,7 +79,7 @@ func (m *multipathConn) readLoop(p *pathConn) {
 	buf := make([]byte, 2048)
 	for {
 		n, err := p.conn.Read(buf)
-		if atomic.LoadInt32(&m.closed) == 1 {
+		if m.closed.Load() == 1 {
 			return
 		}
 		if err != nil {
@@ -91,7 +91,7 @@ func (m *multipathConn) readLoop(p *pathConn) {
 		}
 		cp := make([]byte, n)
 		copy(cp, buf[:n])
-		atomic.AddUint64(&p.recv, 1)
+		p.recv.Add(1)
 		select {
 		case m.readCh <- readPkt{cp, n, nil}:
 		case <-m.closeCh:
@@ -133,9 +133,9 @@ func (m *multipathConn) deliver(pkt readPkt, b []byte) (int, error) {
 }
 
 func (m *multipathConn) Write(b []byte) (int, error) {
-	idx := atomic.AddUint64(&m.rr, 1)
+	idx := m.rr.Add(1)
 	p := m.paths[idx%uint64(m.n)]
-	atomic.AddUint64(&p.sent, 1)
+	p.sent.Add(1)
 	if !m.writeDead.IsZero() && time.Now().After(m.writeDead) {
 		return 0, errors.New("i/o timeout")
 	}
@@ -154,7 +154,7 @@ func (m *multipathConn) WriteAll(b []byte) (int, error) {
 			continue
 		}
 		total += n
-		atomic.AddUint64(&p.sent, 1)
+		p.sent.Add(1)
 	}
 	if lastErr != nil && total == 0 {
 		return 0, lastErr
@@ -163,7 +163,7 @@ func (m *multipathConn) WriteAll(b []byte) (int, error) {
 }
 
 func (m *multipathConn) Close() error {
-	if !atomic.CompareAndSwapInt32(&m.closed, 0, 1) {
+	if !m.closed.CompareAndSwap(0, 1) {
 		return nil
 	}
 	close(m.closeCh)

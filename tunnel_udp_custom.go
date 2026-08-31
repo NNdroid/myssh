@@ -122,9 +122,9 @@ type UDPCConn struct {
 	isServer  bool
 
 	// Sequence & ARQ State
-	sendSeq     uint32
-	recvSeq     uint32
-	lastAckSent uint32
+	sendSeq     atomic.Uint32
+	recvSeq     atomic.Uint32
+	lastAckSent atomic.Uint32
 
 	readBuf  bytes.Buffer
 	readMu   sync.Mutex
@@ -140,20 +140,20 @@ type UDPCConn struct {
 	rttEst *rttEstimator // adaptive RTO estimator (RFC 6298 + Karn's rule)
 
 	noiseSession *NoiseSession
-	closed       int32
+	closed       atomic.Int32
 	closeChan    chan struct{}
 	closeOnce    sync.Once
 	readDead     time.Time
 	writeDead    time.Time
-	lastRecv     int64 // Unix timestamp of the most recent inbound packet; keepalive uses
+	lastRecv     atomic.Int64 // Unix timestamp of the most recent inbound packet; keepalive uses
 	// it to detect an idle peer
 
 	// Diagnostics. Always cheap; only surfaced through the debug log.
-	txPkts     uint64 // frames handed to baseConn.Write
-	rxPkts     uint64 // frames decoded and accepted
-	rxDropped  uint64 // frames dropped (bad magic / CRC / wrong session)
-	retrans    uint64 // retransmissions performed
-	rxOutOfOrd uint64 // DATA frames buffered out of order
+	txPkts     atomic.Uint64 // frames handed to baseConn.Write
+	rxPkts     atomic.Uint64 // frames decoded and accepted
+	rxDropped  atomic.Uint64 // frames dropped (bad magic / CRC / wrong session)
+	retrans    atomic.Uint64 // retransmissions performed
+	rxOutOfOrd atomic.Uint64 // DATA frames buffered out of order
 }
 
 type unackedPacket struct {
@@ -174,15 +174,15 @@ func newUDPCConn(base net.Conn, raddr net.Addr, sessionID uint32, magic uint32, 
 		password:     password,
 		isServer:     isServer,
 		noiseSession: noiseSess,
-		sendSeq:      1,
-		recvSeq:      1,
 		recvQueue:    make(map[uint32][]byte),
 		unacked:      make(map[uint32]*unackedPacket),
 		closeChan:    make(chan struct{}),
 		rttEst:       newRTTEstimator(500*time.Millisecond, 200*time.Millisecond, 10*time.Second),
 	}
+	c.sendSeq.Store(1)
+	c.recvSeq.Store(1)
 	c.readCond = sync.NewCond(&c.readMu)
-	atomic.StoreInt64(&c.lastRecv, time.Now().Unix())
+	c.lastRecv.Store(time.Now().Unix())
 
 	// Start packet receiver, retransmission, and keepalive loops
 	go c.readLoop()
@@ -206,13 +206,13 @@ func (c *UDPCConn) keepaliveLoop() {
 			// and retrans grows.
 			zlog.Debugf("%s [UDPCConn 0x%08X] 📊 tx=%d rx=%d retrans=%d outOfOrder=%d dropped=%d rto=%v unacked=%d",
 				TAG, c.sessionID,
-				atomic.LoadUint64(&c.txPkts), atomic.LoadUint64(&c.rxPkts),
-				atomic.LoadUint64(&c.retrans), atomic.LoadUint64(&c.rxOutOfOrd),
-				atomic.LoadUint64(&c.rxDropped), c.rttEst.RTO(), c.unackedLen())
-			if atomic.LoadInt32(&c.closed) == 0 {
+				c.txPkts.Load(), c.rxPkts.Load(),
+				c.retrans.Load(), c.rxOutOfOrd.Load(),
+				c.rxDropped.Load(), c.rttEst.RTO(), c.unackedLen())
+			if c.closed.Load() == 0 {
 				// lastRecv stays 0 until the first packet arrives, so only judge
 				// idleness once we have actually heard from the peer
-				if last := atomic.LoadInt64(&c.lastRecv); last != 0 && time.Now().Unix()-last > idleTimeout {
+				if last := c.lastRecv.Load(); last != 0 && time.Now().Unix()-last > idleTimeout {
 					zlog.Warnf("%s [UDPCConn] ⚠️ Idle timeout (%ds) detected, closing connection", TAG, idleTimeout)
 					c.Close()
 					return
@@ -236,7 +236,7 @@ func (c *UDPCConn) keepaliveLoop() {
 				} else {
 					c.baseConn.Write(pingBytes)
 				}
-				atomic.AddUint64(&c.txPkts, 1)
+				c.txPkts.Add(1)
 			}
 		}
 	}
@@ -245,13 +245,13 @@ func (c *UDPCConn) keepaliveLoop() {
 func (c *UDPCConn) readLoop() {
 	buf := make([]byte, 2048)
 	for {
-		if atomic.LoadInt32(&c.closed) == 1 {
+		if c.closed.Load() == 1 {
 			return
 		}
 		n, err := c.baseConn.Read(buf)
 		if err != nil {
 			zlog.Debugf("%s [UDPCConn 0x%08X] 🛑 base read error after %d rx packet(s): %v",
-				TAG, c.sessionID, atomic.LoadUint64(&c.rxPkts), err)
+				TAG, c.sessionID, c.rxPkts.Load(), err)
 			c.Close()
 			return
 		}
@@ -260,21 +260,21 @@ func (c *UDPCConn) readLoop() {
 		if err != nil || frame.SessionID != c.sessionID {
 			// With port-range spreading the socket is unconnected, so it also
 			// sees stray traffic; count it rather than spam.
-			if d := atomic.AddUint64(&c.rxDropped, 1); d <= 3 || d%500 == 0 {
+			if d := c.rxDropped.Add(1); d <= 3 || d%500 == 0 {
 				zlog.Debugf("%s [UDPCConn 0x%08X] 🗑️ dropped packet #%d len=%d wantSid=0x%08X err=%v",
 					TAG, c.sessionID, d, n, c.sessionID, err)
 			}
 			continue
 		}
 
-		atomic.AddUint64(&c.rxPkts, 1)
-		if rx := atomic.LoadUint64(&c.rxPkts); rx <= 32 || rx%200 == 0 {
+		c.rxPkts.Add(1)
+		if rx := c.rxPkts.Load(); rx <= 32 || rx%200 == 0 {
 			zlog.Debugf("%s [UDPCConn 0x%08X] 📥 #%d cmd=0x%02X seq=%d ack=%d len=%d",
 				TAG, c.sessionID, rx, frame.Cmd, frame.Seq, frame.Ack, n)
 		}
 
 		//  info  info  info  info  info  info  keepalive  info  info
-		atomic.StoreInt64(&c.lastRecv, time.Now().Unix())
+		c.lastRecv.Store(time.Now().Unix())
 
 		// Process ACK
 		if frame.Ack > 0 {
@@ -353,13 +353,13 @@ func (c *UDPCConn) handleAck(ackSeq uint32) {
 // advertising it would make the peer drop a genuinely outstanding packet from
 // its retransmit queue.
 func (c *UDPCConn) ackFor() uint32 {
-	return atomic.LoadUint32(&c.recvSeq) - 1
+	return c.recvSeq.Load() - 1
 }
 
 func (c *UDPCConn) handleData(frame *UDPCFrame) {
 	c.recvMu.Lock()
 	seq := frame.Seq
-	expected := atomic.LoadUint32(&c.recvSeq)
+	expected := c.recvSeq.Load()
 
 	switch {
 	case seq < expected:
@@ -379,7 +379,7 @@ func (c *UDPCConn) handleData(frame *UDPCFrame) {
 		if len(c.recvQueue) < 512 {
 			c.recvQueue[seq] = frame.Data
 		}
-		if oo := atomic.AddUint64(&c.rxOutOfOrd, 1); oo <= 10 || oo%100 == 0 {
+		if oo := c.rxOutOfOrd.Add(1); oo <= 10 || oo%100 == 0 {
 			zlog.Debugf("%s [UDPCConn 0x%08X] 🔀 #%d out-of-order DATA seq=%d (expecting %d, queued=%d)",
 				TAG, c.sessionID, oo, seq, expected, len(c.recvQueue))
 		}
@@ -400,10 +400,10 @@ func (c *UDPCConn) handleData(frame *UDPCFrame) {
 
 		c.readMu.Lock()
 		c.readBuf.Write(payload)
-		atomic.AddUint32(&c.recvSeq, 1)
+		c.recvSeq.Add(1)
 
 		for {
-			nextSeq := atomic.LoadUint32(&c.recvSeq)
+			nextSeq := c.recvSeq.Load()
 			nextRaw, exists := c.recvQueue[nextSeq]
 			if !exists {
 				break
@@ -418,7 +418,7 @@ func (c *UDPCConn) handleData(frame *UDPCFrame) {
 				nextPayload = decrypted
 			}
 			c.readBuf.Write(nextPayload)
-			atomic.AddUint32(&c.recvSeq, 1)
+			c.recvSeq.Add(1)
 		}
 		c.readCond.Signal()
 		c.readMu.Unlock()
@@ -457,8 +457,8 @@ func (c *UDPCConn) sendFrame(cmd uint8, seq uint32, ack uint32, data []byte) err
 			TAG, c.sessionID, cmd, seq, ack, len(pkt), err)
 		return err
 	}
-	atomic.AddUint64(&c.txPkts, 1)
-	if tx := atomic.LoadUint64(&c.txPkts); tx <= 32 || tx%200 == 0 {
+	c.txPkts.Add(1)
+	if tx := c.txPkts.Load(); tx <= 32 || tx%200 == 0 {
 		zlog.Debugf("%s [UDPCConn 0x%08X] 📤 #%d cmd=0x%02X seq=%d ack=%d len=%d",
 			TAG, c.sessionID, tx, cmd, seq, ack, n)
 	}
@@ -507,7 +507,7 @@ func (c *UDPCConn) retransmitLoop() {
 					// Retransmissions are the primary symptom of a broken port
 					// range: the client keeps spreading but nothing comes back.
 					// Head-sample the first ones, then 1-in-50.
-					if rt := atomic.AddUint64(&c.retrans, 1); rt <= 10 || rt%50 == 0 {
+					if rt := c.retrans.Add(1); rt <= 10 || rt%50 == 0 {
 						zlog.Debugf("%s [UDPCConn 0x%08X] 🔁 #%d retransmit seq=%d attempt=%d rto=%v err=%v",
 							TAG, c.sessionID, rt, pkt.frame.Seq, pkt.retries, pkt.rto, werr)
 					}
@@ -523,7 +523,7 @@ func (c *UDPCConn) Read(b []byte) (n int, err error) {
 	defer c.readMu.Unlock()
 
 	for c.readBuf.Len() == 0 {
-		if atomic.LoadInt32(&c.closed) == 1 {
+		if c.closed.Load() == 1 {
 			return 0, io.EOF
 		}
 		if !c.readDead.IsZero() && time.Now().After(c.readDead) {
@@ -535,7 +535,7 @@ func (c *UDPCConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *UDPCConn) Write(b []byte) (n int, err error) {
-	if atomic.LoadInt32(&c.closed) == 1 {
+	if c.closed.Load() == 1 {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -547,7 +547,7 @@ func (c *UDPCConn) Write(b []byte) (n int, err error) {
 		}
 		chunk := b[:chunkSize]
 
-		seq := atomic.AddUint32(&c.sendSeq, 1) - 1
+		seq := c.sendSeq.Add(1) - 1
 		now := time.Now()
 
 		dataToSend := chunk
@@ -591,8 +591,8 @@ func (c *UDPCConn) Write(b []byte) (n int, err error) {
 				TAG, c.sessionID, seq, len(dataToSend), err)
 			return total, err
 		}
-		atomic.AddUint64(&c.txPkts, 1)
-		if tx := atomic.LoadUint64(&c.txPkts); tx <= 32 || tx%200 == 0 {
+		c.txPkts.Add(1)
+		if tx := c.txPkts.Load(); tx <= 32 || tx%200 == 0 {
 			zlog.Debugf("%s [UDPCConn 0x%08X] 📤 #%d DATA seq=%d ack=%d payload=%d wire=%d",
 				TAG, c.sessionID, tx, seq, frame.Ack, len(dataToSend), n)
 		}
@@ -605,7 +605,7 @@ func (c *UDPCConn) Write(b []byte) (n int, err error) {
 
 func (c *UDPCConn) Close() error {
 	c.closeOnce.Do(func() {
-		atomic.StoreInt32(&c.closed, 1)
+		c.closed.Store(1)
 		close(c.closeChan)
 		c.readMu.Lock()
 		c.readCond.Broadcast()

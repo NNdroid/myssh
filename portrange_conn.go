@@ -38,15 +38,15 @@ import (
 // IP_RECVORIGDSTADDR support is off) — which is precisely the "handshake works
 // but the port range does not carry traffic" symptom.
 type rangeUDPConn struct {
+	// --- diagnostics -------------------------------------------------------
+	sendCount atomic.Uint64 // datagrams handed to WriteToUDP
+	recvCount atomic.Uint64 // datagrams returned to the caller
+
 	conn    *net.UDPConn
 	host    string
 	ip      net.IP // resolved once; falls back to host string per-write if nil
 	primary int    // The first port in the config (guaranteed to be listened on by server)
 	sel     *PortSelector
-
-	// --- diagnostics -------------------------------------------------------
-	sendCount uint64 // datagrams handed to WriteToUDP
-	recvCount uint64 // datagrams returned to the caller
 
 	portsMu   sync.Mutex
 	sentPorts map[int]uint64 // destination port -> packets sent to it
@@ -91,7 +91,7 @@ func (r *rangeUDPConn) writeToPort(b []byte, port int, isPrimary bool) (int, err
 	dst := r.resolveAddr(port)
 	n, err := r.conn.WriteToUDP(b, dst)
 
-	seq := atomic.AddUint64(&r.sendCount, 1)
+	seq := r.sendCount.Add(1)
 	r.notePort(&r.portsMu, r.sentPorts, port)
 
 	if err != nil {
@@ -132,7 +132,7 @@ func (r *rangeUDPConn) resolveAddr(port int) *net.UDPAddr {
 func (r *rangeUDPConn) Read(b []byte) (int, error) {
 	n, from, err := r.conn.ReadFromUDP(b)
 	if err != nil {
-		if seq := atomic.LoadUint64(&r.recvCount); seq == 0 {
+		if seq := r.recvCount.Load(); seq == 0 {
 			// Nothing has ever arrived: usually means the server's reply never
 			// made it back through the NAT (source-port mismatch).
 			zlog.Debugf("%s [Range-Recv] ⏳ read error before any reply arrived: %v", TAG, err)
@@ -147,7 +147,7 @@ func (r *rangeUDPConn) Read(b []byte) (int, error) {
 }
 
 func (r *rangeUDPConn) noteRecv(from *net.UDPAddr, pkt []byte) {
-	seq := atomic.AddUint64(&r.recvCount, 1)
+	seq := r.recvCount.Add(1)
 
 	srcPort := 0
 	if from != nil {
@@ -229,7 +229,7 @@ func (r *rangeUDPConn) Close() error {
 	// debugging a range that "does not work". distinctDst >> 1 means the client
 	// is spreading; distinctSrc ~= distinctDst means the server is mirroring.
 	zlog.Infof("%s [Range] 🔚 closed: sent=%d recv=%d distinctDstPorts=%d distinctSrcPorts=%d range=%s",
-		TAG, atomic.LoadUint64(&r.sendCount), atomic.LoadUint64(&r.recvCount),
+		TAG, r.sendCount.Load(), r.recvCount.Load(),
 		r.distinctSent(), r.distinctRecv(), r.rangeSpec())
 	return r.conn.Close()
 }

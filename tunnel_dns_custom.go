@@ -512,9 +512,9 @@ type DNSTunnel struct {
 	// path keeps a warm socket pool and runs its own poll loop, so every server
 	// contributes throughput instead of only being a failover spare.
 	paths        []*dnsPath
-	serverCursor uint32  // atomic; round-robin cursor over upstream servers
-	failUntil    []int64 // atomic per element; deadline until a path is skipped
-	seq          uint32  // atomic; per-query anti-cache sequence
+	serverCursor atomic.Uint32  // atomic; round-robin cursor over upstream servers
+	failUntil    []atomic.Int64 // atomic per element; deadline until a path is skipped
+	seq          atomic.Uint32  // atomic; per-query anti-cache sequence
 
 	inMu   sync.Mutex
 	inCond *sync.Cond
@@ -523,14 +523,14 @@ type DNSTunnel struct {
 	noiseSession *NoiseSession
 
 	// Adaptive in-flight window for upstream chunks (see onWindowSample).
-	window     int32 // atomic; current total in-flight window
-	winCredit  int64 // atomic; successful samples since the last growth step
-	winSamples int64 // atomic; samples seen so far, used to skip the cold-start ones
-	bestRTT    int64 // atomic; best upstream round trip seen so far, in nanoseconds
+	window     atomic.Int32 // atomic; current total in-flight window
+	winCredit  atomic.Int64 // atomic; successful samples since the last growth step
+	winSamples atomic.Int64 // atomic; samples seen so far, used to skip the cold-start ones
+	bestRTT    atomic.Int64 // atomic; best upstream round trip seen so far, in nanoseconds
 
 	// Reliable-ordered transport: dedup plus in-order reassembly in both directions.
-	dataSeq  uint32            // atomic; per-chunk upstream ordering sequence
-	ack      uint32            // atomic; highest contiguous downstream serverSeq received (== recvNext-1)
+	dataSeq  atomic.Uint32     // atomic; per-chunk upstream ordering sequence
+	ack      atomic.Uint32     // atomic; highest contiguous downstream serverSeq received (== recvNext-1)
 	recvNext uint32            // next expected downstream serverSeq
 	recvOOO  map[uint32][]byte // out-of-order downstream chunks buffered for in-order delivery
 	recvMu   sync.Mutex
@@ -582,13 +582,13 @@ func newDNSTunnel(ctx context.Context, cfg ProxyConfig, servers []string, domain
 		chunkSize:    dnsTunnelDefaultChunk,
 		pollInterval: dnsTunnelPollInterval,
 		paths:        paths,
-		failUntil:    make([]int64, len(servers)),
+		failUntil:    make([]atomic.Int64, len(servers)),
 		inBuf:        new(bytes.Buffer),
 		closeCh:      make(chan struct{}),
 		recvNext:     1,
 		recvOOO:      make(map[uint32][]byte),
-		window:       dnsTunnelUpstreamWindow,
 	}
+	t.window.Store(dnsTunnelUpstreamWindow)
 
 	pubKeyStr := cfg.DnsTunnelPublicKey
 	if pubKeyStr == "" {
@@ -611,7 +611,7 @@ func newDNSTunnel(ctx context.Context, cfg ProxyConfig, servers []string, domain
 				// retry must not advance it - otherwise a slow-but-delivered first
 				// attempt leaves a hole the peer would wait on forever. The ePub is
 				// sent in the clear (Noise_NK sends the ephemeral pubkey openly).
-				hsSeq := atomic.AddUint32(&t.dataSeq, 1)
+				hsSeq := t.dataSeq.Add(1)
 				var hsErr error
 				for i := range t.paths {
 					if _, err := t.sendQuery(i, flagData, ePub, hsSeq); err != nil {
@@ -798,8 +798,8 @@ func (t *DNSTunnel) sendQuery(pathIdx int, flag byte, wirePayload []byte, dataSe
 		return 0, net.ErrClosed
 	}
 
-	seq := atomic.AddUint32(&t.seq, 1)
-	name := buildQueryName(t.domain, t.session, seq, atomic.LoadUint32(&t.ack), dataSeq, flag, wirePayload)
+	seq := t.seq.Add(1)
+	name := buildQueryName(t.domain, t.session, seq, t.ack.Load(), dataSeq, flag, wirePayload)
 
 	m := new(dns.Msg)
 	m.SetQuestion(name, t.qtype)
@@ -830,11 +830,11 @@ func (t *DNSTunnel) nextServer() int {
 	now := time.Now().UnixNano()
 	var fallback uint32
 	for i := uint32(0); i < n; i++ {
-		idx := atomic.AddUint32(&t.serverCursor, 1) % n
+		idx := t.serverCursor.Add(1) % n
 		if i == 0 {
 			fallback = idx
 		}
-		if atomic.LoadInt64(&t.failUntil[idx]) <= now {
+		if t.failUntil[idx].Load() <= now {
 			return int(idx)
 		}
 	}
@@ -846,7 +846,7 @@ func (t *DNSTunnel) nextServer() int {
 // number of paths: every configured path carries its own share of the load, so more
 // paths justify more in-flight queries - but only the measurements can say how many.
 func (t *DNSTunnel) upstreamWindow() int {
-	w := int(atomic.LoadInt32(&t.window))
+	w := int(t.window.Load())
 	max := dnsTunnelMaxUpstreamWindow * len(t.paths)
 	if max > dnsTunnelMaxTotalWindow {
 		max = dnsTunnelMaxTotalWindow
@@ -881,10 +881,10 @@ func (t *DNSTunnel) onWindowSample(ok bool, rtt time.Duration) {
 	// their latency says nothing about the path. Adopting one of those as the
 	// "best" RTT would make every later sample look fast and pin the window at its
 	// maximum, which is the exact opposite of what adaptation is for.
-	if atomic.AddInt64(&t.winSamples, 1) <= dnsTunnelWindowWarmup {
+	if t.winSamples.Add(1) <= dnsTunnelWindowWarmup {
 		return
 	}
-	best := atomic.LoadInt64(&t.bestRTT)
+	best := t.bestRTT.Load()
 	switch {
 	case best > 0 && rtt > time.Duration(best)*2:
 		// The path is clearly slower than it can be: we are past the useful window.
@@ -897,15 +897,15 @@ func (t *DNSTunnel) onWindowSample(ok bool, rtt time.Duration) {
 			}
 			return cur - 1
 		})
-		atomic.StoreInt64(&t.winCredit, 0)
+		t.winCredit.Store(0)
 		return
 	case best > 0 && rtt > time.Duration(best)+time.Duration(best)/2:
 		// Congested but not failing. Holding steady is not enough on its own: on a
 		// low-latency path the queueing that a too-wide window causes never grows past
 		// the shrink threshold, so the window would sit at the wrong size forever.
 		// Decay slowly instead - one step per window's worth of queued samples.
-		if atomic.AddInt64(&t.winCredit, 1) >= int64(atomic.LoadInt32(&t.window)) {
-			atomic.StoreInt64(&t.winCredit, 0)
+		if t.winCredit.Add(1) >= int64(t.window.Load()) {
+			t.winCredit.Store(0)
 			t.resizeWindow(func(cur int32) int32 {
 				if cur-1 < dnsTunnelMinUpstreamWindow {
 					return dnsTunnelMinUpstreamWindow
@@ -917,13 +917,13 @@ func (t *DNSTunnel) onWindowSample(ok bool, rtt time.Duration) {
 	}
 
 	if best == 0 || int64(rtt) < best {
-		atomic.StoreInt64(&t.bestRTT, int64(rtt))
+		t.bestRTT.Store(int64(rtt))
 	}
 
 	// Additive increase, paced to roughly one step per round trip: a window's worth of
 	// successful queries is about one RTT at the current concurrency.
-	if atomic.AddInt64(&t.winCredit, 1) >= int64(atomic.LoadInt32(&t.window)) {
-		atomic.StoreInt64(&t.winCredit, 0)
+	if t.winCredit.Add(1) >= int64(t.window.Load()) {
+		t.winCredit.Store(0)
 		t.resizeWindow(func(cur int32) int32 {
 			ceil := dnsTunnelMaxUpstreamWindow * len(t.paths)
 			if ceil > dnsTunnelMaxTotalWindow {
@@ -947,15 +947,15 @@ func (t *DNSTunnel) halveWindow() {
 		}
 		return next
 	})
-	atomic.StoreInt64(&t.winCredit, 0)
+	t.winCredit.Store(0)
 }
 
 // resizeWindow applies a clamp-and-grow step atomically.
 func (t *DNSTunnel) resizeWindow(step func(int32) int32) {
 	for {
-		cur := atomic.LoadInt32(&t.window)
+		cur := t.window.Load()
 		next := step(cur)
-		if next == cur || atomic.CompareAndSwapInt32(&t.window, cur, next) {
+		if next == cur || t.window.CompareAndSwap(cur, next) {
 			return
 		}
 	}
@@ -963,13 +963,13 @@ func (t *DNSTunnel) resizeWindow(step func(int32) int32) {
 
 func (t *DNSTunnel) markPathHealthy(idx int) {
 	if idx >= 0 && idx < len(t.failUntil) {
-		atomic.StoreInt64(&t.failUntil[idx], 0)
+		t.failUntil[idx].Store(0)
 	}
 }
 
 func (t *DNSTunnel) markPathFailed(idx int) {
 	if idx >= 0 && idx < len(t.failUntil) {
-		atomic.StoreInt64(&t.failUntil[idx], time.Now().Add(dnsTunnelPathCooldown).UnixNano())
+		t.failUntil[idx].Store(time.Now().Add(dnsTunnelPathCooldown).UnixNano())
 	}
 }
 
@@ -1031,7 +1031,7 @@ func (t *DNSTunnel) deliverDownstream(raw []byte) int {
 			t.recvOOO[serverSeq] = append([]byte(nil), payload...)
 		}
 		out = append(out, t.drainRecvOOO()...)
-		atomic.StoreUint32(&t.ack, t.recvNext-1)
+		t.ack.Store(t.recvNext - 1)
 		t.recvMu.Unlock()
 
 		return t.writeInBuf(out)
@@ -1185,7 +1185,7 @@ func (t *DNSTunnel) Write(p []byte) (int, error) {
 		if n > t.chunkSize {
 			n = t.chunkSize
 		}
-		jobs = append(jobs, chunkJob{seq: atomic.AddUint32(&t.dataSeq, 1), data: p[:n]})
+		jobs = append(jobs, chunkJob{seq: t.dataSeq.Add(1), data: p[:n]})
 		p = p[n:]
 	}
 
@@ -1301,8 +1301,8 @@ func (t *DNSTunnel) sendCloseSignal() {
 	ctx, cancel := context.WithTimeout(context.Background(), dnsTunnelCloseTimeout)
 	defer cancel()
 
-	seq := atomic.AddUint32(&t.seq, 1)
-	name := buildQueryName(t.domain, t.session, seq, atomic.LoadUint32(&t.ack), 0, flagClose, nil)
+	seq := t.seq.Add(1)
+	name := buildQueryName(t.domain, t.session, seq, t.ack.Load(), 0, flagClose, nil)
 	m := new(dns.Msg)
 	m.SetQuestion(name, t.qtype)
 	m.RecursionDesired = false

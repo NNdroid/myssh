@@ -416,20 +416,20 @@ func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
 
 // ConnInfo  info  ( info  json  info  Android  info )
 type ConnInfo struct {
-	ID         int64     `json:"id"`
-	TargetAddr string    `json:"target_addr"`
-	TargetHost string    `json:"target_host"`
-	ProxyAddr  string    `json:"proxy_addr"`
-	StartTime  time.Time `json:"start_time"`
-	ReadBytes  uint64    `json:"read_bytes"`
-	WriteBytes uint64    `json:"write_bytes"`
+	ReadBytes  atomic.Uint64 `json:"read_bytes"`
+	WriteBytes atomic.Uint64 `json:"write_bytes"`
+	ID         int64         `json:"id"`
+	TargetAddr string        `json:"target_addr"`
+	TargetHost string        `json:"target_host"`
+	ProxyAddr  string        `json:"proxy_addr"`
+	StartTime  time.Time     `json:"start_time"`
 }
 
 // info
 func (c *ConnInfo) String() string {
 	duration := time.Since(c.StartTime).Round(time.Second)
 	return fmt.Sprintf("[ID:%d] Target:%s | Uptime:%s | ↑%d B | ↓%d B",
-		c.ID, c.TargetAddr, duration, atomic.LoadUint64(&c.WriteBytes), atomic.LoadUint64(&c.ReadBytes))
+		c.ID, c.TargetAddr, duration, c.WriteBytes.Load(), c.ReadBytes.Load())
 }
 
 // ==========================================
@@ -438,8 +438,8 @@ func (c *ConnInfo) String() string {
 
 // domainStat is the internal struct for calculation
 type domainStat struct {
-	currentTxBytes uint64
-	currentRxBytes uint64
+	currentTxBytes atomic.Uint64
+	currentRxBytes atomic.Uint64
 }
 
 // DomainActivity represents the real-time activity of a single domain for JSON export.
@@ -463,8 +463,8 @@ func (dsm *domainStatsManager) calculateAndRank(elapsed time.Duration) {
 	dsm.stats.Range(func(key, value interface{}) bool {
 		domain := key.(string)
 		stat := value.(*domainStat)
-		tx := atomic.SwapUint64(&stat.currentTxBytes, 0)
-		rx := atomic.SwapUint64(&stat.currentRxBytes, 0)
+		tx := stat.currentTxBytes.Swap(0)
+		rx := stat.currentRxBytes.Swap(0)
 		txRate := bytesPerSecond(tx, elapsed)
 		rxRate := bytesPerSecond(rx, elapsed)
 		if txRate > 0 || rxRate > 0 {
@@ -501,13 +501,12 @@ func (dsm *domainStatsManager) reset() {
 
 // info
 type trafficManager struct {
-	TxTotal uint64 //  info uplink info  (Bytes)
-	RxTotal uint64 //  info downlink info  (Bytes)
-
-	ActiveConns   int64    //  info
-	TotalConns    int64    //  info
-	activeMap     sync.Map // key: int64 ( info ID), value: *ConnInfo
-	connIDCounter int64    //  info  ID
+	TxTotal       atomic.Uint64 //  info uplink info  (Bytes)
+	RxTotal       atomic.Uint64 //  info downlink info  (Bytes)
+	ActiveConns   atomic.Int64  //  info
+	TotalConns    atomic.Int64  //  info
+	connIDCounter atomic.Int64  //  info  ID
+	activeMap     sync.Map      // key: int64 ( info ID), value: *ConnInfo
 }
 
 // info  init()  info
@@ -515,10 +514,10 @@ var globalTrafficManager = &trafficManager{}
 
 // info
 var (
-	lastTxTotal   uint64
-	lastRxTotal   uint64
-	currentTxRate uint64
-	currentRxRate uint64
+	lastTxTotal   atomic.Uint64
+	lastRxTotal   atomic.Uint64
+	currentTxRate atomic.Uint64
+	currentRxRate atomic.Uint64
 )
 
 const maxInt64AsUint64 = uint64(1<<63 - 1)
@@ -582,10 +581,10 @@ type TrackedConn struct {
 func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 	n, err = tc.Conn.Read(b)
 	if n > 0 {
-		atomic.AddUint64(&tc.manager.RxTotal, uint64(n)) //  info downlink
-		atomic.AddUint64(&tc.info.ReadBytes, uint64(n))  //  info downlink
+		tc.manager.RxTotal.Add(uint64(n)) //  info downlink
+		tc.info.ReadBytes.Add(uint64(n))  //  info downlink
 		if tc.domainStat != nil {
-			atomic.AddUint64(&tc.domainStat.currentRxBytes, uint64(n))
+			tc.domainStat.currentRxBytes.Add(uint64(n))
 		}
 	}
 	return n, err
@@ -594,10 +593,10 @@ func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 	n, err = tc.Conn.Write(b)
 	if n > 0 {
-		atomic.AddUint64(&tc.manager.TxTotal, uint64(n)) //  info uplink
-		atomic.AddUint64(&tc.info.WriteBytes, uint64(n)) //  info uplink
+		tc.manager.TxTotal.Add(uint64(n)) //  info uplink
+		tc.info.WriteBytes.Add(uint64(n)) //  info uplink
 		if tc.domainStat != nil {
-			atomic.AddUint64(&tc.domainStat.currentTxBytes, uint64(n))
+			tc.domainStat.currentTxBytes.Add(uint64(n))
 		}
 	}
 	return n, err
@@ -605,7 +604,7 @@ func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 
 func (tc *TrackedConn) Close() error {
 	tc.closeOnce.Do(func() {
-		atomic.AddInt64(&tc.manager.ActiveConns, -1)
+		tc.manager.ActiveConns.Add(-1)
 		tc.manager.activeMap.Delete(tc.info.ID)
 		tc.closeErr = tc.Conn.Close()
 	})
@@ -623,8 +622,8 @@ type TrackedPacketConn struct {
 func (tc *TrackedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	n, addr, err = tc.PacketConn.ReadFrom(p)
 	if n > 0 {
-		atomic.AddUint64(&tc.manager.RxTotal, uint64(n))
-		atomic.AddUint64(&tc.info.ReadBytes, uint64(n))
+		tc.manager.RxTotal.Add(uint64(n))
+		tc.info.ReadBytes.Add(uint64(n))
 	}
 	return n, addr, err
 }
@@ -632,15 +631,15 @@ func (tc *TrackedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error
 func (tc *TrackedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	n, err = tc.PacketConn.WriteTo(p, addr)
 	if n > 0 {
-		atomic.AddUint64(&tc.manager.TxTotal, uint64(n))
-		atomic.AddUint64(&tc.info.WriteBytes, uint64(n))
+		tc.manager.TxTotal.Add(uint64(n))
+		tc.info.WriteBytes.Add(uint64(n))
 	}
 	return n, err
 }
 
 func (tc *TrackedPacketConn) Close() error {
 	tc.closeOnce.Do(func() {
-		atomic.AddInt64(&tc.manager.ActiveConns, -1)
+		tc.manager.ActiveConns.Add(-1)
 		tc.manager.activeMap.Delete(tc.info.ID)
 		tc.closeErr = tc.PacketConn.Close()
 	})
@@ -671,9 +670,9 @@ func ListenPacketTracked(network, address string, sessionName string) (net.Packe
 
 // WrapConn  info  TCP  info
 func WrapConn(conn net.Conn, targetAddr string) net.Conn {
-	atomic.AddInt64(&globalTrafficManager.TotalConns, 1)
-	atomic.AddInt64(&globalTrafficManager.ActiveConns, 1)
-	id := atomic.AddInt64(&globalTrafficManager.connIDCounter, 1)
+	globalTrafficManager.TotalConns.Add(1)
+	globalTrafficManager.ActiveConns.Add(1)
+	id := globalTrafficManager.connIDCounter.Add(1)
 
 	var host string
 	h, _, err := net.SplitHostPort(targetAddr)
@@ -711,9 +710,9 @@ func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 
 // WrapPacketConn  info  UDP  info
 func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
-	atomic.AddInt64(&globalTrafficManager.TotalConns, 1)
-	atomic.AddInt64(&globalTrafficManager.ActiveConns, 1)
-	id := atomic.AddInt64(&globalTrafficManager.connIDCounter, 1)
+	globalTrafficManager.TotalConns.Add(1)
+	globalTrafficManager.ActiveConns.Add(1)
+	id := globalTrafficManager.connIDCounter.Add(1)
 
 	var host string
 	h, _, err := net.SplitHostPort(sessionName)
@@ -794,12 +793,12 @@ func RegisterSysInfoCallback(cb SysInfoCallback) {
 // GetTrafficStats  info
 func GetTrafficStats() *TrafficStats {
 	return &TrafficStats{
-		TxRate:      uint64ToInt64(atomic.LoadUint64(&currentTxRate)),
-		RxRate:      uint64ToInt64(atomic.LoadUint64(&currentRxRate)),
-		TxTotal:     uint64ToInt64(atomic.LoadUint64(&globalTrafficManager.TxTotal)),
-		RxTotal:     uint64ToInt64(atomic.LoadUint64(&globalTrafficManager.RxTotal)),
-		ActiveConns: atomic.LoadInt64(&globalTrafficManager.ActiveConns),
-		TotalConns:  atomic.LoadInt64(&globalTrafficManager.TotalConns),
+		TxRate:      uint64ToInt64(currentTxRate.Load()),
+		RxRate:      uint64ToInt64(currentRxRate.Load()),
+		TxTotal:     uint64ToInt64(globalTrafficManager.TxTotal.Load()),
+		RxTotal:     uint64ToInt64(globalTrafficManager.RxTotal.Load()),
+		ActiveConns: globalTrafficManager.ActiveConns.Load(),
+		TotalConns:  globalTrafficManager.TotalConns.Load(),
 	}
 }
 
@@ -815,21 +814,32 @@ func GetSysStats() *SysStats {
 	}
 }
 
+type connInfoExport struct {
+	ID         int64     `json:"id"`
+	TargetAddr string    `json:"target_addr"`
+	TargetHost string    `json:"target_host"`
+	ProxyAddr  string    `json:"proxy_addr"`
+	StartTime  time.Time `json:"start_time"`
+	ReadBytes  uint64    `json:"read_bytes"`
+	WriteBytes uint64    `json:"write_bytes"`
+}
+
 // GetActiveConnectionsJSON  info  JSON  info  ( info  GoMobile  info )
 func GetActiveConnectionsJSON() string {
-	var list []ConnInfo
+	var list []connInfoExport
 	globalTrafficManager.activeMap.Range(func(key, value interface{}) bool {
 		info, ok := value.(*ConnInfo)
 		if !ok || info == nil {
 			return true
 		}
-		list = append(list, ConnInfo{
+		list = append(list, connInfoExport{
 			ID:         info.ID,
 			TargetAddr: info.TargetAddr,
+			TargetHost: info.TargetHost,
 			ProxyAddr:  info.ProxyAddr,
 			StartTime:  info.StartTime,
-			ReadBytes:  atomic.LoadUint64(&info.ReadBytes),
-			WriteBytes: atomic.LoadUint64(&info.WriteBytes),
+			ReadBytes:  info.ReadBytes.Load(),
+			WriteBytes: info.WriteBytes.Load(),
 		})
 		return true
 	})
@@ -954,22 +964,22 @@ func init() {
 			lastSampleTime = now
 
 			//  info
-			tTx := atomic.LoadUint64(&globalTrafficManager.TxTotal)
-			tRx := atomic.LoadUint64(&globalTrafficManager.RxTotal)
-			actConns := atomic.LoadInt64(&globalTrafficManager.ActiveConns)
-			totConns := atomic.LoadInt64(&globalTrafficManager.TotalConns)
+			tTx := globalTrafficManager.TxTotal.Load()
+			tRx := globalTrafficManager.RxTotal.Load()
+			actConns := globalTrafficManager.ActiveConns.Load()
+			totConns := globalTrafficManager.TotalConns.Load()
 
 			//  info ， info
-			lTx := atomic.SwapUint64(&lastTxTotal, tTx)
-			lRx := atomic.SwapUint64(&lastRxTotal, tRx)
+			lTx := lastTxTotal.Swap(tTx)
+			lRx := lastRxTotal.Swap(tRx)
 
 			//  info  1  info
 			txRate := bytesPerSecond(trafficDelta(tTx, lTx), elapsed)
 			rxRate := bytesPerSecond(trafficDelta(tRx, lRx), elapsed)
 
 			//  info
-			atomic.StoreUint64(&currentTxRate, txRate)
-			atomic.StoreUint64(&currentRxRate, rxRate)
+			currentTxRate.Store(txRate)
+			currentRxRate.Store(rxRate)
 
 			globalDomainStatsManager.calculateAndRank(elapsed)
 

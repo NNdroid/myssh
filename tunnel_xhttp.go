@@ -299,7 +299,7 @@ type meekVirtualConn struct {
 
 	readCond     *sync.Cond
 	readBuf      bytes.Buffer
-	nextReadSeq  uint64
+	nextReadSeq  atomic.Uint64
 	oooBuf       map[uint64][]byte
 	oooBytesSize int
 
@@ -363,30 +363,33 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 	c.readCond.L.Lock()
 	defer c.readCond.L.Unlock()
 
+	curNext := c.nextReadSeq.Load()
 	if c.closed || len(data) == 0 {
-		return c.nextReadSeq
+		return curNext
 	}
 
-	if seq == c.nextReadSeq {
+	if seq == curNext {
 		c.readBuf.Write(data)
-		c.nextReadSeq += uint64(len(data))
+		curNext += uint64(len(data))
+		c.nextReadSeq.Store(curNext)
 
 		for {
-			if nextData, ok := c.oooBuf[c.nextReadSeq]; ok {
+			if nextData, ok := c.oooBuf[curNext]; ok {
 				c.readBuf.Write(nextData)
 				c.oooBytesSize -= len(nextData)
-				delete(c.oooBuf, c.nextReadSeq)
-				c.nextReadSeq += uint64(len(nextData))
+				delete(c.oooBuf, curNext)
+				curNext += uint64(len(nextData))
+				c.nextReadSeq.Store(curNext)
 			} else {
 				break
 			}
 		}
 		c.readCond.Broadcast()
 
-	} else if seq > c.nextReadSeq {
-		if seq-c.nextReadSeq > 4*1024*1024 {
-			zlog.Warnf("[meekVirtualConn] Drop far-future packet seq=%d (gap=%d)", seq, seq-c.nextReadSeq)
-			return c.nextReadSeq
+	} else if seq > curNext {
+		if seq-curNext > 4*1024*1024 {
+			zlog.Warnf("[meekVirtualConn] Drop far-future packet seq=%d (gap=%d)", seq, seq-curNext)
+			return curNext
 		}
 
 		const maxOOOMem = 6 * 1024 * 1024
@@ -395,7 +398,7 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 		if c.oooBytesSize+len(data) > maxOOOMem || len(c.oooBuf) >= maxOOOPkts {
 			zlog.Warnf("[meekVirtualConn] OOO buffer full (mem=%d, pkts=%d), drop seq=%d",
 				c.oooBytesSize, len(c.oooBuf), seq)
-			return c.nextReadSeq
+			return curNext
 		}
 
 		if _, exists := c.oooBuf[seq]; !exists {
@@ -406,7 +409,7 @@ func (c *meekVirtualConn) PutReadData(seq uint64, data []byte) uint64 {
 		}
 	}
 
-	return c.nextReadSeq
+	return curNext
 }
 
 func (c *meekVirtualConn) Close() error {
@@ -448,6 +451,9 @@ func (c *meekVirtualConn) SetWriteDeadline(t time.Time) error { return nil }
 // ==========================================
 
 type xhttpFramedConn struct {
+	lastWriteTime atomic.Int64
+	closedFlag    atomic.Int32
+
 	r             io.Reader
 	w             io.Writer
 	closer        func() error
@@ -459,8 +465,6 @@ type xhttpFramedConn struct {
 	hdrBuf        []byte
 	payloadBufPtr *[]byte
 	closeCh       chan struct{}
-	closedFlag    int32
-	lastWriteTime int64
 }
 
 func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, remote net.Addr) *xhttpFramedConn {
@@ -473,8 +477,8 @@ func newXhttpFramedConn(r io.Reader, w io.Writer, closer func() error, local, re
 		hdrBuf:        make([]byte, 6),
 		payloadBufPtr: pBufPtr,
 		closeCh:       make(chan struct{}),
-		lastWriteTime: time.Now().Unix(),
 	}
+	conn.lastWriteTime.Store(time.Now().Unix())
 	go conn.heartbeatLoop()
 	return conn
 }
@@ -485,7 +489,7 @@ func (c *xhttpFramedConn) heartbeatLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			last := atomic.LoadInt64(&c.lastWriteTime)
+			last := c.lastWriteTime.Load()
 			if time.Now().Unix()-last >= 60 {
 				c.Write(nil)
 			}
@@ -542,13 +546,13 @@ func (c *xhttpFramedConn) writeSingleFrame(chunk []byte) error {
 }
 
 func (c *xhttpFramedConn) Write(p []byte) (int, error) {
-	if atomic.LoadInt32(&c.closedFlag) == 1 {
+	if c.closedFlag.Load() == 1 {
 		return 0, io.ErrClosedPipe
 	}
-	atomic.StoreInt64(&c.lastWriteTime, time.Now().Unix())
+	c.lastWriteTime.Store(time.Now().Unix())
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if atomic.LoadInt32(&c.closedFlag) == 1 || c.frameBufPtr == nil {
+	if c.closedFlag.Load() == 1 || c.frameBufPtr == nil {
 		return 0, io.ErrClosedPipe
 	}
 	if len(p) == 0 {
@@ -645,7 +649,7 @@ func (c *xhttpFramedConn) Read(p []byte) (int, error) {
 }
 
 func (c *xhttpFramedConn) Close() error {
-	if atomic.CompareAndSwapInt32(&c.closedFlag, 0, 1) {
+	if c.closedFlag.CompareAndSwap(0, 1) {
 		c.mu.Lock()
 		frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00}
 		c.w.Write(frame)
@@ -921,24 +925,25 @@ func init() {
 			defer virtualConn.Close()
 			defer cancel()
 
-			var ackedByServer, dispatchSeq uint64
+			var ackedByServer atomic.Uint64
+			var dispatchSeq uint64
 			var windowMu sync.Mutex
-			var consecutiveErrors, triggerRetry int32
+			var consecutiveErrors, triggerRetry atomic.Int32
 
 			const minWorkers = 1
 			const maxWorkers = 16
-			var activeWorkers int32
-			var lastRxTime int64
+			var activeWorkers atomic.Int32
+			var lastRxTime atomic.Int64
 			var wg sync.WaitGroup
 
 			var workerLoop func()
 			trySpawnWorker := func() {
 				for {
-					curr := atomic.LoadInt32(&activeWorkers)
+					curr := activeWorkers.Load()
 					if curr >= maxWorkers {
 						return
 					}
-					if atomic.CompareAndSwapInt32(&activeWorkers, curr, curr+1) {
+					if activeWorkers.CompareAndSwap(curr, curr+1) {
 						wg.Add(1)
 						go workerLoop()
 						return
@@ -948,7 +953,7 @@ func init() {
 
 			workerLoop = func() {
 				defer wg.Done()
-				defer atomic.AddInt32(&activeWorkers, -1)
+				defer activeWorkers.Add(-1)
 
 				idleTimer := time.NewTimer(50 * time.Millisecond)
 				if !idleTimer.Stop() {
@@ -957,10 +962,10 @@ func init() {
 				defer idleTimer.Stop()
 
 				// handleRetryEnqueue  info  Sort
-				handleRetryEnqueue := func(seq uint64, data []byte, bufPtr *[]byte, triggerRetryPtr *int32) {
+				handleRetryEnqueue := func(seq uint64, data []byte, bufPtr *[]byte) {
 					enqueued := false
 					if len(data) > 0 {
-						currAck := atomic.LoadUint64(&ackedByServer)
+						currAck := ackedByServer.Load()
 						if seq >= currAck {
 							virtualConn.retryMu.Lock()
 							virtualConn.retryQ = retryEnqueue(virtualConn.retryQ, retryChunk{seq: seq, data: data, bufPtr: bufPtr})
@@ -971,7 +976,7 @@ func init() {
 					if !enqueued && bufPtr != nil {
 						safelyPutUpBuf(bufPtr)
 					}
-					atomic.StoreInt32(triggerRetryPtr, 1)
+					triggerRetry.Store(1)
 				}
 
 				for !virtualConn.closed && ctx.Err() == nil {
@@ -981,7 +986,7 @@ func init() {
 					var isRetry bool
 
 					virtualConn.retryMu.Lock()
-					currAck := atomic.LoadUint64(&ackedByServer)
+					currAck := ackedByServer.Load()
 					for len(virtualConn.retryQ) > 0 && virtualConn.retryQ[0].seq < currAck {
 						if virtualConn.retryQ[0].bufPtr != nil {
 							safelyPutUpBuf(virtualConn.retryQ[0].bufPtr)
@@ -1002,7 +1007,7 @@ func init() {
 
 					if !isRetry {
 						windowMu.Lock()
-						currAck := atomic.LoadUint64(&ackedByServer)
+						currAck := ackedByServer.Load()
 						if dispatchSeq < currAck {
 							dispatchSeq = currAck
 						}
@@ -1011,11 +1016,11 @@ func init() {
 
 						if len(upData) == 0 {
 							allowedPollers := int32(minWorkers)
-							if time.Now().UnixMilli()-atomic.LoadInt64(&lastRxTime) < 2000 {
+							if time.Now().UnixMilli()-lastRxTime.Load() < 2000 {
 								allowedPollers = 16
 							}
 
-							if atomic.LoadInt32(&activeWorkers) > allowedPollers {
+							if activeWorkers.Load() > allowedPollers {
 								windowMu.Unlock()
 								return
 							}
@@ -1072,13 +1077,13 @@ func init() {
 					req.Header.Set("X-Network", "tcp")
 					req.Header.Set("X-Session-ID", sessionID)
 					req.Header.Set("X-Seq", strconv.FormatUint(currentSeq, 10))
-					req.Header.Set("X-Ack", strconv.FormatUint(atomic.LoadUint64(&virtualConn.nextReadSeq), 10))
+					req.Header.Set("X-Ack", strconv.FormatUint(virtualConn.nextReadSeq.Load(), 10))
 
 					if cfg.ProxyAuthRequired {
 						req.Header.Set("Proxy-Authorization", "Bearer "+cfg.ProxyAuthToken)
 					}
 
-					if atomic.CompareAndSwapInt32(&triggerRetry, 1, 0) {
+					if triggerRetry.CompareAndSwap(1, 0) {
 						req.Header.Set("X-Retry", "1")
 					}
 
@@ -1096,11 +1101,11 @@ func init() {
 							safelyPutUpBuf(upBufPtr)
 							break
 						}
-						handleRetryEnqueue(currentSeq, upData, upBufPtr, &triggerRetry)
+						handleRetryEnqueue(currentSeq, upData, upBufPtr)
 						upBufPtr = nil
 						upData = nil
 
-						if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
+						if consecutiveErrors.Add(1) > 20 {
 							break
 						}
 						idleTimer.Reset(300 * time.Millisecond)
@@ -1116,8 +1121,8 @@ func init() {
 					if sAckStr := resp.Header.Get("X-Ack"); sAckStr != "" {
 						sAck, _ := strconv.ParseUint(sAckStr, 10, 64)
 						for {
-							old := atomic.LoadUint64(&ackedByServer)
-							if sAck <= old || atomic.CompareAndSwapUint64(&ackedByServer, old, sAck) {
+							old := ackedByServer.Load()
+							if sAck <= old || ackedByServer.CompareAndSwap(old, sAck) {
 								break
 							}
 						}
@@ -1132,10 +1137,10 @@ func init() {
 
 						reqCancel()
 
-						handleRetryEnqueue(currentSeq, upData, upBufPtr, &triggerRetry)
+						handleRetryEnqueue(currentSeq, upData, upBufPtr)
 						upBufPtr = nil
 						upData = nil
-						if atomic.AddInt32(&consecutiveErrors, 1) > 20 {
+						if consecutiveErrors.Add(1) > 20 {
 							break
 						}
 						idleTimer.Reset(1 * time.Second)
@@ -1148,7 +1153,7 @@ func init() {
 						continue
 					}
 
-					atomic.StoreInt32(&consecutiveErrors, 0)
+					consecutiveErrors.Store(0)
 
 					sSeqStr := resp.Header.Get("X-Seq")
 					sSeq, _ := strconv.ParseUint(sSeqStr, 10, 64)
@@ -1163,7 +1168,7 @@ func init() {
 					//  info  3
 					if errBody != nil {
 						putDownBuf(downBuf)
-						handleRetryEnqueue(currentSeq, upData, upBufPtr, &triggerRetry)
+						handleRetryEnqueue(currentSeq, upData, upBufPtr)
 						upBufPtr = nil
 						upData = nil
 						idleTimer.Reset(300 * time.Millisecond)
@@ -1178,7 +1183,7 @@ func init() {
 
 					if len(downData) > 0 || sSeqStr != "" {
 						if len(downData) > 0 {
-							atomic.StoreInt64(&lastRxTime, time.Now().UnixMilli())
+							lastRxTime.Store(time.Now().UnixMilli())
 						}
 						virtualConn.PutReadData(sSeq, downData)
 					}
@@ -1188,17 +1193,17 @@ func init() {
 
 					//  info  Worker
 					if len(downData) > 0 {
-						if atomic.LoadInt32(&activeWorkers) < 4 {
+						if activeWorkers.Load() < 4 {
 							trySpawnWorker()
 						}
 					} else if virtualConn.writeBuf.Len() > xhttpMaxsendBufSize {
-						if atomic.LoadInt32(&activeWorkers) < 8 {
+						if activeWorkers.Load() < 8 {
 							trySpawnWorker()
 						}
 					}
 
 					if len(upData) == 0 && len(downData) == 0 && virtualConn.writeBuf.Len() == 0 {
-						if atomic.LoadInt32(&activeWorkers) > 2 {
+						if activeWorkers.Load() > 2 {
 							return
 						}
 						idleTimer.Reset(50 * time.Millisecond)
@@ -1244,10 +1249,10 @@ func init() {
 }
 
 // info ： info
-func updateUint64IfGreater(addr *uint64, newVal uint64) {
+func updateUint64IfGreater(addr *atomic.Uint64, newVal uint64) {
 	for {
-		old := atomic.LoadUint64(addr)
-		if newVal <= old || atomic.CompareAndSwapUint64(addr, old, newVal) {
+		old := addr.Load()
+		if newVal <= old || addr.CompareAndSwap(old, newVal) {
 			break
 		}
 	}

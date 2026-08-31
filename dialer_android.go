@@ -17,7 +17,7 @@ type SocketProtector interface {
 var (
 	globalProtector SocketProtector
 	protectorMutex  sync.RWMutex
-	protectReqCount uint64 //  info  ID
+	protectReqCount atomic.Uint64 //  info  ID
 )
 
 // RegisterProtector  info  Protector
@@ -40,7 +40,7 @@ func getProtector() SocketProtector {
 //	info  Dialer  info  ListenConfig 信息  info 信息 信息 ， info  info  fd 信息  info 。
 func androidProtectControl() func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, c syscall.RawConn) error {
-		reqID := atomic.AddUint64(&protectReqCount, 1)
+		reqID := protectReqCount.Add(1)
 
 		zlog.Debugf("[Protect-%d] ➡️ Intercepted socket creation request: network=%s, address=%s", reqID, network, address)
 

@@ -27,6 +27,8 @@ const (
 
 // UdpgwConn  info  SSH TCP tunnel info  UDPGW  info
 type UdpgwConn struct {
+	lastActive atomic.Int64
+
 	net.Conn
 	targetAddressData []byte //  info target IP
 	targetPortData    []byte // targetport (2bytes)
@@ -40,8 +42,6 @@ type UdpgwConn struct {
 
 	closed    chan struct{}
 	closeOnce sync.Once
-
-	lastActive int64
 }
 
 // DialTun2proxyUdpgw  info  SSH tunnel info  UDPGW  info
@@ -124,7 +124,7 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		downloadCounter:   nil,
 		closed:            make(chan struct{}),
 	}
-	atomic.StoreInt64(&c.lastActive, time.Now().Unix())
+	c.lastActive.Store(time.Now().Unix())
 
 	//  info
 	go c.keepAliveLoop()
@@ -176,7 +176,7 @@ func (c *UdpgwConn) keepAliveLoop() {
 		}
 
 		// bidirectional info ，45 info downlink info
-		last := atomic.LoadInt64(&c.lastActive)
+		last := c.lastActive.Load()
 		if time.Now().Unix()-last > 45 {
 			zlog.Errorf("%s [UDPGW-Daemon] ❌ Server heartbeat timeout (45s), connection dead", TAG)
 			c.Close()
@@ -290,7 +290,7 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			return 0, err
 		}
 		//  info （ info 、 info Error）， info ， info
-		atomic.StoreInt64(&c.lastActive, time.Now().Unix())
+		c.lastActive.Store(time.Now().Unix())
 
 		flag := body[0]
 		switch flag {
