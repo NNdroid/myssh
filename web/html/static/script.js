@@ -402,7 +402,6 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="serverName"]', isTls);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 
-            setVis('[data-visibility-key="enableCustomPath"]', false);
             const showCustomPath = isCustomPathSupported;
             setVis('[data-visibility-key="customPath"]', showCustomPath);
 
@@ -465,7 +464,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({ username: el('login-user').value, password: el('login-pass').value })
             });
             if (res.ok) {
-                const data = await res.json();
+                const data = await res.json().catch(() => ({}));
+                if (!data.token) {
+                    showToast(i18n.t('alert_login_failed'), 'error');
+                    return;
+                }
                 localStorage.setItem('jwt_token', data.token);
                 await actions.start();
                 const loginEl = el('login-overlay');
@@ -575,6 +578,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
             let res;
             if (state.currentNodeId) {
+                // 表单不含流量统计字段，编辑保存时从内存中的节点数据带回，避免被清零。
+                const existing = state.nodes.find(n => n.id === state.currentNodeId);
+                nodeData.totalTx = existing ? (existing.totalTx || 0) : 0;
+                nodeData.totalRx = existing ? (existing.totalRx || 0) : 0;
                 res = await api.put(`/nodes/${state.currentNodeId}`, nodeData);
             } else {
                 res = await api.post('/nodes', nodeData);
@@ -623,7 +630,7 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         clearLogs: async () => {
             if (await asyncConfirm(i18n.t('alert_confirm_clear_log'))) {
-                const res = await api.post('/clear-log', {});
+                const res = await api.post('/log-clear', {});
                 if (res.message) {
                     showToast(i18n.t('alert_log_cleared'), 'info');
                     state.logs.content = '';
@@ -658,7 +665,16 @@ document.addEventListener('DOMContentLoaded', () => {
                         showToast(i18n.t('alert_import_invalid_json'), 'error');
                         return;
                     }
-                    const res = await api.post('/nodes/import', importedNodes);
+                    // 后端期望 multipart/form-data 的 "file" 字段，先本地校验 JSON 再原样上传文件。
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    const importRes = await fetch('/api/v1/nodes/import', {
+                        method: 'POST',
+                        headers: getHeaders(true),
+                        body: fd
+                    });
+                    handleAuthError(importRes);
+                    const res = await importRes.json();
                     if (res.message) {
                         showToast(i18n.t('alert_import_success'), 'success');
                         await actions.fetchNodes();
@@ -673,6 +689,16 @@ document.addEventListener('DOMContentLoaded', () => {
             reader.readAsText(file);
         }
     };
+
+    // 每个标签页一个增量日志游标，避免多标签页共享服务端偏移互相丢行。
+    const logClientID = (() => {
+        let id = sessionStorage.getItem('log_client_id');
+        if (!id) {
+            id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+            sessionStorage.setItem('log_client_id', id);
+        }
+        return id;
+    })();
 
     // --- Actions ---
     const actions = {
@@ -691,48 +717,50 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         },
         fetchStatus: async () => {
-            const res = await api.get('/status');
+            // /dashboard-stats 同时携带运行状态与系统/流量指标（/status 只有运行状态）。
+            const res = await api.get('/dashboard-stats');
             if (res && !res.error) {
-                state.status = res;
+                state.status = { running: !!res.running, running_node: res.running_node || "" };
                 render.status();
-                if (res.metrics) {
-                    if (el('sysCpu')) el('sysCpu').textContent = `${(res.metrics.cpu_usage || 0).toFixed(1)}%`;
-                    if (el('sysMem')) el('sysMem').textContent = `${(res.metrics.memory_alloc || 0).toFixed(1)} / ${(res.metrics.memory_sys || 0).toFixed(1)} MB`;
-                    if (el('sysGoroutine')) el('sysGoroutine').textContent = res.metrics.goroutines || 0;
-                    if (el('trafRateTx')) el('trafRateTx').textContent = formatBytesSmart(res.metrics.bytes_sent_per_sec || 0, true);
-                    if (el('trafRateRx')) el('trafRateRx').textContent = formatBytesSmart(res.metrics.bytes_recv_per_sec || 0, true);
-                    if (el('trafTotalTx')) el('trafTotalTx').textContent = formatBytesSmart(res.metrics.total_bytes_sent || 0);
-                    if (el('trafTotalRx')) el('trafTotalRx').textContent = formatBytesSmart(res.metrics.total_bytes_recv || 0);
-                    if (el('trafConnsActive')) el('trafConnsActive').textContent = `${res.metrics.active_conns || 0} / ${res.metrics.total_conns || 0}`;
+                if (state.status.running && !state.selectedNodeId) {
+                    state.selectedNodeId = state.status.running_node;
+                }
+                if (el('sysCpu')) el('sysCpu').textContent = res.sys_cpu || '0.0%';
+                if (el('sysMem')) el('sysMem').textContent = res.sys_mem || '0/0 MB';
+                if (el('sysGoroutine')) el('sysGoroutine').textContent = res.sys_goroutine ?? 0;
+                if (el('trafRateTx')) el('trafRateTx').textContent = formatBytesSmart(res.tx_rate || 0, true);
+                if (el('trafRateRx')) el('trafRateRx').textContent = formatBytesSmart(res.rx_rate || 0, true);
+                if (el('trafTotalTx')) el('trafTotalTx').textContent = formatBytesSmart(res.tx_total || 0);
+                if (el('trafTotalRx')) el('trafTotalRx').textContent = formatBytesSmart(res.rx_total || 0);
+                if (el('trafConnsActive')) el('trafConnsActive').textContent = `${res.active_conns || 0} / ${res.total_conns || 0}`;
 
-                    const domainList = el('domainList');
-                    if (domainList) {
-                        domainList.innerHTML = '';
-                        if (res.metrics.top_domains && res.metrics.top_domains.length > 0) {
-                            res.metrics.top_domains.forEach(d => {
-                                const li = document.createElement('li');
-                                li.className = 'domain-item';
-                                const dSpan = document.createElement('span');
-                                dSpan.textContent = d.domain;
-                                const cSpan = document.createElement('span');
-                                cSpan.textContent = d.count;
-                                li.appendChild(dSpan);
-                                li.appendChild(cSpan);
-                                domainList.appendChild(li);
-                            });
-                        } else {
+                const domainList = el('domainList');
+                if (domainList) {
+                    domainList.innerHTML = '';
+                    if (res.top_domains && res.top_domains.length > 0) {
+                        res.top_domains.forEach(d => {
                             const li = document.createElement('li');
                             li.className = 'domain-item';
-                            li.textContent = i18n.t('text_no_domains') || 'No active domains';
+                            const dSpan = document.createElement('span');
+                            dSpan.textContent = d.domain;
+                            const cSpan = document.createElement('span');
+                            cSpan.textContent = `↑${formatBytesSmart(d.tx_rate || 0, true)} ↓${formatBytesSmart(d.rx_rate || 0, true)}`;
+                            li.appendChild(dSpan);
+                            li.appendChild(cSpan);
                             domainList.appendChild(li);
-                        }
+                        });
+                    } else {
+                        const li = document.createElement('li');
+                        li.className = 'domain-item';
+                        li.textContent = i18n.t('text_no_domains') || 'No active domains';
+                        domainList.appendChild(li);
                     }
                 }
             }
         },
         fetchLogs: async () => {
             const mode = state.logs.lastFetchFull ? 'full' : 'incremental';
-            const res = await fetch(`/api/v1/log-raw?mode=${mode}`, { headers: getHeaders() });
+            const res = await fetch(`/api/v1/log-raw?mode=${mode}&client=${encodeURIComponent(logClientID)}`, { headers: getHeaders() });
             if (!res.ok) return handleAuthError(res);
             const logText = await res.text();
             if (logText) {
@@ -773,7 +801,7 @@ document.addEventListener('DOMContentLoaded', () => {
             el('node-modal')?.addEventListener('click', (e) => { if(e.target === el('node-modal')) modal.close(); });
             
             el('node-form')?.addEventListener('change', (e) => {
-                if (e.target.matches('#authType, #tunnelType, #proxyAuthRequired, #dnsOverride, #routingOverride, #verifyFingerprint, #verifyCertFingerprint, #enableCustomPath')) {
+                if (e.target.matches('#authType, #tunnelType, #proxyAuthRequired, #dnsOverride, #routingOverride, #verifyFingerprint, #verifyCertFingerprint')) {
                     modal.updateVisibility();
                 }
             });
@@ -797,7 +825,17 @@ document.addEventListener('DOMContentLoaded', () => {
             bind('import-btn', 'click', () => el('import-file-input').click());
             bind('import-file-input', 'change', handlers.handleImport);
 
-            if (localStorage.getItem('jwt_token')) {
+            // 鉴权关闭时不强制登录弹层；开启时才要求本地存在有效 token。
+            let authEnabled = true;
+            try {
+                const authRes = await fetch('/api/v1/auth-status');
+                if (authRes.ok) {
+                    const authData = await authRes.json();
+                    authEnabled = !!authData.enabled;
+                }
+            } catch (e) { console.error("Failed to query auth status", e); }
+
+            if (!authEnabled || localStorage.getItem('jwt_token')) {
                 await actions.start();
                 const loginEl = el('login-overlay');
                 loginEl.style.display = 'none';
@@ -819,11 +857,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 actions.fetchSettings(),
                 actions.fetchStatus(),
             ]);
-            await actions.fetchLogs();
+            await actions.fetchLogs().catch(() => {});
             setControlsLocked(false);
             
-            setInterval(actions.fetchStatus, 5000);
-            setInterval(actions.fetchLogs, 2000);
+            // 轮询回调必须吞掉异常（如 token 过期时 handleAuthError 抛出），
+            // 否则每 2-5 秒产生一条 unhandled rejection。
+            setInterval(() => { actions.fetchStatus().catch(() => {}); }, 5000);
+            setInterval(() => { actions.fetchLogs().catch(() => {}); }, 2000);
         }
     };
 

@@ -45,6 +45,11 @@ func SetLogLevel(logLevelStr string) {
 	}
 }
 
+// GetLogLevel returns the current log level as a lowercase string (e.g. "debug", "info").
+func GetLogLevel() string {
+	return atomicLogLevel.Level().String()
+}
+
 // ---  info  ---
 
 const (

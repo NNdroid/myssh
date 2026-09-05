@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"myssh"
@@ -41,7 +42,7 @@ const TAG = "[WebApp]"
 type logCache struct {
 	mu          sync.RWMutex
 	content     []byte
-	lastOffset  int64
+	offsets     map[string]int64 // 增量读取偏移，按客户端隔离，避免多标签页互抢
 	lastFetch   time.Time
 	cacheExpiry time.Duration
 }
@@ -51,6 +52,7 @@ var logCacheManager *logCache
 func init() {
 	logCacheManager = &logCache{
 		cacheExpiry: 1 * time.Second,
+		offsets:     make(map[string]int64),
 	}
 }
 
@@ -78,13 +80,12 @@ func (lc *logCache) getLogContentCached(logPath string) ([]byte, error) {
 	lc.mu.Lock()
 	lc.content = data
 	lc.lastFetch = time.Now()
-	lc.lastOffset = int64(len(data))
 	lc.mu.Unlock()
 
 	return data, nil
 }
 
-func (lc *logCache) getLogIncrementalCached(logPath string) ([]byte, error) {
+func (lc *logCache) getLogIncrementalCached(clientID string, logPath string) ([]byte, error) {
 	file, err := os.Open(logPath)
 	if err != nil {
 		return nil, err
@@ -92,7 +93,7 @@ func (lc *logCache) getLogIncrementalCached(logPath string) ([]byte, error) {
 	defer file.Close()
 
 	lc.mu.RLock()
-	lastOffset := lc.lastOffset
+	lastOffset := lc.offsets[clientID]
 	lc.mu.RUnlock()
 
 	info, err := file.Stat()
@@ -100,18 +101,25 @@ func (lc *logCache) getLogIncrementalCached(logPath string) ([]byte, error) {
 		return nil, err
 	}
 
-	if info.Size() <= lastOffset {
+	// 文件被清空/轮转（size < lastOffset）时从头重读，而不是永远返回空。
+	if lastOffset > info.Size() {
+		lastOffset = 0
+	}
+	if info.Size() == lastOffset {
 		return []byte{}, nil
 	}
 
-	file.Seek(lastOffset, 0)
+	if _, err := file.Seek(lastOffset, io.SeekStart); err != nil {
+		return nil, err
+	}
 	buf := make([]byte, info.Size()-lastOffset)
-	if _, err := file.Read(buf); err != nil {
+	// 单次 Read 可能短读，必须 ReadFull，否则偏移照样推进导致丢日志。
+	if _, err := io.ReadFull(file, buf); err != nil {
 		return nil, err
 	}
 
 	lc.mu.Lock()
-	lc.lastOffset = info.Size()
+	lc.offsets[clientID] = info.Size()
 	lc.lastFetch = time.Now()
 	lc.mu.Unlock()
 
@@ -122,11 +130,11 @@ func (lc *logCache) resetCache() {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	lc.content = []byte{}
-	lc.lastOffset = 0
+	lc.offsets = make(map[string]int64)
 	lc.lastFetch = time.Time{}
 }
 
-func StartWebServer(port int, logPath string, workDir string, webUser, webPass string) {
+func StartWebServer(bind string, port int, logPath string, workDir string, webUser, webPass string) {
 	if webServer != nil {
 		zap.L().Sugar().Infof("%s [WebServer] Web admin panel is already running, please do not start again", TAG)
 		return
@@ -167,6 +175,13 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 	// Create an authorized group
 	authorized := router.Group("/")
 
+	authEnabled := webUser != "" && webPass != ""
+
+	// 公开的鉴权状态端点：前端据此决定是否强制登录弹层。
+	router.GET("/api/v1/auth-status", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"enabled": authEnabled})
+	})
+
 	// Unprotected route for the single-page application
 	router.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", gin.H{
@@ -174,7 +189,10 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 		})
 	})
 
-	if webUser != "" && webPass != "" {
+	if authEnabled {
+		if webUser == "admin" && webPass == "admin" {
+			zap.L().Sugar().Infof("%s [WebServer] ⚠️ Using default admin/admin credentials — set --user/--pass before exposing this panel on a network.", TAG)
+		}
 		zap.L().Sugar().Infof("%s [WebServer] 🔒 JWT Authentication is ENABLED for the web panel.", TAG)
 
 		// 开放的登录接口 (发放 JWT)
@@ -215,7 +233,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 				return jwtSecret, nil
-			})
+			}, jwt.WithValidMethods([]string{"HS256"}))
 			if err != nil || !token.Valid {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 				c.Abort()
@@ -278,8 +296,7 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add node: " + err.Error()})
 				return
 			}
-			profile.ID = id
-			c.JSON(http.StatusOK, profile)
+			c.JSON(http.StatusOK, gin.H{"message": "Node added", "id": id})
 		})
 		apiV1.PUT("/nodes/:id", func(c *gin.Context) {
 			id := c.Param("id")
@@ -457,8 +474,15 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 				return
 			}
 
-			// Re-initialize logger with new level
-			myssh.InitLogger(logPath, req.Level)
+			switch strings.ToLower(req.Level) {
+			case "debug", "info", "warn", "warning", "error":
+			default:
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid log level"})
+				return
+			}
+
+			// 仅动态调整级别；不要重开 logger（InitLogger 会以 O_TRUNC 重建文件，清空历史日志）。
+			myssh.SetLogLevel(req.Level)
 
 			c.JSON(http.StatusOK, gin.H{"message": "Log level updated to " + req.Level})
 		})
@@ -466,11 +490,15 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 		// --- Log Management ---
 		apiV1.GET("/log-raw", func(c *gin.Context) {
 			mode := c.DefaultQuery("mode", "full")
+			clientID := c.Query("client")
+			if clientID == "" {
+				clientID = c.ClientIP()
+			}
 			var data []byte
 			var err error
 
 			if mode == "incremental" {
-				data, err = logCacheManager.getLogIncrementalCached(logPath)
+				data, err = logCacheManager.getLogIncrementalCached(clientID, logPath)
 			} else {
 				data, err = logCacheManager.getLogContentCached(logPath)
 			}
@@ -482,12 +510,10 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 			c.Data(http.StatusOK, "text/plain; charset=utf-8", data)
 		})
 		apiV1.POST("/log-clear", func(c *gin.Context) {
-			f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear log file: " + err.Error()})
-				return
-			}
-			_ = f.Close()
+			// 通过重开 logger 来清空：InitLogger 以 O_TRUNC 重建文件并把写句柄归零。
+			// 若只从外部截断文件，zap 已打开的句柄偏移不会重置，后续写入会产生
+			// 一段 NUL 空洞（日志视图显示乱码）。
+			myssh.InitLogger(logPath, myssh.GetLogLevel())
 
 			logCacheManager.resetCache()
 			c.JSON(http.StatusOK, gin.H{"message": "Logs cleared"})
@@ -495,13 +521,19 @@ func StartWebServer(port int, logPath string, workDir string, webUser, webPass s
 	}
 
 	router.NoRoute(func(c *gin.Context) {
+		// API 路径必须返回 JSON 404，不能兜底成 index.html——那会把前端的路由拼写
+		// 错误伪装成 200 响应，导致 res.json() 抛错且难以排查。
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+			return
+		}
 		// Redirect all other requests to the root to let the single-page app handle routing
 		c.HTML(http.StatusOK, "index.html", gin.H{
 			"Timestamp": time.Now().Unix(),
 		})
 	})
 
-	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	addr := fmt.Sprintf("%s:%d", bind, port)
 
 	webServer = &http.Server{
 		Addr:    addr,
@@ -534,6 +566,11 @@ func StopWebServer() {
 }
 
 // --- 限流中间件 ---
+const (
+	rateLimiterIdleTTL   = 10 * time.Minute
+	rateLimiterSweepSize = 1024
+)
+
 func rateLimitMiddleware() gin.HandlerFunc {
 	limiters := make(map[string]*rateLimiter)
 	var mu sync.Mutex
@@ -545,6 +582,15 @@ func rateLimitMiddleware() gin.HandlerFunc {
 		if !exists {
 			limiter = newRateLimiter(10, time.Second)
 			limiters[ip] = limiter
+		}
+		// 周期性淘汰长时间未活跃的 IP，防止 map 无限增长。
+		if len(limiters) > rateLimiterSweepSize {
+			now := time.Now()
+			for k, v := range limiters {
+				if now.Sub(time.Unix(0, v.lastSeen.Load())) > rateLimiterIdleTTL {
+					delete(limiters, k)
+				}
+			}
 		}
 		mu.Unlock()
 
@@ -563,15 +609,18 @@ type rateLimiter struct {
 	lastTime   time.Time
 	mu         sync.Mutex
 	refillRate float64
+	lastSeen   atomic.Int64
 }
 
 func newRateLimiter(maxTokens float64, period time.Duration) *rateLimiter {
-	return &rateLimiter{
+	rl := &rateLimiter{
 		tokens:     maxTokens,
 		maxTokens:  maxTokens,
 		lastTime:   time.Now(),
 		refillRate: maxTokens / period.Seconds(),
 	}
+	rl.lastSeen.Store(time.Now().UnixNano())
+	return rl
 }
 
 func (rl *rateLimiter) allow() bool {
@@ -582,6 +631,7 @@ func (rl *rateLimiter) allow() bool {
 	elapsed := now.Sub(rl.lastTime).Seconds()
 	rl.tokens = min(rl.maxTokens, rl.tokens+elapsed*rl.refillRate)
 	rl.lastTime = now
+	rl.lastSeen.Store(now.UnixNano())
 
 	if rl.tokens >= 1 {
 		rl.tokens--
@@ -598,6 +648,7 @@ func min(a, b float64) float64 {
 }
 
 func main() {
+	bind := flag.String("bind", "0.0.0.0", "Address for the web server to listen on (use 127.0.0.1 to restrict to localhost)")
 	port := flag.Int("port", 8080, "Port for the web server")
 	logPath := flag.String("log", "mysshd.log", "Path to the log file")
 	workDir := flag.String("workDir", "./", "Directory for working files and database")
@@ -609,9 +660,9 @@ func main() {
 	// Initialize the myssh logger first
 	myssh.InitLogger(*logPath, *logLevel)
 
-	zap.L().Sugar().Infof("%s Starting web server on port %d", TAG, *port)
+	zap.L().Sugar().Infof("%s Starting web server on %s:%d", TAG, *bind, *port)
 
-	StartWebServer(*port, *logPath, *workDir, *webUser, *webPass)
+	StartWebServer(*bind, *port, *logPath, *workDir, *webUser, *webPass)
 
 	wg.Wait()
 }

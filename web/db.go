@@ -206,7 +206,8 @@ func GetProfiles() ([]Profile, error) {
 	}
 	defer rows.Close()
 
-	var profiles []Profile
+	// 初始化为空切片：nil 会被序列化成 JSON null，前端 Array.isArray 判断会失败。
+	profiles := []Profile{}
 	for rows.Next() {
 		var p Profile
 		if err := rows.Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpNoDelay, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPsk, &p.UdpCustomMagic, &p.UdpCustomPublicKey, &p.UdpCustomPaths, &p.UdpCustomSockets, &p.UdpCustomSendWindow, &p.DnsTunnelPublicKey, &p.DnsTunnelEDNS0, &p.XhttpChunkSizeKB, &p.HeartbeatIntervalMs); err != nil {
