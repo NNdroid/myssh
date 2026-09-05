@@ -39,6 +39,7 @@ type ProxyConfig struct {
 	DnsTunnelServers   []string `json:"dns_tunnel_servers"`    //  info  DNS  info address（ info ），support udp(default)/tcp:///tls:///dot:///https://
 	DnsTunnelType      string   `json:"dns_tunnel_type"`       //  info ：txt(default)/null/cname/a
 	DnsTunnelPublicKey string   `json:"dns_tunnel_public_key"` // Noise  info
+	DnsTunnelEDNS0     bool     `json:"dns_tunnel_edns0"`      // announce 1232-byte DNS answers; server must match
 
 	// KCP tunnel（SSH-over-KCP） info config
 	KcpPassword     string `json:"kcp_password"`      // KCP  info  ( info  BlockCrypt  info )
@@ -48,13 +49,22 @@ type ProxyConfig struct {
 	KcpParityShards int    `json:"kcp_parity_shards"` // FEC  info  (default 3)
 
 	// UDP Custom  info config
-	UdpCustomPsk       string `json:"udp_custom_psk"`        // UDP Custom  info  (PSK)
-	UdpCustomMagic     string `json:"udp_custom_magic"`      // UDP Custom  info  4 bytes info  (default "UDPC")
-	UdpCustomPublicKey string `json:"udp_custom_public_key"` // UDP Custom Noise  info
-	UdpCustomPaths     int    `json:"udp_custom_paths"`      // UDP Custom multipath path count (client-selected random ports); 0 => 32
+	UdpCustomPsk        string `json:"udp_custom_psk"`         // UDP Custom  info  (PSK)
+	UdpCustomMagic      string `json:"udp_custom_magic"`       // UDP Custom  info  4 bytes info  (default "UDPC")
+	UdpCustomPublicKey  string `json:"udp_custom_public_key"`  // UDP Custom Noise  info
+	UdpCustomPaths      int    `json:"udp_custom_paths"`       // UDP Custom multipath path count (client-selected random ports); 0 => 32
+	UdpCustomSockets    int    `json:"udp_custom_sockets"`     // local UDP sockets; 0 => 1
+	UdpCustomSendWindow int    `json:"udp_custom_send_window"` // in-flight frames; 0 => SDK default 256
 
 	//  info  Noise  info
 	NoisePublicKey string `json:"noise_public_key"` //  info  Noise  info
+
+	// XHTTP tunnel (xhttp/xhttpc) config
+	XhttpChunkSizeKB int `json:"xhttp_chunk_size_kb"` // upstream request body in KB; default 256, range 16-900
+
+	// Resume/2 空闲心跳间隔（毫秒）。0 表示使用默认 25000ms。
+	// 在 CDN/反代 idle 阈值之前主动发 KEEPALIVE 帧保活主流，避免空闲流被掐断。
+	HeartbeatIntervalMs int `json:"heartbeat_interval_ms"`
 }
 
 type GlobalConfig struct {

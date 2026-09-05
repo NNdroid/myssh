@@ -132,15 +132,7 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	case "tcp":
 		baseConn, err = dialTCP(ctx, cfg, target)
 	case "udp":
-		if tunnelType == "udp_custom" {
-			// udp_custom supports a UDP destination-port range in the server
-			// address (e.g. "1.1.1.1:1024-23000,25000-30000"). When present we
-			// open an unconnected UDP socket and spread every packet across the
-			// range to defeat per-(dst-IP,dst-port) UDP rate limiting.
-			baseConn, err = dialUDPRange(ctx, cfg, target)
-		} else {
-			baseConn, err = dialUDP(ctx, cfg, target)
-		}
+		baseConn, err = dialUDP(ctx, cfg, target)
 	case "custom":
 		zlog.Infof("%s [Tunnel] ⚡ Underlying dialing taken over by protocol (on-demand lazy loading)", TAG)
 		baseConn = nil

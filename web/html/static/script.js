@@ -383,10 +383,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const tunnelType = el('tunnelType').value;
             const isHttp = tunnelType === 'http';
             const isBase = tunnelType === 'base';
-            const isMasque = tunnelType === 'masque';
             const isDns = tunnelType === 'dns_custom' || tunnelType === 'dns' || tunnelType === 'vaydns';
             const isKcp = tunnelType === 'kcp';
             const isUdpCustom = tunnelType === 'udp_custom';
+            const isXhttp = tunnelType === 'xhttp' || tunnelType === 'xhttpc';
+            const isH2SDK = ['h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'masque'].includes(tunnelType);
             const isWss = ['ws', 'wss'].includes(tunnelType);
             const isTls = ['tls', 'wss', 'h2', 'quic', 'xhttp', 'grpc', 'h3', 'wt', 'masque'].includes(tunnelType);
             const isCustomPathSupported = ['ws', 'wss', 'h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'xhttp', 'xhttpc'].includes(tunnelType);
@@ -395,15 +396,14 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="kcpFields"]', isKcp);
             setVis('[data-visibility-key="udpCustomFields"]', isUdpCustom);
             setVis('[data-visibility-key="dnsTunnelFields"]', isDns);
+            setVis('[data-visibility-key="xhttpSDKFields"]', isXhttp);
+            setVis('[data-visibility-key="h2SDKFields"]', isH2SDK);
             setVis('[data-visibility-key="customHost"]', !isBase && !isDns && !isKcp && !isUdpCustom && tunnelType !== 'tls' && tunnelType !== 'quic');
             setVis('[data-visibility-key="serverName"]', isTls);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 
-            setVis('[data-visibility-key="enableCustomPath"]', isMasque);
-            if (!isMasque && !el('enableCustomPath').checked) {
-                el('enableCustomPath').checked = true;
-            }
-            const showCustomPath = (isMasque && el('enableCustomPath').checked) || isCustomPathSupported;
+            setVis('[data-visibility-key="enableCustomPath"]', false);
+            const showCustomPath = isCustomPathSupported;
             setVis('[data-visibility-key="customPath"]', showCustomPath);
 
             const proxyAuth = el('proxyAuthRequired').checked;
@@ -420,9 +420,7 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="verifyCertFingerprint"]', supportsCertFingerprint);
             setVis('[data-visibility-key="serverCertFingerprint"]', supportsCertFingerprint && el('verifyCertFingerprint').checked);
 
-            const isXhttp = tunnelType === 'xhttp';
-            const isXhttpc = tunnelType === 'xhttpc';
-            setVis('[data-visibility-key="alpn"]', isXhttp || isXhttpc);
+            setVis('[data-visibility-key="alpn"]', isXhttp);
         }
     };
 
@@ -545,6 +543,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(form);
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
+            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'xhttpChunkSizeKB', 'heartbeatIntervalMs']) {
+                nodeData[key] = Number.parseInt(nodeData[key] || '0', 10) || 0;
+            }
             
             // Validation
             const validateAddr = (addr, fieldName, allowRange) => {
@@ -566,6 +567,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!validateAddr(nodeData.sshAddr, 'SSH Address', false)) return;
             if (nodeData.tunnelType !== 'base' && nodeData.tunnelType !== 'dns_custom') {
                 if (!validateAddr(nodeData.proxyAddr, 'Proxy Address', nodeData.tunnelType === 'udp_custom')) return;
+            }
+            if (nodeData.tunnelType === 'udp_custom' && !nodeData.udpCustomPsk) {
+                showToast('UDP Custom PSK is required by protocol v2', 'error');
+                return;
             }
 
             let res;

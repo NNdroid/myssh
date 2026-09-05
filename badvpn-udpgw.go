@@ -246,7 +246,7 @@ func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 		case <-c.closed:
 			return 0, io.EOF
 		default:
-			}
+		}
 		zlog.Errorf("%s [UDPGW-Write] ❌ Failed to send UDP data frame: %v", TAG, err)
 		return 0, err
 	}

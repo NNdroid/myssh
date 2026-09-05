@@ -18,11 +18,19 @@ RELEASE_OUTPUT_FILE="myssh.release.aar"
 DEBUG_OUTPUT_PATH="${OUTPUT_DIR}/${DEBUG_OUTPUT_FILE}"
 RELEASE_OUTPUT_PATH="${OUTPUT_DIR}/${RELEASE_OUTPUT_FILE}"
 
-# 定义发版版本号
-VERSION="v1.0.$(date +%Y%m%d)"
+# 定义发版版本号：默认绑定当前 myssh 提交，允许通过环境变量 VERSION 覆盖。
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -z "${VERSION:-}" ]; then
+    GIT_HASH="$(git -C "$PROJECT_ROOT" rev-parse --short=7 HEAD 2>/dev/null || true)"
+    if [ -z "$GIT_HASH" ]; then
+        GIT_HASH="unknown"
+    fi
+    VERSION="v1.0.$(date -u +%Y%m%d)-$GIT_HASH"
+fi
 # ============================================
 
 
+echo "🏷️  构建版本: $VERSION"
 echo "🚀 开始使用 gomobile 编译..."
 
 # 检查 gomobile 环境是否安装 (增加对 Windows .exe 后缀的兼容检查)

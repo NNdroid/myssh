@@ -38,13 +38,21 @@ func TestBuildProxyConfigJSON_DnsTunnel(t *testing.T) {
 	newTestDB(t)
 
 	p := Profile{
-		Name:             "dns-node",
-		SshAddr:          "1.2.3.4:22",
-		User:             "u",
-		TunnelType:       "dns_custom",
-		DnsTunnelDomain:  "tunnel.example.com",
-		DnsTunnelServers: "8.8.8.8:53, 1.1.1.1:53",
-		DnsTunnelType:    "txt",
+		Name:                "dns-node",
+		SshAddr:             "1.2.3.4:22",
+		User:                "u",
+		TunnelType:          "dns_custom",
+		DnsTunnelDomain:     "tunnel.example.com",
+		DnsTunnelServers:    "8.8.8.8:53, 1.1.1.1:53",
+		DnsTunnelType:       "txt",
+		DnsTunnelPublicKey:  "noise-public-key",
+		DnsTunnelEDNS0:      true,
+		UdpCustomPublicKey:  "udp-noise-public-key",
+		UdpCustomPaths:      24,
+		UdpCustomSockets:    3,
+		UdpCustomSendWindow: 192,
+		XhttpChunkSizeKB:    384,
+		HeartbeatIntervalMs: 17000,
 	}
 	id, err := AddProfile(p)
 	if err != nil {
@@ -58,7 +66,15 @@ func TestBuildProxyConfigJSON_DnsTunnel(t *testing.T) {
 	}
 	if got.DnsTunnelDomain != p.DnsTunnelDomain ||
 		got.DnsTunnelServers != p.DnsTunnelServers ||
-		got.DnsTunnelType != p.DnsTunnelType {
+		got.DnsTunnelType != p.DnsTunnelType ||
+		got.DnsTunnelPublicKey != p.DnsTunnelPublicKey ||
+		got.DnsTunnelEDNS0 != p.DnsTunnelEDNS0 ||
+		got.UdpCustomPublicKey != p.UdpCustomPublicKey ||
+		got.UdpCustomPaths != p.UdpCustomPaths ||
+		got.UdpCustomSockets != p.UdpCustomSockets ||
+		got.UdpCustomSendWindow != p.UdpCustomSendWindow ||
+		got.XhttpChunkSizeKB != p.XhttpChunkSizeKB ||
+		got.HeartbeatIntervalMs != p.HeartbeatIntervalMs {
 		t.Fatalf("persisted DNS fields mismatch: %+v", got)
 	}
 
@@ -102,6 +118,18 @@ func TestBuildProxyConfigJSON_DnsTunnel(t *testing.T) {
 	}
 	if cfg.DnsTunnelType != "null" {
 		t.Fatalf("DnsTunnelType = %q, want null", cfg.DnsTunnelType)
+	}
+	if cfg.DnsTunnelPublicKey != p.DnsTunnelPublicKey || !cfg.DnsTunnelEDNS0 {
+		t.Fatalf("DNS SDK fields = key %q, edns0 %v", cfg.DnsTunnelPublicKey, cfg.DnsTunnelEDNS0)
+	}
+	if cfg.UdpCustomPublicKey != p.UdpCustomPublicKey ||
+		cfg.UdpCustomPaths != p.UdpCustomPaths ||
+		cfg.UdpCustomSockets != p.UdpCustomSockets ||
+		cfg.UdpCustomSendWindow != p.UdpCustomSendWindow {
+		t.Fatalf("UDP SDK fields mismatch: %+v", cfg)
+	}
+	if cfg.XhttpChunkSizeKB != p.XhttpChunkSizeKB || cfg.HeartbeatIntervalMs != p.HeartbeatIntervalMs {
+		t.Fatalf("HTTP SDK tuning mismatch: %+v", cfg)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/lxzan/gws"
 )
 
 // startWSEchoServer  info  WebSocket  info ， info  ws tunnel info bidirectional info 。
@@ -18,19 +18,18 @@ func startWSEchoServer(t *testing.T) (addr string, stop func()) {
 	if err != nil {
 		t.Fatalf("ws listen: %v", err)
 	}
+	upgrader := gws.NewUpgrader(gws.BuiltinEventHandler{}, &gws.ServerOption{
+		SubProtocols: []string{"binary"},
+	})
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-				Subprotocols:       []string{"binary"},
-				InsecureSkipVerify: true,
-				OriginPatterns:     []string{"*"},
-			})
+			c, err := upgrader.Upgrade(w, r)
 			if err != nil {
 				return
 			}
-			defer c.Close(websocket.StatusNormalClosure, "")
+			defer func() { _ = c.WriteClose(1000, nil) }()
 			//  info  WS  info  net.Conn  info ， info 。
-			nc := websocket.NetConn(context.Background(), c, websocket.MessageBinary)
+			nc := &wsStream{conn: c}
 			_, _ = io.Copy(nc, nc)
 		}),
 	}

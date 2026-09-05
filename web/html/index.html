@@ -287,6 +287,22 @@
                             <label data-i18n="label_udp_custom_magic">Magic String</label>
                             <input type="text" name="udpCustomMagic" class="form-control" value="UDPC" data-i18n-placeholder="ph_udp_custom_magic">
                         </div>
+                        <div class="form-group grid-full" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_public_key">Server Noise Public Key</label>
+                            <input type="text" name="udpCustomPublicKey" class="form-control" data-i18n-placeholder="ph_udp_custom_public_key">
+                        </div>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_paths">Remote Paths</label>
+                            <input type="number" name="udpCustomPaths" class="form-control" value="32" min="0">
+                        </div>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_sockets">Local UDP Sockets</label>
+                            <input type="number" name="udpCustomSockets" class="form-control" value="1" min="0">
+                        </div>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_send_window">Send Window</label>
+                            <input type="number" name="udpCustomSendWindow" class="form-control" value="256" min="0">
+                        </div>
 
                         <!-- DNS Tunnel (SSH-over-DNS) Fields -->
                         <div class="form-group" data-visibility-key="dnsTunnelFields">
@@ -305,6 +321,35 @@
                                 <option value="cname" data-i18n="opt_dns_type_cname">CNAME</option>
                                 <option value="a" data-i18n="opt_dns_type_a">A</option>
                             </select>
+                        </div>
+                        <div class="form-group grid-full" data-visibility-key="dnsTunnelFields">
+                            <label data-i18n="label_dns_tunnel_public_key">Server Noise Public Key</label>
+                            <input type="text" name="dnsTunnelPublicKey" class="form-control" data-i18n-placeholder="ph_dns_tunnel_public_key">
+                        </div>
+                        <div class="checkbox-group" data-visibility-key="dnsTunnelFields">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="dnsTunnelEDNS0">
+                                <span class="checkbox-custom"></span>
+                                <span data-i18n="label_dns_tunnel_edns0">Enable EDNS0 (server must match)</span>
+                            </label>
+                        </div>
+
+                        <div class="form-group" data-visibility-key="xhttpSDKFields">
+                            <label data-i18n="label_xhttp_chunk_size">XHTTP Chunk Size (KB)</label>
+                            <input type="number" name="xhttpChunkSizeKB" class="form-control" value="256" min="0" max="900">
+                        </div>
+                        <div class="form-group" data-visibility-key="alpn">
+                            <label data-i18n="label_alpn">ALPN</label>
+                            <select name="alpn" class="form-control">
+                                <option value="auto">auto</option>
+                                <option value="h3">h3</option>
+                                <option value="h2">h2</option>
+                                <option value="h1">h1</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-visibility-key="h2SDKFields">
+                            <label data-i18n="label_heartbeat_interval">Resume Heartbeat (ms)</label>
+                            <input type="number" name="heartbeatIntervalMs" class="form-control" value="25000" min="0">
                         </div>
 
                         <div class="form-group" data-visibility-key="customHost">
