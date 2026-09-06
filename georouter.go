@@ -131,10 +131,13 @@ type GeoRouter struct {
 	queryCount    atomic.Int64 //  info
 	cacheHitCount atomic.Int64 //  info
 
-	fullDomains  map[string]struct{}
-	subDomains   map[string]struct{}
-	keywordList  []string
-	keywordAC    *ahocorasick.Matcher
+	fullDomains map[string]struct{}
+	subDomains  map[string]struct{}
+	keywordList []string
+	keywordAC   *ahocorasick.Matcher
+	// cloudflare/ahocorasick 的 Match 内部用实例级 counter 做去重，并发调用
+	// 会互踩计数（可能漏掉关键词命中导致误路由），必须串行化。
+	keywordMu    sync.Mutex
 	regexList    []*regexp.Regexp
 	regexGrouped []*regexp.Regexp
 
@@ -669,7 +672,11 @@ func (r *GeoRouter) doMatchDomain(domain string) bool {
 	// Keyword  info  ( info  AC  info  O(1)  info )
 	if r.keywordAC != nil {
 		// Match  info mode info ， info  0  info
-		if hits := r.keywordAC.Match([]byte(domain)); len(hits) > 0 {
+		// 串行调用以规避 Match 的非并发安全实现；只发生在 L1 缓存未命中时。
+		r.keywordMu.Lock()
+		hits := r.keywordAC.Match([]byte(domain))
+		r.keywordMu.Unlock()
+		if len(hits) > 0 {
 			return true
 		}
 	} else {

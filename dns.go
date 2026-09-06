@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -30,9 +31,114 @@ const (
 )
 
 type dnsCacheEntry struct {
-	msg       *dns.Msg
+	// msg 是回退缓存：wire 打包/TTL 偏移扫描失败时保留结构化消息。
+	msg *dns.Msg
+	// packed 是预打包响应：命中时写入事务 ID 并按 ttlOffset 衰减 TTL 后
+	// 直接写 wire，完全绕开 Unpack/Pack。
+	packed    []byte
+	ttlOffset []int
 	expiresAt time.Time
 	cachedAt  time.Time
+}
+
+// scanWireTTLOffsets 遍历 DNS wire format，返回每个资源记录 4 字节 TTL 字段的
+// 起始偏移。遇到无法安全解析的结构（保留标签类型等）返回 nil，调用方回退到
+// msg 深拷贝路径。名称压缩指针只可能指向报文中更早的数据，因此线性扫描是安全的。
+func scanWireTTLOffsets(msgBytes []byte) []int {
+	if len(msgBytes) < 12 {
+		return nil
+	}
+	var offsets []int
+	pos := 12
+	qd := int(binary.BigEndian.Uint16(msgBytes[4:6]))
+	an := int(binary.BigEndian.Uint16(msgBytes[6:8]))
+	ns := int(binary.BigEndian.Uint16(msgBytes[8:10]))
+	ar := int(binary.BigEndian.Uint16(msgBytes[10:12]))
+
+	skipName := func() bool {
+		for {
+			if pos >= len(msgBytes) {
+				return false
+			}
+			l := int(msgBytes[pos])
+			switch {
+			case l == 0:
+				pos++
+				return true
+			case l&0xC0 == 0xC0: // 压缩指针，名称到此结束
+				pos += 2
+				return true
+			case l&0xC0 != 0: // 保留/未知的标签类型，保守放弃
+				return false
+			default:
+				pos += 1 + l
+			}
+		}
+	}
+
+	for i := 0; i < qd; i++ {
+		if !skipName() {
+			return nil
+		}
+		pos += 4 // QTYPE + QCLASS
+	}
+	for i := 0; i < an+ns+ar; i++ {
+		if !skipName() {
+			return nil
+		}
+		if pos+10 > len(msgBytes) {
+			return nil
+		}
+		offsets = append(offsets, pos+4) // TYPE(2) + CLASS(2) 之后是 TTL(4)
+		rdlen := int(binary.BigEndian.Uint16(msgBytes[pos+8 : pos+10]))
+		pos += 10 + rdlen
+	}
+	return offsets
+}
+
+// patchPacked 复制预打包响应并写入新的事务 ID、按已流逝时间衰减各 RR 的 TTL，
+// 语义与 copyAndAdjustTTL 一致。
+func (l *LocalDnsServer) patchPacked(entry dnsCacheEntry, id uint16) ([]byte, bool) {
+	if len(entry.packed) == 0 || len(entry.ttlOffset) == 0 {
+		return nil, false
+	}
+	buf := make([]byte, len(entry.packed))
+	copy(buf, entry.packed)
+	binary.BigEndian.PutUint16(buf[0:2], id)
+	elapsed := uint32(time.Since(entry.cachedAt).Seconds())
+	if elapsed > 0 {
+		for _, off := range entry.ttlOffset {
+			if off+4 > len(buf) {
+				return nil, false
+			}
+			ttl := binary.BigEndian.Uint32(buf[off : off+4])
+			if ttl > elapsed {
+				ttl -= elapsed
+			} else {
+				ttl = 0
+			}
+			binary.BigEndian.PutUint32(buf[off:off+4], ttl)
+		}
+	}
+	return buf, true
+}
+
+// readCache 读取缓存命中：优先返回打好补丁的预打包字节，否则回退到结构化
+// 深拷贝。返回值二选一非 nil。
+func (l *LocalDnsServer) readCache(cacheKey string, id uint16) ([]byte, *dns.Msg) {
+	l.cacheMu.RLock()
+	entry, found := l.cache[cacheKey]
+	l.cacheMu.RUnlock()
+	if !found || !time.Now().Before(entry.expiresAt) {
+		return nil, nil
+	}
+	if buf, ok := l.patchPacked(entry, id); ok {
+		return buf, nil
+	}
+	if entry.msg != nil {
+		return nil, l.copyAndAdjustTTL(entry, id)
+	}
+	return nil, nil
 }
 
 type pooledDnsConn struct {
@@ -193,9 +299,13 @@ func (l *LocalDnsServer) cacheCleanupLoop() {
 	}
 }
 
-// ====================  info  (HandleDnsRequest) ====================
+// ==================== Request handling (lookupDNS / HandleDnsRequest) ====================
 
-func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error) {
+// lookupDNS is the core resolution entry point. On a cache hit with the packed
+// wire form available it returns packed (with the request's transaction ID and
+// decayed TTLs applied, ready to write to the wire); otherwise it returns a
+// structured reply (ID already set). At least one of the two is non-nil.
+func (l *LocalDnsServer) lookupDNS(requestMsg *dns.Msg) ([]byte, *dns.Msg, string, error) {
 	domainName := "unknown"
 	qtypeStr := "unknown"
 	var cacheKey string
@@ -214,7 +324,7 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 		isDirect = gr.MatchDomain(cleanDomain)
 	}
 
-	//  info
+	// Top-level cache hit.
 	if cacheKey != "" {
 		l.cacheMu.RLock()
 		entry, found := l.cache[cacheKey]
@@ -222,32 +332,34 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 
 		if found {
 			if time.Now().Before(entry.expiresAt) {
-				cachedReply := l.copyAndAdjustTTL(entry, requestMsg.Id)
-				l.printDnsResponse(" (Cache)", "Memory", domainName, qtypeStr, cachedReply)
-				return cachedReply, nil
+				if buf, ok := l.patchPacked(entry, requestMsg.Id); ok {
+					l.printDnsResponse(" (Cache)", "Memory", domainName, qtypeStr, nil)
+					return buf, nil, "Memory", nil
+				}
+				if entry.msg != nil {
+					cachedReply := l.copyAndAdjustTTL(entry, requestMsg.Id)
+					l.printDnsResponse(" (Cache)", "Memory", domainName, qtypeStr, cachedReply)
+					return nil, cachedReply, "Memory", nil
+				}
+			} else {
+				l.cacheMu.Lock()
+				delete(l.cache, cacheKey)
+				l.cacheMu.Unlock()
 			}
-			l.cacheMu.Lock()
-			delete(l.cache, cacheKey)
-			l.cacheMu.Unlock()
 		}
 	}
 
-	//  info  serverUrl  info
 	type sfResult struct {
+		packed    []byte
 		reply     *dns.Msg
 		serverUrl string
 	}
 
-	// SingleFlight  info
+	// SingleFlight merges concurrent lookups for the same question.
 	v, err, shared := l.singleflight.Do(cacheKey, func() (interface{}, error) {
-		l.cacheMu.RLock()
-		if entry, found := l.cache[cacheKey]; found && time.Now().Before(entry.expiresAt) {
-			l.cacheMu.RUnlock()
-			// SingleFlight  info ， info  TTL
-			cachedReply := l.copyAndAdjustTTL(entry, requestMsg.Id)
-			return sfResult{reply: cachedReply, serverUrl: "Local Cache"}, nil
+		if packed, msg := l.readCache(cacheKey, requestMsg.Id); packed != nil || msg != nil {
+			return sfResult{packed: packed, reply: msg, serverUrl: "Local Cache"}, nil
 		}
-		l.cacheMu.RUnlock()
 
 		serverUrl := globalConfig.Load().RemoteDnsServer
 		if isDirect {
@@ -297,24 +409,46 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 
 		if reply.Rcode == dns.RcodeSuccess || reply.Rcode == dns.RcodeNameError {
 			l.cacheMu.Lock()
-			l.cache[cacheKey] = dnsCacheEntry{
-				msg:       reply.Copy(),
+			entry := dnsCacheEntry{
 				expiresAt: time.Now().Add(time.Duration(l.calculateOptimalTTL(reply)) * time.Second),
 				cachedAt:  time.Now(),
 			}
+			// Prefer caching the packed wire form so hits skip Unpack/Pack entirely;
+			// fall back to the structured copy when packing or scanning fails.
+			if packedBytes, perr := reply.Pack(); perr == nil {
+				if offs := scanWireTTLOffsets(packedBytes); offs != nil {
+					entry.packed = packedBytes
+					entry.ttlOffset = offs
+				}
+			}
+			if entry.packed == nil {
+				entry.msg = reply.Copy()
+			}
+			l.cache[cacheKey] = entry
 			l.cacheMu.Unlock()
 		}
 
-		return sfResult{reply: reply, serverUrl: serverUrl}, nil
+		// Serve this request from the cache as well so the packed and fallback
+		// paths behave identically (transaction ID + TTL decay semantics).
+		packed, msg := l.readCache(cacheKey, requestMsg.Id)
+		if packed == nil && msg == nil {
+			// Extremely unlikely: the entry we just stored was evicted by the
+			// cleanup loop before we could read it back.
+			fallback := reply.Copy()
+			fallback.Id = requestMsg.Id
+			msg = fallback
+		}
+		return sfResult{packed: packed, reply: msg, serverUrl: serverUrl}, nil
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 
 	result := v.(sfResult)
-	finalReply := result.reply.Copy()
-	finalReply.Id = requestMsg.Id
+	if result.packed == nil && result.reply == nil {
+		return nil, nil, "", fmt.Errorf("dns lookup returned no result")
+	}
 
 	source := "Remote Proxy"
 	if shared {
@@ -322,9 +456,39 @@ func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error)
 	} else if isDirect {
 		source = "Direct Resolution (Local)"
 	}
-	l.printDnsResponse(source, result.serverUrl, domainName, qtypeStr, finalReply)
+	l.printDnsResponse(source, result.serverUrl, domainName, qtypeStr, result.reply)
 
-	return finalReply, nil
+	return result.packed, result.reply, result.serverUrl, nil
+}
+
+// HandleDnsRequest keeps the original structured-message interface.
+func (l *LocalDnsServer) HandleDnsRequest(requestMsg *dns.Msg) (*dns.Msg, error) {
+	packed, reply, _, err := l.lookupDNS(requestMsg)
+	if err != nil {
+		return nil, err
+	}
+	if packed != nil {
+		m := new(dns.Msg)
+		if err := m.Unpack(packed); err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
+	return reply, nil
+}
+
+// HandleDNSRequestPacked is for callers that write to the wire directly (the
+// SOCKS5 UDP hijack path): on a cache hit it returns ready-to-send message
+// bytes without any Unpack/Pack round-trip.
+func (l *LocalDnsServer) HandleDNSRequestPacked(requestMsg *dns.Msg) ([]byte, error) {
+	packed, reply, _, err := l.lookupDNS(requestMsg)
+	if err != nil {
+		return nil, err
+	}
+	if packed != nil {
+		return packed, nil
+	}
+	return reply.Pack()
 }
 
 // ====================  info  ( info ) ====================
@@ -659,12 +823,18 @@ func (l *LocalDnsServer) cleanupExpiredCache() {
 // ====================  info  ====================
 
 func (l *LocalDnsServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	reply, err := l.HandleDnsRequest(r)
+	packed, reply, _, err := l.lookupDNS(r)
 	if err != nil {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
+		return
+	}
+	if packed != nil {
+		// Pre-packed cache hit: write the wire bytes directly with zero
+		// Unpack/Pack; miekg's response writer adds the TCP length prefix.
+		w.Write(packed)
 		return
 	}
 	w.WriteMsg(reply)
@@ -745,7 +915,19 @@ func GetCachedIPs(domain string) []net.IP {
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		key := fqdn + "-" + strconv.Itoa(int(qt))
 		if entry, ok := lds.cache[key]; ok && time.Now().Before(entry.expiresAt) {
-			for _, ans := range entry.msg.Answer {
+			// msg 只在回退路径上保留；packed 路径按需解包。该函数只在
+			// 路由未命中/拨号路径上被低频调用，解包开销可忽略。
+			msg := entry.msg
+			if msg == nil && len(entry.packed) > 0 {
+				msg = new(dns.Msg)
+				if err := msg.Unpack(entry.packed); err != nil {
+					continue
+				}
+			}
+			if msg == nil {
+				continue
+			}
+			for _, ans := range msg.Answer {
 				if a, ok := ans.(*dns.A); ok {
 					ips = append(ips, a.A)
 				}

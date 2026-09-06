@@ -296,3 +296,105 @@ func BenchmarkDNSCacheHitCopy(b *testing.B) {
 		_ = lds.copyAndAdjustTTL(entry, req.Id)
 	}
 }
+
+// TestDNSPackedCacheRoundTrip 验证预打包缓存路径的端到端正确性：
+// TTL 偏移扫描覆盖 answer/extra 各节、事务 ID 改写、TTL 按流逝时间衰减。
+func TestDNSPackedCacheRoundTrip(t *testing.T) {
+	lds := &LocalDnsServer{}
+	question := new(dns.Msg)
+	question.SetQuestion("rt.example.com.", dns.TypeA)
+	reply := question.Copy()
+	reply.Id = 9999
+	for i := 0; i < 2; i++ {
+		reply.Answer = append(reply.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: "rt.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 120},
+			A:   net.IPv4(1, 2, 3, byte(i+1)),
+		})
+	}
+	reply.Extra = append(reply.Extra, &dns.A{
+		Hdr: dns.RR_Header{Name: "ns.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+		A:   net.IPv4(9, 9, 9, 9),
+	})
+
+	packed, err := reply.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offs := scanWireTTLOffsets(packed)
+	if offs == nil {
+		t.Fatal("TTL offset scan failed")
+	}
+	if len(offs) != 3 {
+		t.Fatalf("offsets = %v, want 3 entries", offs)
+	}
+
+	entry := dnsCacheEntry{
+		packed:    packed,
+		ttlOffset: offs,
+		cachedAt:  time.Now().Add(-10 * time.Second),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	got, ok := lds.patchPacked(entry, 4242)
+	if !ok {
+		t.Fatal("patch failed")
+	}
+
+	m := new(dns.Msg)
+	if err := m.Unpack(got); err != nil {
+		t.Fatalf("unpack patched message: %v", err)
+	}
+	if m.Id != 4242 {
+		t.Fatalf("id = %d, want 4242", m.Id)
+	}
+	if len(m.Answer) != 2 || len(m.Extra) != 1 {
+		t.Fatalf("records = %d/%d, want 2/1", len(m.Answer), len(m.Extra))
+	}
+	for _, ans := range m.Answer {
+		if ans.Header().Ttl != 110 {
+			t.Fatalf("answer ttl = %d, want 110 (120 - 10s elapsed)", ans.Header().Ttl)
+		}
+	}
+	if m.Extra[0].Header().Ttl != 3590 {
+		t.Fatalf("extra ttl = %d, want 3590", m.Extra[0].Header().Ttl)
+	}
+}
+
+// BenchmarkDNSCacheHitPacked 测量预打包缓存命中路径（拷贝 + 事务 ID + TTL 偏移补丁），
+// 与 BenchmarkDNSCacheHitCopy（消息深拷贝回退路径）对比。
+func BenchmarkDNSCacheHitPacked(b *testing.B) {
+	lds := &LocalDnsServer{}
+	question := new(dns.Msg)
+	question.SetQuestion("cached.example.com.", dns.TypeA)
+	reply := question.Copy()
+	for i := 0; i < 4; i++ {
+		reply.Answer = append(reply.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: "cached.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.IPv4(93, 184, 216, byte(i+1)),
+		})
+	}
+	packed, err := reply.Pack()
+	if err != nil {
+		b.Fatal(err)
+	}
+	offs := scanWireTTLOffsets(packed)
+	if offs == nil {
+		b.Fatal("TTL offset scan failed")
+	}
+	entry := dnsCacheEntry{
+		packed:    packed,
+		ttlOffset: offs,
+		cachedAt:  time.Now().Add(-time.Second),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	req := new(dns.Msg)
+	req.SetQuestion("cached.example.com.", dns.TypeA)
+	req.Id = 4242
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if buf, ok := lds.patchPacked(entry, req.Id); !ok || len(buf) != len(packed) {
+			b.Fatal("patch failed")
+		}
+	}
+}

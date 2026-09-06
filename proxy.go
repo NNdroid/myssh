@@ -287,9 +287,8 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			}
 
 			if lds := localDnsServer.Load(); lds != nil {
-				replyMsg, err := lds.HandleDnsRequest(reqMsg)
-				if err == nil && replyMsg != nil {
-					replyData, _ := replyMsg.Pack()
+				replyData, err := lds.HandleDNSRequestPacked(reqMsg)
+				if err == nil {
 					h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
 				}
 				//  info ， info  DNS  info  UDP  info
