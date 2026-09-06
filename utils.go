@@ -440,7 +440,14 @@ func (c *ConnInfo) String() string {
 type domainStat struct {
 	currentTxBytes atomic.Uint64
 	currentRxBytes atomic.Uint64
+	// 上次有流量（或条目创建）的时间戳，calculateAndRank 用于淘汰长期空闲条目，
+	// 防止 sync.Map 随域名无限增长。
+	lastActiveUnix atomic.Int64
 }
+
+// domainStatIdleTTL 连续无流量超过该时长的域名条目会被淘汰；
+// 若之后再次出现流量，WrapConn 的 LoadOrStore 会重建条目。
+const domainStatIdleTTL = 60 * time.Second
 
 // DomainActivity represents the real-time activity of a single domain for JSON export.
 type DomainActivity struct {
@@ -460,11 +467,21 @@ var globalDomainStatsManager = &domainStatsManager{}
 // calculateAndRank is called periodically to update the ranked list of active domains.
 func (dsm *domainStatsManager) calculateAndRank(elapsed time.Duration) {
 	var currentActivities []DomainActivity
+	now := time.Now()
 	dsm.stats.Range(func(key, value interface{}) bool {
 		domain := key.(string)
 		stat := value.(*domainStat)
 		tx := stat.currentTxBytes.Swap(0)
 		rx := stat.currentRxBytes.Swap(0)
+		if tx == 0 && rx == 0 {
+			// 长期无活动的条目移除；活跃时间戳刚重置过的条目保留一个 TTL 宽限期，
+			// 避免与 WrapConn 创建条目的窗口竞争（新建条目可能刚 Swap 完就为 0）。
+			if stat.lastActiveUnix.Load() != 0 && now.Sub(time.Unix(stat.lastActiveUnix.Load(), 0)) > domainStatIdleTTL {
+				dsm.stats.Delete(key)
+			}
+			return true
+		}
+		stat.lastActiveUnix.Store(now.Unix())
 		txRate := bytesPerSecond(tx, elapsed)
 		rxRate := bytesPerSecond(rx, elapsed)
 		if txRate > 0 || rxRate > 0 {
@@ -650,24 +667,6 @@ func (tc *TrackedPacketConn) Close() error {
 //  info  API ( info )
 // ==========================================
 
-// DialTracked  info  net.DialTimeout
-func DialTracked(network, address string, timeout time.Duration, targetAddr string) (net.Conn, error) {
-	conn, err := dialProtected(currentEngineCtx(), ProxyConfig{}, network, address, timeout)
-	if err != nil {
-		return nil, err
-	}
-	return WrapConn(conn, targetAddr), nil
-}
-
-// ListenPacketTracked  info  UDP Listen
-func ListenPacketTracked(network, address string, sessionName string) (net.PacketConn, error) {
-	conn, err := net.ListenPacket(network, address)
-	if err != nil {
-		return nil, err
-	}
-	return WrapPacketConn(conn, sessionName), nil
-}
-
 // WrapConn  info  TCP  info
 func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	globalTrafficManager.TotalConns.Add(1)
@@ -698,6 +697,7 @@ func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	if host != "" {
 		val, _ := globalDomainStatsManager.stats.LoadOrStore(host, &domainStat{})
 		stat = val.(*domainStat)
+		stat.lastActiveUnix.Store(time.Now().Unix())
 	}
 
 	return &TrackedConn{
@@ -926,12 +926,20 @@ func getCpuPercent() float64 {
 	if err != nil {
 		return 0.0
 	}
-	fields := bytes.Fields(data)
-	if len(fields) < 15 {
+	// /proc/self/stat 的第 2 个字段 comm 是带括号的进程名，可能包含空格；
+	// 不能按空白切分全部字段，应先定位右括号再解析后续字段。
+	// 右括号之后依次为 state(3), ppid(4), ..., utime(14), stime(15)。
+	rparen := bytes.LastIndexByte(data, ')')
+	if rparen < 0 {
 		return 0.0
 	}
-	utime, _ := strconv.ParseFloat(string(fields[13]), 64)
-	stime, _ := strconv.ParseFloat(string(fields[14]), 64)
+	fields := bytes.Fields(data[rparen+1:])
+	// rest[0] 对应第 3 个字段，utime 是第 14 个 => rest[11]，stime => rest[12]。
+	if len(fields) < 13 {
+		return 0.0
+	}
+	utime, _ := strconv.ParseFloat(string(fields[11]), 64)
+	stime, _ := strconv.ParseFloat(string(fields[12]), 64)
 
 	now := time.Now()
 	if !lastTime.IsZero() {
@@ -984,12 +992,17 @@ func init() {
 			globalDomainStatsManager.calculateAndRank(elapsed)
 
 			//  info  Android
-			if trafficCb != nil {
-				trafficCb.OnTrafficUpdate(int64(txRate), int64(rxRate), int64(tTx), int64(tRx), actConns, totConns)
+			// 读取回调指针必须与写入方同样持锁，否则构成 data race。
+			callbackMu.RLock()
+			tcb := trafficCb
+			scb := sysInfoCb
+			callbackMu.RUnlock()
+			if tcb != nil {
+				tcb.OnTrafficUpdate(int64(txRate), int64(rxRate), int64(tTx), int64(tRx), actConns, totConns)
 			}
-			if sysInfoCb != nil {
+			if scb != nil {
 				sys := GetSysStats()
-				sysInfoCb.OnSysInfoUpdate(sys.CpuPercent, sys.MemAllocMB, sys.MemSysMB, sys.Goroutines)
+				scb.OnSysInfoUpdate(sys.CpuPercent, sys.MemAllocMB, sys.MemSysMB, sys.Goroutines)
 			}
 		}
 	}()

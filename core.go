@@ -60,7 +60,11 @@ func init() {
 	}
 	//  info
 	padPool = make([]byte, padPoolLen)
-	io.ReadFull(rand.Reader, padPool)
+	// 填充数据仅用于流量混淆；crypto/rand 失败时退化的问题必须留痕便于排查
+	// （init 阶段 zlog 尚未初始化，日志会进入 Nop，但保留检查使失败可被发现）。
+	if _, err := io.ReadFull(rand.Reader, padPool); err != nil {
+		zlog.Warnf("%s [Init] Failed to seed padding pool: %v", TAG, err)
+	}
 }
 
 func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {

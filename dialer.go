@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -103,6 +104,33 @@ func dialTCP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, err
 // dialUDP is a wrapper for creating a UDP socket.
 func dialUDP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, error) {
 	return dialSocket(ctx, cfg, "udp", target)
+}
+
+// ctxCloseConn 在引擎 ctx 取消时关闭底层连接，同时保证连接被正常关闭后
+// 监视 goroutine 立即退出——否则每次拨号都会留下一个等到引擎停止才退出的
+// goroutine，断线重连循环期间会持续累积。
+type ctxCloseConn struct {
+	net.Conn
+	closeCh chan struct{}
+	once    sync.Once
+}
+
+func (c *ctxCloseConn) Close() error {
+	c.once.Do(func() { close(c.closeCh) })
+	return c.Conn.Close()
+}
+
+// watchEngineCtx 包装 conn，使其随引擎 ctx 取消而关闭。
+func watchEngineCtx(ctx context.Context, conn net.Conn) net.Conn {
+	c := &ctxCloseConn{Conn: conn, closeCh: make(chan struct{})}
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Conn.Close()
+		case <-c.closeCh:
+		}
+	}()
+	return c
 }
 
 // dialTunnel  info tunnel info ， info

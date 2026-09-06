@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand/v2"
-	"net"
 	"sync"
-	"time"
 )
 
 var paddingGarbage [4096]byte
@@ -23,7 +21,9 @@ var paddingWritePool = sync.Pool{
 }
 
 func init() {
-	rand.Read(paddingGarbage[:])
+	if _, err := rand.Read(paddingGarbage[:]); err != nil {
+		zlog.Warnf("%s [Init] Failed to seed padding garbage: %v", TAG, err)
+	}
 }
 
 // info 。
@@ -189,50 +189,3 @@ func (pr *PaddingReader) Close() error {
 	}
 	return nil
 }
-
-// ==========================================
-// PaddingConn  info  ( info  Padding  info  net.Conn)
-// ==========================================
-
-// paddingConn  info  net.Conn  info  Padding  info  net.Conn
-type paddingConn struct {
-	net.Conn
-	pr *PaddingReader
-	pw *PaddingWriter
-}
-
-func (p *paddingConn) Read(b []byte) (n int, err error) {
-	return p.pr.Read(b)
-}
-
-func (p *paddingConn) Write(b []byte) (n int, err error) {
-	return p.pw.Write(b)
-}
-
-// WrapWithPadding  info
-func WrapWithPadding(base net.Conn) net.Conn {
-	return &paddingConn{
-		Conn: base,
-		pr:   &PaddingReader{r: base},
-		pw:   &PaddingWriter{w: base},
-	}
-}
-
-// WrapWithPaddingForStreams  info  io.Reader  info  io.Writer， info closed info
-// ( info ， info  net.Conn  info )
-type customPaddingConn struct {
-	pr         *PaddingReader
-	pw         *PaddingWriter
-	closer     func() error
-	localAddr  func() net.Addr
-	remoteAddr func() net.Addr
-}
-
-func (c *customPaddingConn) Read(b []byte) (n int, err error)   { return c.pr.Read(b) }
-func (c *customPaddingConn) Write(b []byte) (n int, err error)  { return c.pw.Write(b) }
-func (c *customPaddingConn) Close() error                       { return c.closer() }
-func (c *customPaddingConn) LocalAddr() net.Addr                { return c.localAddr() }
-func (c *customPaddingConn) RemoteAddr() net.Addr               { return c.remoteAddr() }
-func (c *customPaddingConn) SetDeadline(t time.Time) error      { return nil }
-func (c *customPaddingConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *customPaddingConn) SetWriteDeadline(t time.Time) error { return nil }

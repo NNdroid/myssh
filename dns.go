@@ -40,6 +40,52 @@ type pooledDnsConn struct {
 	lastUsed time.Time
 }
 
+// dnsConnPool 是互斥锁保护的可复用连接池。相比 channel：Stop 之后在途请求
+// 仍可能把连接归还池中——向已关闭的 channel 发送会 panic（select default 挡不住
+// 已关闭 channel 的发送），而这里 put 会安全地把连接关掉。
+type dnsConnPool struct {
+	mu     sync.Mutex
+	closed bool
+	items  []pooledDnsConn
+	max    int
+}
+
+func newDNSConnPool(max int) *dnsConnPool {
+	return &dnsConnPool{max: max}
+}
+
+func (p *dnsConnPool) get() (pooledDnsConn, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.items) == 0 {
+		return pooledDnsConn{}, false
+	}
+	pc := p.items[len(p.items)-1]
+	p.items = p.items[:len(p.items)-1]
+	return pc, true
+}
+
+func (p *dnsConnPool) put(pc pooledDnsConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || len(p.items) >= p.max {
+		_ = pc.conn.Close()
+		return
+	}
+	pc.lastUsed = time.Now()
+	p.items = append(p.items, pc)
+}
+
+func (p *dnsConnPool) closeAll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	for _, pc := range p.items {
+		_ = pc.conn.Close()
+	}
+	p.items = nil
+}
+
 // LocalDnsServer  info  DNS  info
 type LocalDnsServer struct {
 	UdpgwAddr    string
@@ -89,9 +135,9 @@ func NewLocalDnsServer(udpgwAddr string, udpgwVersion string) *LocalDnsServer {
 }
 
 // getPool  info
-func (l *LocalDnsServer) getPool(poolsMap *sync.Map, poolKey string) chan pooledDnsConn {
-	val, _ := poolsMap.LoadOrStore(poolKey, make(chan pooledDnsConn, 10))
-	return val.(chan pooledDnsConn)
+func (l *LocalDnsServer) getPool(poolsMap *sync.Map, poolKey string) *dnsConnPool {
+	val, _ := poolsMap.LoadOrStore(poolKey, newDNSConnPool(10))
+	return val.(*dnsConnPool)
 }
 
 // dialTracked  info / info ， info  WrapConn  info
@@ -477,17 +523,16 @@ func (l *LocalDnsServer) getDoHClient(isDirect bool, sshClient *ssh.Client) *htt
 // tryGetPooledConn  info 。
 //
 //	info successfully info  (conn, true)； info  (nil, false)（ info closed）。
-func (l *LocalDnsServer) tryGetPooledConn(pool chan pooledDnsConn) (*dns.Conn, bool) {
-	select {
-	case pc := <-pool:
-		if time.Since(pc.lastUsed) > 5*time.Second {
-			pc.conn.Close()
-			return nil, false
-		}
-		return pc.conn, true
-	default:
+func (l *LocalDnsServer) tryGetPooledConn(pool *dnsConnPool) (*dns.Conn, bool) {
+	pc, ok := pool.get()
+	if !ok {
 		return nil, false
 	}
+	if time.Since(pc.lastUsed) > 5*time.Second {
+		pc.conn.Close()
+		return nil, false
+	}
+	return pc.conn, true
 }
 
 func (l *LocalDnsServer) getTcpConnFromPool(addr string, isDirect bool, client *ssh.Client, forceNew bool) (*dns.Conn, string, error) {
@@ -509,11 +554,7 @@ func (l *LocalDnsServer) getTcpConnFromPool(addr string, isDirect bool, client *
 
 func (l *LocalDnsServer) putTcpConnToPool(conn *dns.Conn, poolKey string) {
 	pool := l.getPool(&l.tcpConnPools, poolKey)
-	select {
-	case pool <- pooledDnsConn{conn: conn, lastUsed: time.Now()}:
-	default:
-		conn.Close()
-	}
+	pool.put(pooledDnsConn{conn: conn})
 }
 
 // ==================== DoT  info  ====================
@@ -548,11 +589,7 @@ func (l *LocalDnsServer) getDoTConnFromPool(addr string, isDirect bool, client *
 
 func (l *LocalDnsServer) putDoTConnToPool(conn *dns.Conn, poolKey string) {
 	pool := l.getPool(&l.dotConnPools, poolKey)
-	select {
-	case pool <- pooledDnsConn{conn: conn, lastUsed: time.Now()}:
-	default:
-		conn.Close()
-	}
+	pool.put(pooledDnsConn{conn: conn})
 }
 
 func (l *LocalDnsServer) calculateOptimalTTL(reply *dns.Msg) uint32 {
@@ -660,19 +697,11 @@ func (l *LocalDnsServer) Stop() {
 			l.tcpServer.Shutdown()
 		}
 		l.tcpConnPools.Range(func(key, value interface{}) bool {
-			pool := value.(chan pooledDnsConn)
-			close(pool)
-			for pc := range pool {
-				pc.conn.Close()
-			}
+			value.(*dnsConnPool).closeAll()
 			return true
 		})
 		l.dotConnPools.Range(func(key, value interface{}) bool {
-			pool := value.(chan pooledDnsConn)
-			close(pool)
-			for pc := range pool {
-				pc.conn.Close()
-			}
+			value.(*dnsConnPool).closeAll()
 			return true
 		})
 	})

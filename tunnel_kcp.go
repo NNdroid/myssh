@@ -97,14 +97,7 @@ func init() {
 			sess.SetWindowSize(64, 256)
 		}
 
-		go func() {
-			<-parentCtx.Done()
-			if sess != nil {
-				sess.Close()
-			}
-		}()
-
 		zlog.Infof("%s [Tunnel] ✅ KCP session established with %s", TAG, target)
-		return sess, nil
+		return watchEngineCtx(parentCtx, sess), nil
 	})
 }

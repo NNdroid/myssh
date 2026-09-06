@@ -802,6 +802,7 @@ func stopSshTProxy() {
 		socksServer.Shutdown()
 		socksServer = nil
 	}
+	closeQuicConnCache()
 	if sshClient != nil {
 		sshClient.Close()
 		sshClient = nil

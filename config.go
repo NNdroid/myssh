@@ -86,9 +86,9 @@ func loadGlobalConfigFromJson(configJson string) int {
 }
 
 func loadGlobalConfig(cfg GlobalConfig) int {
-	mu.Lock()
-	defer mu.Unlock()
-
+	// 注意：不要在这里持有全局 mu——geosite/geoip 的 IO+解析可能耗时数百毫秒，
+	// 会把 TCPHandle 里对 sshClient 的读取一并阻塞。函数内部只操作局部变量和
+	// atomic 存储（globalRouter/globalConfig），本身无需加锁。
 	if cfg.LocalDnsServer == "" {
 		cfg.LocalDnsServer = "223.5.5.5:53"
 	}

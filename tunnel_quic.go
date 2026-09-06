@@ -14,6 +14,20 @@ import (
 // info  QUIC  info ， info  (Multiplexing)
 var quicConnCache sync.Map
 
+// closeQuicConnCache closes all cached QUIC connections.
+// The engine must call this when stopping: otherwise the QUIC connections and their
+// underlying UDP sockets stay alive and keep sending KeepAlive packets, and after
+// stop->start the stale connections would be wrongly reused.
+func closeQuicConnCache() {
+	quicConnCache.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*quic.Conn); ok {
+			_ = conn.CloseWithError(0, "engine stopped")
+		}
+		quicConnCache.Delete(key)
+		return true
+	})
+}
+
 type quicNetConn struct {
 	*quic.Stream
 	localAddr  net.Addr

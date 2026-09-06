@@ -541,10 +541,26 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		}
 	}
 	if len(ips) == 0 {
-		if ip4 := ResolveOne(host, dns.TypeA); ip4 != nil {
+		// A/AAAA 两族并行解析：串行查询会让代理路径上每个新连接的
+		// 建连延迟接近翻倍（解析本身带重试，最坏可达十几秒）。
+		var (
+			ip4, ip6    net.IP
+			resolveDone sync.WaitGroup
+		)
+		resolveDone.Add(2)
+		go func() {
+			defer resolveDone.Done()
+			ip4 = ResolveOne(host, dns.TypeA)
+		}()
+		go func() {
+			defer resolveDone.Done()
+			ip6 = ResolveOne(host, dns.TypeAAAA)
+		}()
+		resolveDone.Wait()
+		if ip4 != nil {
 			ips = append(ips, ip4)
 		}
-		if ip6 := ResolveOne(host, dns.TypeAAAA); ip6 != nil {
+		if ip6 != nil {
 			ips = append(ips, ip6)
 		}
 		//  info （ info  TTL）； info ， info

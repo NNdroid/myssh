@@ -24,13 +24,6 @@ func init() {
 
 		zlog.Infof("%s [Tunnel] ✅ TLS handshake successful", TAG)
 
-		go func() {
-			<-ctx.Done()
-			if uConn != nil {
-				uConn.Close()
-			}
-		}()
-
-		return uConn, nil
+		return watchEngineCtx(ctx, uConn), nil
 	})
 }

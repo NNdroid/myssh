@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 // BufferedConn  info  net.Conn  info  bufio.Reader
@@ -82,6 +83,10 @@ func init() {
 		}
 
 		//  info
+		// 握手读响应必须有 deadline，否则恶意/卡死的代理会让拨号永久挂起
+		// （只能靠 TCP keepalive 在约 75s 后兜底）。
+		baseConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 		br := bufio.NewReader(baseConn)
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -149,6 +154,9 @@ func init() {
 		}
 
 		zlog.Infof("%s [Tunnel] ✅ HTTP %s tunnel established", TAG, method)
+
+		// 握手完成，解除读 deadline，交给 SSH 传输层正常收发。
+		baseConn.SetReadDeadline(time.Time{})
 
 		//  info  BufferedConn， info  SSH  info  br  info
 		wrappedConn := &BufferedConn{

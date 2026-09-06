@@ -64,8 +64,10 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		targetIP = ip
 	} else {
 		ips := GetCachedIPs(host)
+		// 优先 IPv4：服务器路径可能没有可用的 IPv6 出口，v6 优先会选到
+		// 不可达地址；仅在没有任何 v4 结果时才回退 v6。
 		for _, ip := range ips {
-			if ip.To4() == nil {
+			if ip.To4() != nil {
 				targetIP = ip
 				break
 			}
@@ -74,9 +76,9 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 			targetIP = ips[0]
 		}
 		if targetIP == nil {
-			targetIP = ResolveOne(host, dns.TypeAAAA)
+			targetIP = ResolveOne(host, dns.TypeA)
 			if targetIP == nil {
-				targetIP = ResolveOne(host, dns.TypeA)
+				targetIP = ResolveOne(host, dns.TypeAAAA)
 			}
 		}
 	}
