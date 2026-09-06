@@ -17,8 +17,9 @@ import (
 // 语义等价于按二进制消息收发的流式传输：
 // 每次 Write 发送一条二进制消息，Read 将消息负载重组为连续字节流。
 type wsStream struct {
-	conn *gws.Conn
-	buf  []byte // 最近一条消息中尚未消费完的负载
+	conn    *gws.Conn
+	buf     []byte // 最近一条消息中尚未消费完的负载（指向 scratch 的切片）
+	scratch []byte // 复用的复制缓冲，避免每条消息一次堆分配
 }
 
 func (s *wsStream) Read(p []byte) (int, error) {
@@ -27,8 +28,15 @@ func (s *wsStream) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		// msg.Close() 会将负载归还内存池，必须先复制。
-		s.buf = append(s.buf, msg.Bytes()...)
+		// msg.Close() 会将负载归还内存池，必须先复制到自有缓冲。
+		// 复用 scratch 而不是每次 append 新分配：net.Conn 语义允许
+		// Read 返回的切片在下一次 Read 之前失效，SSH 传输层会自行取走数据。
+		data := msg.Data.Bytes()
+		if cap(s.scratch) < len(data) {
+			s.scratch = make([]byte, len(data))
+		}
+		s.buf = s.scratch[:len(data)]
+		copy(s.buf, data)
 		_ = msg.Close()
 	}
 	n := copy(p, s.buf)

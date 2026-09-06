@@ -124,10 +124,15 @@ document.addEventListener('DOMContentLoaded', () => {
         nodes: [],
         settings: {},
         status: { running: false, running_node: "" },
-        logs: { content: '', lastFetchFull: true },
+        logs: { content: '', pending: '', lastFetchFull: true },
         currentNodeId: null,
         controlsLocked: false,
+        nodeFilter: '',
     };
+
+    // 日志视图最多保留的字符数：超出后从最早的一整行开始丢弃，
+    // 防止长时间运行后 DOM 无限增长拖垮渲染。
+    const LOG_RENDER_MAX_CHARS = 256 * 1024;
 
     const el = (id) => document.getElementById(id);
     const setVis = (selector, isVisible) => {
@@ -214,18 +219,34 @@ document.addEventListener('DOMContentLoaded', () => {
             const list = el('node-list');
             if (!list) return;
             list.innerHTML = '';
-            if (!state.nodes || state.nodes.length === 0) {
+
+            // 过滤 + 排序：命中过滤关键字的留下；运行中的节点置顶，其余按名称排序。
+            const kw = (state.nodeFilter || '').trim().toLowerCase();
+            const nodes = state.nodes
+                .filter(n => !kw ||
+                    (n.name || '').toLowerCase().includes(kw) ||
+                    (n.sshAddr || '').toLowerCase().includes(kw) ||
+                    (n.tunnelType || '').toLowerCase().includes(kw))
+                .slice()
+                .sort((a, b) => {
+                    const ra = state.status.running && state.status.running_node === a.id ? 1 : 0;
+                    const rb = state.status.running && state.status.running_node === b.id ? 1 : 0;
+                    if (ra !== rb) return rb - ra;
+                    return (a.name || '').localeCompare(b.name || '');
+                });
+
+            if (nodes.length === 0) {
                 const emptyDiv = document.createElement('div');
                 emptyDiv.style.gridColumn = '1/-1';
                 emptyDiv.style.textAlign = 'center';
                 emptyDiv.style.padding = '40px 0';
                 emptyDiv.style.color = 'var(--text-muted)';
-                emptyDiv.textContent = i18n.t('text_no_nodes');
+                emptyDiv.textContent = kw ? i18n.t('text_no_match') : i18n.t('text_no_nodes');
                 list.appendChild(emptyDiv);
                 return;
             }
 
-            state.nodes.forEach(node => {
+            nodes.forEach(node => {
                 const isRunning = state.status.running && state.status.running_node === node.id;
                 const isSelected = state.selectedNodeId === node.id;
 
@@ -340,11 +361,23 @@ document.addEventListener('DOMContentLoaded', () => {
             const logPre = el('logs');
             if (!logPre) return;
             if (isIncremental) {
-                logPre.textContent += state.logs.content;
+                state.logs.content += state.logs.pending;
             } else {
-                logPre.textContent = state.logs.content;
+                state.logs.content = state.logs.pending;
             }
-            logPre.scrollTop = logPre.scrollHeight;
+            state.logs.pending = '';
+            if (state.logs.content.length > LOG_RENDER_MAX_CHARS) {
+                state.logs.content = state.logs.content.slice(-LOG_RENDER_MAX_CHARS);
+                const nl = state.logs.content.indexOf('\n');
+                if (nl >= 0) state.logs.content = state.logs.content.slice(nl + 1);
+            }
+            // 仅当用户本来就停留在日志底部附近时才自动滚动；
+            // 往上翻阅历史日志时不打扰（否则每 2 秒被拽回底部无法阅读）。
+            const nearBottom = logPre.scrollHeight - logPre.scrollTop - logPre.clientHeight < 48;
+            logPre.textContent = state.logs.content;
+            if (nearBottom) {
+                logPre.scrollTop = logPre.scrollHeight;
+            }
         }
     };
 
@@ -487,6 +520,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const targetPanel = el(tab.dataset.panel + '-panel');
                 if (targetPanel) targetPanel.classList.add('active');
                 tab.classList.add('active');
+                // 记住停留的面板，刷新/重开后回到原位
+                try { localStorage.setItem('active_tab', tab.dataset.panel); } catch (_) {}
             }
         },
         saveSettings: async (e) => {
@@ -551,9 +586,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             // Validation
-            const validateAddr = (addr, fieldName, allowRange) => {
+            const validateAddr = (addr, missingKey, allowRange) => {
                 if (!addr) {
-                    showToast(fieldName + ' is required', 'error');
+                    showToast(i18n.t(missingKey), 'error');
                     return false;
                 }
                 const portRangePattern = "(\\d+(?:-\\d+)?(?:,\\d+(?:-\\d+)?)*)";
@@ -567,12 +602,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 return true;
             };
 
-            if (!validateAddr(nodeData.sshAddr, 'SSH Address', false)) return;
+            if (!validateAddr(nodeData.sshAddr, 'error_ssh_addr_required', false)) return;
             if (nodeData.tunnelType !== 'base' && nodeData.tunnelType !== 'dns_custom') {
-                if (!validateAddr(nodeData.proxyAddr, 'Proxy Address', nodeData.tunnelType === 'udp_custom')) return;
+                if (!validateAddr(nodeData.proxyAddr, 'error_proxy_addr_required', nodeData.tunnelType === 'udp_custom')) return;
             }
             if (nodeData.tunnelType === 'udp_custom' && !nodeData.udpCustomPsk) {
-                showToast('UDP Custom PSK is required by protocol v2', 'error');
+                showToast(i18n.t('error_psk_required'), 'error');
                 return;
             }
 
@@ -634,6 +669,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (res.message) {
                     showToast(i18n.t('alert_log_cleared'), 'info');
                     state.logs.content = '';
+                    state.logs.pending = '';
                     render.logs(false);
                 } else {
                     showToast(res.error, 'error');
@@ -643,13 +679,16 @@ document.addEventListener('DOMContentLoaded', () => {
         exportNodes: async () => {
             const res = await api.get('/nodes');
             if (Array.isArray(res)) {
-                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(res, null, 2));
+                // Blob URL 不受 data URI 的浏览器长度限制，大配置导出更可靠
+                const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
                 const downloadAnchor = document.createElement('a');
-                downloadAnchor.setAttribute("href", dataStr);
-                downloadAnchor.setAttribute("download", `myssh_nodes_${new Date().toISOString().slice(0, 10)}.json`);
+                downloadAnchor.href = url;
+                downloadAnchor.download = `myssh_nodes_${new Date().toISOString().slice(0, 10)}.json`;
                 document.body.appendChild(downloadAnchor);
                 downloadAnchor.click();
                 downloadAnchor.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
             } else {
                 showToast(i18n.t('alert_export_failed') || 'Export failed', 'error');
             }
@@ -764,7 +803,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) return handleAuthError(res);
             const logText = await res.text();
             if (logText) {
-                state.logs.content = logText;
+                state.logs.pending = logText;
                 render.logs(mode === 'incremental');
             }
             state.logs.lastFetchFull = false;
@@ -824,6 +863,16 @@ document.addEventListener('DOMContentLoaded', () => {
             bind('export-btn', 'click', handlers.exportNodes);
             bind('import-btn', 'click', () => el('import-file-input').click());
             bind('import-file-input', 'change', handlers.handleImport);
+            bind('node-filter', 'input', (e) => {
+                state.nodeFilter = e.target.value;
+                render.nodes();
+            });
+
+            // 恢复上次停留的面板（默认仪表盘）
+            const savedTab = localStorage.getItem('active_tab');
+            if (savedTab && savedTab !== 'dashboard') {
+                document.querySelector(`.nav-tab[data-panel="${savedTab}"]`)?.click();
+            }
 
             // 鉴权关闭时不强制登录弹层；开启时才要求本地存在有效 token。
             let authEnabled = true;

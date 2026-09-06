@@ -12,7 +12,8 @@ import (
 )
 
 // startWSEchoServer  info  WebSocket  info ， info  ws tunnel info bidirectional info 。
-func startWSEchoServer(t *testing.T) (addr string, stop func()) {
+// 接受 testing.TB 以便普通测试与基准测试共用。
+func startWSEchoServer(t testing.TB) (addr string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
