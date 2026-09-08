@@ -36,6 +36,7 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 	client, err := xhttptunnel.NewClient(xhttptunnel.ClientConfig{
 		ServerURL:   serverURL,
 		PSK:         psk,
+		StreamMode:  "auto",
 		SNI:         strings.TrimSpace(cfg.ServerName),
 		Host:        strings.TrimSpace(cfg.CustomHost),
 		ALPN:        normalizeXHTTPALPN(cfg.Alpn),
