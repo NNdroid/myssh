@@ -60,7 +60,8 @@ type ProxyConfig struct {
 	NoisePublicKey string `json:"noise_public_key"` //  info  Noise  info
 
 	// XHTTP tunnel (xhttp/xhttpc) config
-	XhttpChunkSizeKB int `json:"xhttp_chunk_size_kb"` // upstream request body in KB; default 256, range 16-900
+	XhttpChunkSizeKB int    `json:"xhttp_chunk_size_kb"` // upstream request body in KB; default 256, range 16-900
+	XhttpStreamMode  string `json:"xhttp_stream_mode"`   // downlink transport: ""/"auto" (default: streaming with polling fallback), "stream", "poll"
 
 	// Resume/2 空闲心跳间隔（毫秒）。0 表示使用默认 25000ms。
 	// 在 CDN/反代 idle 阈值之前主动发 KEEPALIVE 帧保活主流，避免空闲流被掐断。

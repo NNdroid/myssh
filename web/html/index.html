@@ -339,6 +339,14 @@
                             <label data-i18n="label_xhttp_chunk_size">XHTTP Chunk Size (KB)</label>
                             <input type="number" name="xhttpChunkSizeKB" class="form-control" value="256" min="0" max="900">
                         </div>
+                        <div class="form-group" data-visibility-key="xhttpSDKFields">
+                            <label data-i18n="label_xhttp_stream_mode">XHTTP Stream Mode</label>
+                            <select name="xhttpStreamMode" class="form-control">
+                                <option value="auto" data-i18n="opt_xhttp_stream_auto">Auto (stream + poll fallback)</option>
+                                <option value="stream" data-i18n="opt_xhttp_stream_force">Stream only</option>
+                                <option value="poll" data-i18n="opt_xhttp_stream_poll">Polling only</option>
+                            </select>
+                        </div>
                         <div class="form-group" data-visibility-key="alpn">
                             <label data-i18n="label_alpn">ALPN</label>
                             <select name="alpn" class="form-control">

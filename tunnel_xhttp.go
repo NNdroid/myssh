@@ -32,11 +32,17 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 			return nil, errors.New("proxy_auth_token is required when proxy_auth_required is true")
 		}
 	}
+	// 下行传输模式：空/auto（默认）由 SDK 自适应（流式优先、轮询回退），
+	// 也可强制 stream 或 poll。
+	streamMode, err := normalizeXHTTPStreamMode(cfg.XhttpStreamMode)
+	if err != nil {
+		return nil, err
+	}
 	serverURL := strings.TrimRight(endpoint, "/") + path
 	client, err := xhttptunnel.NewClient(xhttptunnel.ClientConfig{
 		ServerURL:   serverURL,
 		PSK:         psk,
-		StreamMode:  "auto",
+		StreamMode:  streamMode,
 		SNI:         strings.TrimSpace(cfg.ServerName),
 		Host:        strings.TrimSpace(cfg.CustomHost),
 		ALPN:        normalizeXHTTPALPN(cfg.Alpn),
@@ -55,6 +61,18 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 	}
 	zlog.Infof("%s [Tunnel] ✅ xhttptunnel SDK connected | endpoint=%s target=%s", TAG, serverURL, cfg.SshAddr)
 	return ownSDKConn(conn, client.Close), nil
+}
+
+// normalizeXHTTPStreamMode 归一化 xhttp_stream_mode 配置：
+// 空值返回 ""（SDK 端等同于 auto 自适应），非法值报错。
+func normalizeXHTTPStreamMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	switch mode {
+	case "", "auto", "stream", "poll":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("xhttp_stream_mode must be one of: auto, stream, poll (got %q)", value)
+	}
 }
 
 func init() {
