@@ -87,10 +87,12 @@ func (e TunnelEvent) severity() int {
 
 var tunnelEventMu sync.RWMutex
 
-// TunnelEventCallback 宿主事件回调。在 SDK 的派发 goroutine 中调用，
-// panic 由 SDK 恢复；实现必须快速返回，阻塞逻辑请自行异步化。
+// TunnelEventCallback 宿主事件回调（gomobile 绑定安全：全 string 参数）。
+// 在 SDK 的派发 goroutine 中调用，panic 由 SDK 恢复；实现必须快速返回，
+// 阻塞逻辑请自行异步化。Android 侧通过 myssh.Myssh.registerTunnelEventCallback
+// 注册，与本程序内部日志同源。
 type TunnelEventCallback interface {
-	OnTunnelEvent(event TunnelEvent)
+	OnTunnelEvent(tunnel string, kind string, session string, detail string)
 }
 
 // RegisterTunnelEventCallback 注册宿主隧道事件回调（可传 nil 注销）。
@@ -115,13 +117,28 @@ func emitTunnelEvent(e TunnelEvent) {
 		zlog.Info(msg)
 	}
 
-	// 2) 转发宿主回调（未注册则跳过）。
+	// 2) 转发宿主回调（未注册则跳过）。detail 由结构化字段组装，
+	//    宿主无需解析日志文本即可拿到全部信息。
 	tunnelEventMu.RLock()
 	cb := tunnelEventCb
 	tunnelEventMu.RUnlock()
 	if cb != nil {
-		cb.OnTunnelEvent(e)
+		detail := e.Detail
+		if e.Attempt > 0 {
+			detail = joinSpace(detail, fmt.Sprintf("(attempt %d)", e.Attempt))
+		}
+		if e.ErrText != "" {
+			detail = joinSpace(detail, "err="+e.ErrText)
+		}
+		cb.OnTunnelEvent(e.Source, string(e.Type), e.Session, detail)
 	}
+}
+
+func joinSpace(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + " " + b
 }
 
 // ---- 日志适配器 ----

@@ -20,8 +20,8 @@ func newCaptureCallback() *captureCallback {
 	return &captureCallback{events: make(chan TunnelEvent, 32)}
 }
 
-func (c *captureCallback) OnTunnelEvent(e TunnelEvent) {
-	c.events <- e
+func (c *captureCallback) OnTunnelEvent(tunnel, kind, session, detail string) {
+	c.events <- TunnelEvent{Source: tunnel, Type: TunnelEventType(kind), Session: session, Detail: detail}
 }
 
 // TestTunnelEventBridgeMapping 验证四个 SDK 的事件归一化映射：类型、来源、
@@ -69,6 +69,27 @@ func TestTunnelEventBridgeMapping(t *testing.T) {
 			t.Errorf("%s: got %s/%s, want %s/%s", tc.name, got.Source, got.Type, tc.wantSrc, tc.wantType)
 		}
 	}
+
+	// gomobile 绑定形态：回调收到的是全 string 参数，字段完整。
+	var gotTunnel, gotKind, gotSession, gotDetail string
+	RegisterTunnelEventCallback(&stringCapture{fn: func(tunnel, kind, session, detail string) {
+		gotTunnel, gotKind, gotSession, gotDetail = tunnel, kind, session, detail
+	}})
+	defer RegisterTunnelEventCallback(nil)
+	emitXhttpEvent(xhttptunnel.Reconnecting{SessionID: "s9", Nth: 3, Reason: "transport broke"})
+	if gotTunnel != "xhttp" || gotKind != string(TunnelEventReconnecting) || gotSession != "s9" ||
+		!strings.Contains(gotDetail, "(attempt 3)") || !strings.Contains(gotDetail, "transport broke") {
+		t.Errorf("callback args: tunnel=%q kind=%q session=%q detail=%q", gotTunnel, gotKind, gotSession, gotDetail)
+	}
+}
+
+// stringCapture 适配 string 形态的宿主回调（即 gomobile 绑定的签名）。
+type stringCapture struct {
+	fn func(tunnel, kind, session, detail string)
+}
+
+func (c *stringCapture) OnTunnelEvent(tunnel, kind, session, detail string) {
+	c.fn(tunnel, kind, session, detail)
 }
 
 // TestTunnelEventNilCallback 回调未注册时 emit 不得 panic。
