@@ -50,10 +50,12 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 		DialContext: sdkTCPDialer(cfg),
 		QUICDial:    sdkQUICDialer(cfg),
 		ChunkSizeKB: cfg.XhttpChunkSizeKB,
+		Logger:      sdkZap("xhttp"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create xhttptunnel client: %w", err)
 	}
+	client.SetEventHandler(emitXhttpEvent)
 	conn, err := client.DialContext(ctx, "tcp", cfg.SshAddr)
 	if err != nil {
 		_ = client.Close()
@@ -73,6 +75,37 @@ func normalizeXHTTPStreamMode(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("xhttp_stream_mode must be one of: auto, stream, poll (got %q)", value)
 	}
+}
+
+// emitXhttpEvent 将 xhttptunnel 的 typed 事件归一化后转发。
+func emitXhttpEvent(ev xhttptunnel.Event) {
+	e := TunnelEvent{Source: "xhttp"}
+	switch ev := ev.(type) {
+	case xhttptunnel.TunnelEstablished:
+		e.Type = TunnelEventEstablished
+		e.Session = ev.SessionID
+		e.Detail = fmt.Sprintf("%s://%s", ev.Network, ev.Target)
+	case xhttptunnel.TunnelDied:
+		e.Type = TunnelEventDied
+		e.Session = ev.SessionID
+		e.Detail = "reason=" + ev.Reason
+		e.ErrText = ev.Detail
+	case xhttptunnel.Reconnecting:
+		e.Type = TunnelEventReconnecting
+		e.Session = ev.SessionID
+		e.Attempt = ev.Nth
+		e.Detail = "previous round ended: " + ev.Reason
+	case xhttptunnel.TargetDenied:
+		e.Type = TunnelEventTargetDenied
+		e.Session = ev.SessionID
+		e.Detail = "target=" + ev.Target + " remote=" + ev.Remote
+	case xhttptunnel.AuthRejected:
+		e.Type = TunnelEventTargetDenied // 归并为策略拒绝类
+		e.Detail = "auth rejected by server"
+	default:
+		return
+	}
+	emitTunnelEvent(e)
 }
 
 func init() {

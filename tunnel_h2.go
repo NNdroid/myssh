@@ -49,7 +49,9 @@ func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transpor
 		Tuning: h2tunnel.ClientTuning{
 			HeartbeatInterval: heartbeat,
 		},
-		Dialer: sdkTCPDialer(cfg),
+		EventHandler: func(ev h2tunnel.ClientEvent) { emitH2Event(ev) },
+		Logger:       sdkSlog("h2tunnel"),
+		Dialer:       sdkTCPDialer(cfg),
 	}
 	if tlsEnabled {
 		options.TLSConfig = sdkTLSConfig(cfg)
@@ -76,6 +78,27 @@ func registerH2SDK(name string, transport h2tunnel.Transport, tlsEnabled bool) {
 		}
 		return dialH2SDK(ctx, cfg, transport, tlsEnabled)
 	})
+}
+
+// emitH2Event 将 h2tunnel 事件归一化后转发。
+func emitH2Event(ev h2tunnel.ClientEvent) {
+	e := TunnelEvent{Source: "h2", Detail: ev.Reason, Attempt: ev.Attempt}
+	if ev.Err != nil {
+		e.ErrText = ev.Err.Error()
+	}
+	switch ev.Kind {
+	case h2tunnel.EventTunnelEstablished:
+		e.Type = TunnelEventEstablished
+	case h2tunnel.EventTunnelDied:
+		e.Type = TunnelEventDied
+	case h2tunnel.EventReconnecting:
+		e.Type = TunnelEventReconnecting
+	case h2tunnel.EventTargetDenied:
+		e.Type = TunnelEventTargetDenied
+	default:
+		return
+	}
+	emitTunnelEvent(e)
 }
 
 func init() {

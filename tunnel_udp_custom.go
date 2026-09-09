@@ -50,7 +50,7 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		Sockets:    cfg.UdpCustomSockets,
 		Paths:      paths,
 		SendWindow: cfg.UdpCustomSendWindow,
-		Logger:     udpclient.Nop,
+		Logger:     sdkUDPLogger("udp_custom"),
 		ListenUDP: func(network string, laddr *net.UDPAddr) (*net.UDPConn, error) {
 			pc, err := rangeListenConfig(cfg).ListenPacket(ctx, network, laddr.String())
 			if err != nil {
@@ -75,6 +75,7 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create udp_custom client: %w", err)
 	}
+	client.SetEventHandler(emitUDPCEvent)
 	target := "tcp://" + strings.TrimSpace(cfg.SshAddr)
 	conn, err := client.DialTunnel(ctx, udpclient.DialOptions{Target: target})
 	if err != nil {
@@ -83,6 +84,27 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	}
 	zlog.Infof("%s [Tunnel] ✅ udp_custom SDK connected | server=%s target=%s", TAG, serverAddr, target)
 	return ownSDKConn(conn, func() error { client.Close(); return nil }), nil
+}
+
+// emitUDPCEvent 将 udp_custom 事件归一化后转发。
+func emitUDPCEvent(ev udpclient.ClientEvent) {
+	e := TunnelEvent{Source: "udp_custom", Detail: ev.Detail, Attempt: ev.Attempt}
+	if ev.Session != 0 {
+		e.Session = fmt.Sprintf("%d", ev.Session)
+	}
+	switch ev.Kind {
+	case udpclient.TunnelEstablished:
+		e.Type = TunnelEventEstablished
+	case udpclient.TunnelDied:
+		e.Type = TunnelEventDied
+	case udpclient.Reconnecting:
+		e.Type = TunnelEventReconnecting
+	case udpclient.HandshakeRetrying:
+		e.Type = TunnelEventHandshakeRetrying
+	default:
+		return
+	}
+	emitTunnelEvent(e)
 }
 
 func init() {
