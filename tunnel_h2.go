@@ -49,7 +49,7 @@ func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transpor
 		Tuning: h2tunnel.ClientTuning{
 			HeartbeatInterval: heartbeat,
 		},
-		EventHandler: func(ev h2tunnel.ClientEvent) { emitH2Event(ev) },
+		EventHandler: emitH2Event,
 		Logger:       sdkSlog("h2tunnel"),
 		Dialer:       sdkTCPDialer(cfg),
 	}

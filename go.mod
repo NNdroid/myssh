@@ -4,9 +4,9 @@ go 1.26.1
 
 require (
 	github.com/NNdroid/dns_custom v0.0.0-20260909065814-be9dafc09281
-	github.com/NNdroid/h2tunnel v1.0.20260425-0.20260909065838-2d5593b5c454
-	github.com/NNdroid/udp_custom v0.0.0-20260909070355-2238eff385ac
-	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260909080152-bdb0b9b5a716
+	github.com/NNdroid/h2tunnel v1.0.20260425-0.20260910100509-7485c0467e6a
+	github.com/NNdroid/udp_custom v0.0.0-20260910113410-fa05f40b4216
+	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260910095144-ba12184cdc69
 	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
