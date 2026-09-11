@@ -390,12 +390,28 @@ document.addEventListener('DOMContentLoaded', () => {
             el('modal-title').textContent = node ? i18n.t('title_edit_node') : i18n.t('title_add_node');
 
             if (node) {
-                for (const key in node) {
+                let nodeType = node.tunnelType || '';
+                // 旧类型名映射到统一类型并推导 TLS 开关初值（旧配置无该字段）
+                const legacyMap = { ws: ['websocket', false], wss: ['websocket', true], grpcc: ['grpc', false], grpc: ['grpc', true], xhttpc: ['xhttp', false], xhttp: ['xhttp', true] };
+                let legacyTLS = null;
+                if (legacyMap[nodeType]) {
+                    legacyTLS = legacyMap[nodeType][1];
+                    nodeType = legacyMap[nodeType][0];
+                }
+                const mapped = Object.assign({}, node, { tunnelType: nodeType });
+                for (const key in mapped) {
                     const input = form.elements[key];
                     if (input) {
-                        if (input.type === 'checkbox') input.checked = !!node[key];
-                        else input.value = node[key] ?? '';
+                        if (input.type === 'checkbox') input.checked = !!mapped[key];
+                        else input.value = mapped[key] ?? '';
                     }
+                }
+                // TLS 开关：显式字段优先，旧配置按历史语义；新增节点默认开启
+                const tlsToggle = el('tunnelTLSEnabled');
+                if (tlsToggle) {
+                    if (node.tunnelTLSEnabled != null) tlsToggle.checked = !!node.tunnelTLSEnabled;
+                    else if (legacyTLS !== null) tlsToggle.checked = legacyTLS;
+                    else tlsToggle.checked = true;
                 }
             }
             modal.updateVisibility();
@@ -420,13 +436,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const isKcp = tunnelType === 'kcp';
             const isUdpCustom = tunnelType === 'udp_custom';
             const isIcmpCustom = tunnelType === 'icmp_custom';
-            const isXhttp = tunnelType === 'xhttp' || tunnelType === 'xhttpc';
-            const isH2SDK = ['h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'masque'].includes(tunnelType);
-            const isWss = ['ws', 'wss'].includes(tunnelType);
-            const isTls = ['tls', 'wss', 'h2', 'quic', 'xhttp', 'grpc', 'h3', 'wt', 'masque'].includes(tunnelType);
-            const isCustomPathSupported = ['ws', 'wss', 'h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'xhttp', 'xhttpc'].includes(tunnelType);
-            
+            const isXhttp = tunnelType === 'xhttp';
+            const isGrpc = tunnelType === 'grpc';
+            const isH2SDK = ['h2', 'h2c', 'grpc', 'h3', 'wt', 'masque'].includes(tunnelType);
+            const isWebsocket = tunnelType === 'websocket';
+            // 合并型隧道（websocket/grpc/xhttp）的 TLS 由开关决定；
+            // 其余类型要么固定 TLS（h2/quic/...），要么无 TLS。
+            const tlsCapable = isWebsocket || isGrpc || isXhttp;
+            const tlsOn = tlsCapable && el('tunnelTLSEnabled')?.checked;
+            const isWss = isWebsocket; // websocket 家族的代理认证都是 user/pass 形态
+            const isCustomPathSupported = ['ws', 'wss', 'websocket', 'h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'xhttp', 'xhttpc'].includes(tunnelType);
+
             setVis('[data-visibility-key="proxyAddr"]', !isBase && !isDns);
+            setVis('[data-visibility-key="tunnelTLS"]', tlsCapable);
             setVis('[data-visibility-key="kcpFields"]', isKcp);
             setVis('[data-visibility-key="udpCustomFields"]', isUdpCustom);
             setVis('[data-visibility-key="icmpCustomFields"]', isIcmpCustom);
@@ -434,23 +456,23 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="xhttpSDKFields"]', isXhttp);
             setVis('[data-visibility-key="h2SDKFields"]', isH2SDK);
             setVis('[data-visibility-key="customHost"]', !isBase && !isDns && !isKcp && !isUdpCustom && !isIcmpCustom && tunnelType !== 'tls' && tunnelType !== 'quic');
-            setVis('[data-visibility-key="serverName"]', isTls);
+            setVis('[data-visibility-key="serverName"]', ['tls', 'h2', 'quic', 'h3', 'wt', 'masque'].includes(tunnelType) || tlsOn);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 
             const showCustomPath = isCustomPathSupported;
             setVis('[data-visibility-key="customPath"]', showCustomPath);
 
             const proxyAuth = el('proxyAuthRequired').checked;
-            const supportsProxyAuth = ['h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'masque', 'xhttp', 'xhttpc', 'ws', 'wss', 'http'].includes(tunnelType);
+            const supportsProxyAuth = ['h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'masque', 'xhttp', 'xhttpc', 'ws', 'wss', 'websocket', 'http'].includes(tunnelType);
             setVis('[data-visibility-key="proxyAuthToken"]', proxyAuth && supportsProxyAuth && !isWss && !isHttp);
             setVis('[data-visibility-key="proxyAuthUserPass"]', proxyAuth && supportsProxyAuth && (isWss || isHttp));
 
             setVis('[data-visibility-key="dnsOverrideFields"]', el('dnsOverride').checked);
             setVis('[data-visibility-key="routingOverrideFields"]', el('routingOverride').checked);
-            
+
             setVis('[data-visibility-key="serverFingerprint"]', el('verifyFingerprint').checked);
-            
-            const supportsCertFingerprint = ['tls', 'wss', 'h2', 'quic', 'grpc', 'h3', 'wt', 'masque', 'xhttp'].includes(tunnelType);
+
+            const supportsCertFingerprint = ['tls', 'h2', 'quic', 'h3', 'wt', 'masque'].includes(tunnelType) || tlsOn;
             setVis('[data-visibility-key="verifyCertFingerprint"]', supportsCertFingerprint);
             setVis('[data-visibility-key="serverCertFingerprint"]', supportsCertFingerprint && el('verifyCertFingerprint').checked);
 
@@ -852,7 +874,7 @@ document.addEventListener('DOMContentLoaded', () => {
             el('node-modal')?.addEventListener('click', (e) => { if(e.target === el('node-modal')) modal.close(); });
             
             el('node-form')?.addEventListener('change', (e) => {
-                if (e.target.matches('#authType, #tunnelType, #proxyAuthRequired, #dnsOverride, #routingOverride, #verifyFingerprint, #verifyCertFingerprint')) {
+                if (e.target.matches('#authType, #tunnelType, #tunnelTLSEnabled, #proxyAuthRequired, #dnsOverride, #routingOverride, #verifyFingerprint, #verifyCertFingerprint')) {
                     modal.updateVisibility();
                 }
             });

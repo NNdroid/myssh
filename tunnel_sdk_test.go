@@ -88,3 +88,41 @@ func TestSDKConfigValidationBeforeDial(t *testing.T) {
 		t.Fatal("icmp_custom accepted missing PSK")
 	}
 }
+
+// TestResolveTunnelTLS 验证合并型隧道的 TLS 开关语义：
+// 显式设置优先；旧配置（nil）沿用类型的历史 TLS 语义。
+func TestResolveTunnelTLS(t *testing.T) {
+	on, off := true, false
+
+	// grpc 历史上是 TLS：nil → true
+	if !resolveTunnelTLS(ProxyConfig{TunnelType: "grpc"}, true) {
+		t.Fatal("legacy grpc must default to TLS on")
+	}
+	if resolveTunnelTLS(ProxyConfig{TunnelType: "grpc", TunnelTLSEnabled: &off}, true) {
+		t.Fatal("explicit off must win over legacy default")
+	}
+	// websocket 是新类型：nil → false
+	if resolveTunnelTLS(ProxyConfig{TunnelType: "websocket"}, false) {
+		t.Fatal("websocket must default to cleartext")
+	}
+	if !resolveTunnelTLS(ProxyConfig{TunnelType: "websocket", TunnelTLSEnabled: &on}, false) {
+		t.Fatal("explicit on must enable TLS")
+	}
+}
+
+// TestWebsocketRegistration 新统一类型的网络声明。
+func TestWebsocketRegistration(t *testing.T) {
+	proto, err := GetTunnel("websocket")
+	if err != nil {
+		t.Fatalf("GetTunnel(websocket): %v", err)
+	}
+	if proto.Network != "tcp" || proto.Handler == nil {
+		t.Fatalf("websocket: network=%q handler=%v", proto.Network, proto.Handler)
+	}
+	// 旧类型别名仍然可解析
+	for _, name := range []string{"ws", "wss"} {
+		if _, err := GetTunnel(name); err != nil {
+			t.Fatalf("legacy alias %q missing: %v", name, err)
+		}
+	}
+}

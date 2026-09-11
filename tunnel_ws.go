@@ -137,6 +137,11 @@ func init() {
 		return &wsStream{conn: wsConn}, nil
 	}
 
+	// websocket 是合并型注册：TLS 由配置开关决定（未设置时新类型默认明文）。
+	// ws/wss 作为旧类型别名保留，行为与历史版本完全一致，旧配置无需迁移。
+	RegisterTunnel("websocket", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		return wsHandler(ctx, cfg, baseConn, resolveTunnelTLS(cfg, false))
+	})
 	RegisterTunnel("ws", "tcp", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 		return wsHandler(ctx, cfg, baseConn, false)
 	})

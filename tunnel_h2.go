@@ -101,9 +101,22 @@ func emitH2Event(ev h2tunnel.ClientEvent) {
 	emitTunnelEvent(e)
 }
 
+// registerH2SDKToggle 注册 TLS 可由配置开关决定的 h2tunnel 隧道（grpc）。
+// legacyDefault：旧配置未携带开关字段时的语义——grpc 历史上即 TLS 版本。
+func registerH2SDKToggle(name string, transport h2tunnel.Transport, legacyDefault bool) {
+	RegisterTunnel(name, "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+		if baseConn != nil {
+			_ = baseConn.Close()
+		}
+		return dialH2SDK(ctx, cfg, transport, resolveTunnelTLS(cfg, legacyDefault))
+	})
+}
+
 func init() {
 	registerH2SDK("h2c", h2tunnel.TransportH2C, false)
 	registerH2SDK("h2", h2tunnel.TransportH2, true)
+	// grpcc 是固定明文的旧类型别名；grpc 变为统一名（开关决定 TLS，
+	// 旧配置未携带开关字段时沿用历史 TLS 语义）。
 	registerH2SDK("grpcc", h2tunnel.TransportGRPC, false)
-	registerH2SDK("grpc", h2tunnel.TransportGRPC, true)
+	registerH2SDKToggle("grpc", h2tunnel.TransportGRPC, true)
 }

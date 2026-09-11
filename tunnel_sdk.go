@@ -27,6 +27,17 @@ func ownSDKConn(conn net.Conn, closeFn func() error) net.Conn {
 	return &sdkOwnedConn{Conn: conn, closeFn: closeFn}
 }
 
+// resolveTunnelTLS 计算合并型隧道（websocket/grpc/xhttp）的 TLS 开关：
+// 配置显式设置时优先；旧配置没有该字段（nil）时沿用类型的历史语义——
+// grpc/xhttp 历史上即 TLS 版本（legacyDefault=true），websocket 是新名
+// （legacyDefault=false）。固定 TLS 的类型不经过此函数。
+func resolveTunnelTLS(cfg ProxyConfig, legacyDefault bool) bool {
+	if cfg.TunnelTLSEnabled != nil {
+		return *cfg.TunnelTLSEnabled
+	}
+	return legacyDefault
+}
+
 func (c *sdkOwnedConn) Close() error {
 	connErr := c.Conn.Close()
 	var ownerErr error
