@@ -2,8 +2,6 @@ package myssh
 
 import (
 	"context"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -12,23 +10,11 @@ import (
 	icmpclient "github.com/NNdroid/icmp_custom/tunnel"
 )
 
-// parseICMPMagicSDK 解析记录魔数；空值返回 0，由 SDK 取 MagicDefault。
-// 接受 8 位 hex 或 0x/0X 前缀的 1-8 位十六进制。刻意不接受 ASCII 词：
-// 魔数在密文外明文传输，"UDPC" 这类可打印字符串会成为中间设备的静态
-// 匹配指纹。
+// parseICMPMagicSDK 解析记录魔数；规则与 udp_custom 的差异见
+// parseMagicSDK 的文档：icmp 不接受 4 字节原文（ASCII 指纹风险），
+// 空值返回 0 由 SDK 取 MagicDefault。
 func parseICMPMagicSDK(value string) (uint32, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0, nil
-	}
-	if strings.HasPrefix(strings.ToLower(value), "0x") {
-		return parseHexMagic(value[2:])
-	}
-	raw, err := hex.DecodeString(value)
-	if err != nil || len(raw) != 4 {
-		return 0, errors.New("icmp_custom_magic must be 8 hex characters (or 0x-prefixed hex)")
-	}
-	return binary.BigEndian.Uint32(raw), nil
+	return parseMagicSDK(value, false, "icmp_custom")
 }
 
 func dialICMPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {

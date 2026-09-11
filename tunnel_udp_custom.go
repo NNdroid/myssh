@@ -3,6 +3,7 @@ package myssh
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -13,22 +14,50 @@ import (
 )
 
 func parseUDPCMagicSDK(value string) (uint32, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	v, err := parseMagicSDK(value, true, "udp_custom")
+	if err != nil {
+		return 0, err
+	}
+	if v == 0 {
+		// 空输入（或显式 0x00000000）由 SDK 解析为默认魔数。
 		return udpclient.UDPC_MAGIC_DEFAULT, nil
 	}
-	// 0x/0X 前缀：按十六进制数值解析（1-8 位），如 0x55445043 等价于 "UDPC"。
+	return v, nil
+}
+
+// parseMagicSDK 两种自定义隧道的统一魔数解析核心：
+//   - 空值 → 0（默认魔数的语义由调用方/SDK 决定）；
+//   - 0x/0X 前缀 → 1-8 位十六进制，左补零；
+//   - allowRaw（udp_custom）：恰好 4 字节原文，如 "UDPC" —— HTTP Custom
+//     生态的传统，服务器侧真实存在可打印魔数；
+//   - !allowRaw（icmp_custom）：必须 8 位 hex。ASCII 词被刻意拒绝——魔数
+//     在 Echo 载荷里明文传输，可打印串会成为中间设备的静态匹配指纹，
+//     且 icmp_custom 没有使用可打印魔数的存量服务器，拒绝零兼容成本。
+//
+// what 用于错误信息中的字段名（udp_custom_magic / icmp_custom_magic）。
+func parseMagicSDK(value string, allowRaw bool, what string) (uint32, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
 	if strings.HasPrefix(strings.ToLower(value), "0x") {
 		return parseHexMagic(value[2:])
 	}
-	if len(value) != 4 {
-		return 0, errors.New("udp_custom_magic must contain exactly 4 bytes (or 0x-prefixed hex)")
+	if allowRaw {
+		if len(value) != 4 {
+			return 0, fmt.Errorf("%s_magic must contain exactly 4 bytes (or 0x-prefixed hex)", what)
+		}
+		return binary.BigEndian.Uint32([]byte(value)), nil
 	}
-	return binary.BigEndian.Uint32([]byte(value)), nil
+	raw, err := hex.DecodeString(value)
+	if err != nil || len(raw) != 4 {
+		return 0, fmt.Errorf("%s_magic must be 8 hex characters (or 0x-prefixed hex)", what)
+	}
+	return binary.BigEndian.Uint32(raw), nil
 }
 
 // parseHexMagic 解析 1-8 位十六进制数字为 uint32（大端语义，不足左补零）。
-// 两个 magic 解析器共用；输入不含 0x 前缀。
+// 输入不含 0x 前缀。
 func parseHexMagic(digits string) (uint32, error) {
 	if digits == "" {
 		return 0, errors.New("magic is empty after 0x prefix")
