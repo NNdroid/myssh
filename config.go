@@ -16,11 +16,10 @@ type ProxyConfig struct {
 	VerifySSHFingerprint bool   `json:"verify_ssh_finger_print"`
 	ServerSSHFingerprint string `json:"server_ssh_finger_print"`
 	TunnelType           string `json:"tunnel_type"`
-	// TunnelTLSEnabled 是合并型隧道（websocket/grpc/xhttp）的 TLS 开关。
-	// nil = 旧配置未携带该字段，沿用类型的历史语义（grpc/xhttp → TLS，
-	// websocket → 明文）；显式 true/false 完全由开关决定。固定 TLS 的
-	// 类型（h2/quic/wt/masque 等）忽略它。
-	TunnelTLSEnabled             *bool  `json:"tunnel_tls_enabled"`
+	// TunnelTLSEnabled 是合并型隧道（raw/websocket/h2/grpc/xhttp）的 TLS
+	// 开关；固定 TLS 的类型（h3/quic/wt/masque 等）与无 TLS 概念的类型
+	// （kcp/udp_custom/...）忽略它。
+	TunnelTLSEnabled             bool   `json:"tunnel_tls_enabled"`
 	ProxyAddr                    string `json:"proxy_addr"`
 	ProxyAuthRequired            bool   `json:"proxy_auth_required"`
 	ProxyAuthToken               string `json:"proxy_auth_token"`

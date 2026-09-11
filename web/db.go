@@ -37,7 +37,7 @@ type Profile struct {
 	PrivateKey            string `json:"privateKey"`
 	KeyPass               string `json:"keyPass"`
 	TunnelType            string `json:"tunnelType"`
-	TunnelTLSEnabled      *bool  `json:"tunnelTLSEnabled"` // nil = 旧配置未设置（合并型隧道沿用历史 TLS 语义）
+	TunnelTLSEnabled      bool   `json:"tunnelTLSEnabled"`
 	ProxyAddr             string `json:"proxyAddr"`
 	CustomHost            string `json:"customHost"`
 	ServerName            string `json:"serverName"`
@@ -238,7 +238,7 @@ func GetProfiles() ([]Profile, error) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpNoDelay, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPsk, &p.UdpCustomMagic, &p.UdpCustomPublicKey, &p.UdpCustomPaths, &p.UdpCustomSockets, &p.UdpCustomSendWindow, &p.DnsTunnelPublicKey, &p.DnsTunnelEDNS0, &p.XhttpChunkSizeKB, &p.XhttpStreamMode, &p.HeartbeatIntervalMs, &p.IcmpCustomPsk, &p.IcmpCustomMagic, &p.IcmpCustomPublicKey, &p.IcmpCustomFamily, &p.IcmpCustomMtuMode, &p.IcmpCustomMaxPayload, &p.IcmpCustomPaceMS, &p.IcmpCustomIdRange, &tlsNull); err != nil {
 			return nil, err
 		}
-		p.TunnelTLSEnabled = nullableBoolPtr(tlsNull)
+		p.TunnelTLSEnabled = tlsNull.Bool
 		profiles = append(profiles, p)
 	}
 	return profiles, nil
@@ -255,16 +255,8 @@ func GetProfile(id string) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.TunnelTLSEnabled = nullableBoolPtr(tlsNull)
+	p.TunnelTLSEnabled = tlsNull.Bool
 	return &p, nil
-}
-
-func nullableBoolPtr(v sql.NullBool) *bool {
-	if !v.Valid {
-		return nil
-	}
-	b := v.Bool
-	return &b
 }
 
 func AddProfile(p Profile) (string, error) {

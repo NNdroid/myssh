@@ -221,16 +221,14 @@
                         <div class="form-group">
                             <label data-i18n="label_tunnel_type">Tunnel Type</label>
                             <select name="tunnelType" id="tunnelType" class="form-control">
-                                <option value="base" data-i18n="opt_base_ssh">Base SSH</option>
-                                <option value="tls" data-i18n="opt_tls">TLS</option>
+                                <option value="raw" data-i18n="opt_raw">Raw (TLS optional)</option>
                                 <option value="websocket" data-i18n="opt_websocket">WebSocket (TLS optional)</option>
                                 <option value="http" data-i18n="opt_http">HTTP Payload</option>
-                                <option value="h2c" data-i18n="opt_h2c">HTTP/2 Cleartext</option>
-                                <option value="h2" data-i18n="opt_h2">HTTP/2 TLS</option>
+                                <option value="h2" data-i18n="opt_h2">HTTP/2 (TLS optional)</option>
                                 <option value="quic" data-i18n="opt_quic">QUIC</option>
                                 <option value="grpc" data-i18n="opt_grpc">gRPC (TLS optional)</option>
                                 <option value="masque" data-i18n="opt_masque">MASQUE (HTTP/3)</option>
-                                <option value="wt" data-i18n="opt_wt">WebTransport</option>
+                                <option value="webtransport" data-i18n="opt_webtransport">WebTransport</option>
                                 <option value="xhttp" data-i18n="opt_xhttp">XHTTP (TLS optional)</option>
                                 <option value="dns_custom" data-i18n="opt_dns_tunnel">DNS Tunnel (SSH-over-DNS)</option>
                                 <option value="kcp" data-i18n="opt_kcp">KCP (SSH over UDP)</option>

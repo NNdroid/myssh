@@ -50,7 +50,7 @@ func TestWebSocketEchoRoundTrip(t *testing.T) {
 		SshAddr:    "127.0.0.1:22",
 		ServerName: "proxy.test",
 	}
-	proto, err := GetTunnel("ws")
+	proto, err := GetTunnel("websocket")
 	if err != nil {
 		t.Fatalf("GetTunnel(ws): %v", err)
 	}
@@ -110,7 +110,7 @@ func TestWebSocketAuthFailure(t *testing.T) {
 		ProxyAuthUser:     "u",
 		ProxyAuthPass:     "p",
 	}
-	proto, err := GetTunnel("ws")
+	proto, err := GetTunnel("websocket")
 	if err != nil {
 		t.Fatalf("GetTunnel(ws): %v", err)
 	}
@@ -130,18 +130,16 @@ func TestWebSocketAuthFailure(t *testing.T) {
 	}
 }
 
-// TestWebSocketRegistration  info  ws/wss  info  init  info 。
+// TestWebSocketRegistration  info  websocket  info  init  info 。
 func TestWebSocketRegistration(t *testing.T) {
-	for _, name := range []string{"ws", "wss"} {
-		proto, err := GetTunnel(name)
-		if err != nil {
-			t.Fatalf("GetTunnel(%q): %v", name, err)
-		}
-		if proto.Network != "tcp" {
-			t.Errorf("GetTunnel(%q).Network = %q, want tcp", name, proto.Network)
-		}
-		if proto.Handler == nil {
-			t.Errorf("GetTunnel(%q).Handler is nil", name)
-		}
+	proto, err := GetTunnel("websocket")
+	if err != nil {
+		t.Fatalf("GetTunnel(websocket): %v", err)
+	}
+	if proto.Network != "tcp" {
+		t.Errorf("GetTunnel(websocket).Network = %q, want tcp", proto.Network)
+	}
+	if proto.Handler == nil {
+		t.Error("GetTunnel(websocket).Handler is nil")
 	}
 }
