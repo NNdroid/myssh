@@ -33,3 +33,7 @@ func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
 	zlog.Debugf("[Protect] STUB: Compiled for Linux platform, Socket protection is disabled.")
 	return dialer
 }
+
+// icmpProtectFD is a no-op on desktop Linux: raw-socket capabilities are
+// governed by CAP_NET_RAW, and there is no VpnService to exempt from.
+func icmpProtectFD() func(fd int) error { return nil }

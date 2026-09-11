@@ -126,3 +126,21 @@ func bindDevice(dialer *net.Dialer, ifaceName string) {
 		zlog.Warnf("%s [Tunnel] ⚠️ Android does not support SO_BINDTODEVICE without root. Ignoring bind request to: %s", TAG, ifaceName)
 	}
 }
+
+// icmpProtectFD 返回 ICMP 载体 socket 的 VpnService 豁免回调：
+// 每个 ICMP socket 创建后、首包发出前调用，否则 Echo 流量会被自己的
+// VPN 捕获形成回环。
+func icmpProtectFD() func(fd int) error {
+	return func(fd int) error {
+		protector := getProtector()
+		if protector == nil {
+			// 与拨号路径一致：Protector 未注册时放行并留痕（存在回环风险）。
+			zlog.Warnf("[Protect-ICMP] ⚠️ SocketProtector not registered; ICMP socket fd=%d left unprotected", fd)
+			return nil
+		}
+		if !protector.ProtectSocket(int32(fd)) {
+			return fmt.Errorf("failed to protect icmp socket fd: %d", fd)
+		}
+		return nil
+	}
+}

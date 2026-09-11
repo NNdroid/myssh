@@ -48,3 +48,7 @@ func wrapAndroidProtect(dialer *net.Dialer) *net.Dialer {
 	zlog.Debugf("[Protect] STUB: Compiled for Windows platform, Socket protection is disabled.")
 	return dialer
 }
+
+// icmpProtectFD is a no-op outside Android: the ICMP carrier rejects
+// unsupported platforms before any socket is created.
+func icmpProtectFD() func(fd int) error { return nil }

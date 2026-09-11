@@ -6,7 +6,7 @@ import (
 )
 
 func TestSDKTunnelRegistrationsOwnDialing(t *testing.T) {
-	for _, name := range []string{"xhttp", "xhttpc", "h2", "h2c", "h3", "wt", "masque", "grpc", "grpcc", "udp_custom", "dns_custom"} {
+	for _, name := range []string{"xhttp", "xhttpc", "h2", "h2c", "h3", "wt", "masque", "grpc", "grpcc", "udp_custom", "dns_custom", "icmp_custom"} {
 		proto, err := GetTunnel(name)
 		if err != nil {
 			t.Fatalf("GetTunnel(%q): %v", name, err)
@@ -80,5 +80,11 @@ func TestSDKConfigValidationBeforeDial(t *testing.T) {
 	}
 	if _, err := dialXHTTPSDK(t.Context(), ProxyConfig{TunnelType: "xhttp", ProxyAddr: "http://127.0.0.1:1", SshAddr: "127.0.0.1:22"}, true); err == nil {
 		t.Fatal("xhttp accepted an http endpoint for TLS mode")
+	}
+	if _, err := dialICMPCustomSDK(t.Context(), ProxyConfig{SshAddr: "127.0.0.1:22"}); err == nil {
+		t.Fatal("icmp_custom accepted missing server address")
+	}
+	if _, err := dialICMPCustomSDK(t.Context(), ProxyConfig{ProxyAddr: "203.0.113.7", SshAddr: "127.0.0.1:22"}); err == nil {
+		t.Fatal("icmp_custom accepted missing PSK")
 	}
 }

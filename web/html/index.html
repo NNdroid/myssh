@@ -238,6 +238,7 @@
                                 <option value="dns_custom" data-i18n="opt_dns_tunnel">DNS Tunnel (SSH-over-DNS)</option>
                                 <option value="kcp" data-i18n="opt_kcp">KCP (SSH over UDP)</option>
                                 <option value="udp_custom" data-i18n="opt_udp_custom">UDP Custom (HTTP Custom Compatible)</option>
+                                <option value="icmp_custom" data-i18n="opt_icmp_custom">ICMP Custom (SSH-over-ICMP)</option>
                             </select>
                         </div>
                         <div class="form-group" data-visibility-key="proxyAddr">
@@ -303,6 +304,48 @@
                         <div class="form-group" data-visibility-key="udpCustomFields">
                             <label data-i18n="label_udp_custom_send_window">Send Window</label>
                             <input type="number" name="udpCustomSendWindow" class="form-control" value="256" min="0">
+                        </div>
+
+                        <!-- ICMP Custom Fields -->
+                        <div class="form-group" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_psk">ICMP Custom PSK (Pre-shared Key)</label>
+                            <input type="password" name="icmpCustomPsk" class="form-control" data-i18n-placeholder="ph_udp_custom_psk">
+                        </div>
+                        <div class="form-group" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_magic">Record Magic (8 hex chars, empty = default)</label>
+                            <input type="text" name="icmpCustomMagic" class="form-control" data-i18n-placeholder="ph_icmp_custom_magic">
+                        </div>
+                        <div class="form-group grid-full" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_public_key">Server Noise Public Key (hex/base64)</label>
+                            <input type="text" name="icmpCustomPublicKey" class="form-control" data-i18n-placeholder="ph_udp_custom_public_key">
+                        </div>
+                        <div class="form-group" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_family">Address Family</label>
+                            <select name="icmpCustomFamily" class="form-control">
+                                <option value="auto" selected>auto</option>
+                                <option value="ipv4">ipv4</option>
+                                <option value="ipv6">ipv6</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_mtu_mode">MTU Mode</label>
+                            <select name="icmpCustomMtuMode" class="form-control">
+                                <option value="probe" selected>probe</option>
+                                <option value="auto">auto</option>
+                                <option value="fixed">fixed</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_max_payload">Max Payload (bytes)</label>
+                            <input type="number" name="icmpCustomMaxPayload" class="form-control" min="0">
+                        </div>
+                        <div class="form-group" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_pace_ms">Packet Pace (ms)</label>
+                            <input type="number" name="icmpCustomPaceMS" class="form-control" min="0">
+                        </div>
+                        <div class="form-group grid-full" data-visibility-key="icmpCustomFields">
+                            <label data-i18n="label_icmp_custom_id_range">Echo Identifier Range (e.g. 1000-1999)</label>
+                            <input type="text" name="icmpCustomIdRange" class="form-control">
                         </div>
 
                         <!-- DNS Tunnel (SSH-over-DNS) Fields -->

@@ -56,6 +56,16 @@ type ProxyConfig struct {
 	UdpCustomSockets    int    `json:"udp_custom_sockets"`     // local UDP sockets; 0 => 1
 	UdpCustomSendWindow int    `json:"udp_custom_send_window"` // in-flight frames; 0 => SDK default 256
 
+	// ICMP Custom tunnel (SSH-over-ICMP) config
+	IcmpCustomPsk        string `json:"icmp_custom_psk"`         // ICMP Custom PSK (mandatory)
+	IcmpCustomMagic      string `json:"icmp_custom_magic"`       // 4-byte record magic as 8 hex chars; empty = SDK MagicDefault
+	IcmpCustomPublicKey  string `json:"icmp_custom_public_key"`  // server Noise static key (hex 64 / base64); empty = PSK-only
+	IcmpCustomFamily     string `json:"icmp_custom_family"`      // ""/auto (default), ipv4, ipv6
+	IcmpCustomMtuMode    string `json:"icmp_custom_mtu_mode"`    // ""/probe (default), auto, fixed
+	IcmpCustomMaxPayload int    `json:"icmp_custom_max_payload"` // complete-record ceiling; 0 = SDK default
+	IcmpCustomPaceMS     int    `json:"icmp_custom_pace_ms"`     // outbound packet spacing; 0 = SDK default
+	IcmpCustomIdRange    string `json:"icmp_custom_id_range"`    // echo identifier pool, e.g. "1000-1999"
+
 	//  info  Noise  info
 	NoisePublicKey string `json:"noise_public_key"` //  info  Noise  info
 

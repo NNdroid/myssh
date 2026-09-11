@@ -419,6 +419,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const isDns = tunnelType === 'dns_custom' || tunnelType === 'dns' || tunnelType === 'vaydns';
             const isKcp = tunnelType === 'kcp';
             const isUdpCustom = tunnelType === 'udp_custom';
+            const isIcmpCustom = tunnelType === 'icmp_custom';
             const isXhttp = tunnelType === 'xhttp' || tunnelType === 'xhttpc';
             const isH2SDK = ['h2', 'h2c', 'grpc', 'grpcc', 'h3', 'wt', 'masque'].includes(tunnelType);
             const isWss = ['ws', 'wss'].includes(tunnelType);
@@ -428,10 +429,11 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="proxyAddr"]', !isBase && !isDns);
             setVis('[data-visibility-key="kcpFields"]', isKcp);
             setVis('[data-visibility-key="udpCustomFields"]', isUdpCustom);
+            setVis('[data-visibility-key="icmpCustomFields"]', isIcmpCustom);
             setVis('[data-visibility-key="dnsTunnelFields"]', isDns);
             setVis('[data-visibility-key="xhttpSDKFields"]', isXhttp);
             setVis('[data-visibility-key="h2SDKFields"]', isH2SDK);
-            setVis('[data-visibility-key="customHost"]', !isBase && !isDns && !isKcp && !isUdpCustom && tunnelType !== 'tls' && tunnelType !== 'quic');
+            setVis('[data-visibility-key="customHost"]', !isBase && !isDns && !isKcp && !isUdpCustom && !isIcmpCustom && tunnelType !== 'tls' && tunnelType !== 'quic');
             setVis('[data-visibility-key="serverName"]', isTls);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
 
@@ -581,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(form);
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
-            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'xhttpChunkSizeKB', 'heartbeatIntervalMs']) {
+            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'xhttpChunkSizeKB', 'heartbeatIntervalMs', 'icmpCustomMaxPayload', 'icmpCustomPaceMS']) {
                 nodeData[key] = Number.parseInt(nodeData[key] || '0', 10) || 0;
             }
             
@@ -603,11 +605,21 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             if (!validateAddr(nodeData.sshAddr, 'error_ssh_addr_required', false)) return;
-            if (nodeData.tunnelType !== 'base' && nodeData.tunnelType !== 'dns_custom') {
+            if (nodeData.tunnelType === 'icmp_custom') {
+                // ICMP 无端口概念：目标只是对端主机。
+                if (!nodeData.proxyAddr) {
+                    showToast(i18n.t('error_proxy_addr_required'), 'error');
+                    return;
+                }
+            } else if (nodeData.tunnelType !== 'base' && nodeData.tunnelType !== 'dns_custom') {
                 if (!validateAddr(nodeData.proxyAddr, 'error_proxy_addr_required', nodeData.tunnelType === 'udp_custom')) return;
             }
             if (nodeData.tunnelType === 'udp_custom' && !nodeData.udpCustomPsk) {
                 showToast(i18n.t('error_psk_required'), 'error');
+                return;
+            }
+            if (nodeData.tunnelType === 'icmp_custom' && !nodeData.icmpCustomPsk) {
+                showToast(i18n.t('error_icmp_psk_required'), 'error');
                 return;
             }
 
