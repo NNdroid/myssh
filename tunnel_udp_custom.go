@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	udpclient "github.com/NNdroid/udp_custom/tunnel"
@@ -16,10 +17,30 @@ func parseUDPCMagicSDK(value string) (uint32, error) {
 	if value == "" {
 		return udpclient.UDPC_MAGIC_DEFAULT, nil
 	}
+	// 0x/0X 前缀：按十六进制数值解析（1-8 位），如 0x55445043 等价于 "UDPC"。
+	if strings.HasPrefix(strings.ToLower(value), "0x") {
+		return parseHexMagic(value[2:])
+	}
 	if len(value) != 4 {
-		return 0, errors.New("udp_custom_magic must contain exactly 4 bytes")
+		return 0, errors.New("udp_custom_magic must contain exactly 4 bytes (or 0x-prefixed hex)")
 	}
 	return binary.BigEndian.Uint32([]byte(value)), nil
+}
+
+// parseHexMagic 解析 1-8 位十六进制数字为 uint32（大端语义，不足左补零）。
+// 两个 magic 解析器共用；输入不含 0x 前缀。
+func parseHexMagic(digits string) (uint32, error) {
+	if digits == "" {
+		return 0, errors.New("magic is empty after 0x prefix")
+	}
+	if len(digits) > 8 {
+		return 0, fmt.Errorf("magic hex digits too long: %q (want 1-8 hex digits)", digits)
+	}
+	v, err := strconv.ParseUint(digits, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid magic hex digits %q: %w", digits, err)
+	}
+	return uint32(v), nil
 }
 
 func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
