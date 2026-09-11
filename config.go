@@ -45,12 +45,18 @@ type ProxyConfig struct {
 	DnsTunnelPublicKey string   `json:"dns_tunnel_public_key"` // Noise  info
 	DnsTunnelEDNS0     bool     `json:"dns_tunnel_edns0"`      // announce 1232-byte DNS answers; server must match
 
-	// KCP tunnel（SSH-over-KCP） info config
-	KcpPassword     string `json:"kcp_password"`      // KCP  info  ( info  BlockCrypt  info )
-	KcpCrypt        string `json:"kcp_crypt"`         // KCP  info : none(default)/aes/aes-128/chacha20/salsa20/sm4
-	KcpNoDelay      bool   `json:"kcp_nodelay"`       //  info enable info mode (nodelay=1, interval=10ms, resend=2, nc=1)
-	KcpDataShards   int    `json:"kcp_data_shards"`   // FEC  info  (default 10)
-	KcpParityShards int    `json:"kcp_parity_shards"` // FEC  info  (default 3)
+	// KCP (kcptun protocol) tunnel config
+	KcpPassword     string `json:"kcp_password"`      // kcptun key
+	KcpCrypt        string `json:"kcp_crypt"`         // kcptun crypt: null/none/aes-128/aes-192/aes/aes-128-gcm/sm4/tea/xtea/salsa20/blowfish/twofish/cast5/3des/xor
+	KcpMode         string `json:"kcp_mode"`          // ""/normal/fast(default)/fast2/fast3
+	KcpDataShards   int    `json:"kcp_data_shards"`   // FEC data shards (default 10)
+	KcpParityShards int    `json:"kcp_parity_shards"` // FEC parity shards (default 3)
+	KcpSndWnd       int    `json:"kcp_sndwnd"`        // send window (default 128)
+	KcpRcvWnd       int    `json:"kcp_rcvwnd"`        // receive window (default 512)
+	KcpMtu          int    `json:"kcp_mtu"`           // MTU (default 1350)
+	KcpNoComp       bool   `json:"kcp_nocomp"`        // disable session-level Snappy
+	KcpSmuxVer      int    `json:"kcp_smuxver"`       // SMUX version 1/2 (default 2)
+	KcpKeepAlive    int    `json:"kcp_keepalive"`     // seconds (default 10)
 
 	// UDP Custom  info config
 	UdpCustomPsk        string `json:"udp_custom_psk"`         // UDP Custom  info  (PSK)

@@ -596,7 +596,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(form);
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
-            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'xhttpChunkSizeKB', 'heartbeatIntervalMs', 'icmpCustomMaxPayload', 'icmpCustomPaceMS']) {
+            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'xhttpChunkSizeKB', 'heartbeatIntervalMs', 'icmpCustomMaxPayload', 'icmpCustomPaceMS', 'kcpDataShards', 'kcpParityShards', 'kcpSndWnd', 'kcpRcvWnd', 'kcpMtu', 'kcpSmuxVer', 'kcpKeepAlive']) {
                 nodeData[key] = Number.parseInt(nodeData[key] || '0', 10) || 0;
             }
             

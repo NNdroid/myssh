@@ -87,6 +87,26 @@ func TestSDKConfigValidationBeforeDial(t *testing.T) {
 	if _, err := dialICMPCustomSDK(t.Context(), ProxyConfig{ProxyAddr: "203.0.113.7", SshAddr: "127.0.0.1:22"}); err == nil {
 		t.Fatal("icmp_custom accepted missing PSK")
 	}
+	if _, err := dialKcptunSDK(t.Context(), ProxyConfig{SshAddr: "127.0.0.1:22"}, nil); err == nil {
+		t.Fatal("kcptun accepted missing server address")
+	}
+	if _, err := dialKcptunSDK(t.Context(), ProxyConfig{ProxyAddr: "203.0.113.7", SshAddr: "127.0.0.1:22"}, nil); err == nil {
+		t.Fatal("kcptun accepted missing PSK")
+	}
+	if _, err := dialKcptunSDK(t.Context(), ProxyConfig{ProxyAddr: "203.0.113.7", SshAddr: "127.0.0.1:22", KcpPassword: "k"}, &net.UDPConn{}); err == nil {
+		t.Fatal("kcptun accepted a non-UDP carrier unexpectedly")
+	}
+}
+
+// TestKcptunRegistration kcptun 跑在 UDP 载体上（区别于 SDK 自拨的 custom 类）。
+func TestKcptunRegistration(t *testing.T) {
+	proto, err := GetTunnel("kcptun")
+	if err != nil {
+		t.Fatalf("GetTunnel(kcptun): %v", err)
+	}
+	if proto.Network != "udp" || proto.Handler == nil {
+		t.Fatalf("kcptun: network=%q handler=%v", proto.Network, proto.Handler)
+	}
 }
 
 // TestResolveTunnelTLS 已随旧配置兼容性一起移除：TLS 开关现在是普通

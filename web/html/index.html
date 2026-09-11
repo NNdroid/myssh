@@ -274,12 +274,44 @@
                                 <option value="xor">xor</option>
                             </select>
                         </div>
+                        <div class="form-group" data-visibility-key="kcpFields">
+                            <label data-i18n="label_kcp_mode">KCP Mode</label>
+                            <select name="kcpMode" class="form-control">
+                                <option value="normal">normal</option>
+                                <option value="fast" selected>fast</option>
+                                <option value="fast2">fast2</option>
+                                <option value="fast3">fast3</option>
+                            </select>
+                        </div>
                         <div class="checkbox-group grid-full" data-visibility-key="kcpFields">
                             <label class="checkbox-label">
-                                <input type="checkbox" name="kcpNoDelay" id="kcpNoDelay" checked>
+                                <input type="checkbox" name="kcpNoComp" id="kcpNoComp">
                                 <span class="checkbox-custom"></span>
-                                <span data-i18n="label_kcp_nodelay">Enable KCP Turbo Mode (NoDelay)</span>
+                                <span data-i18n="label_kcp_nocomp">Disable Snappy Compression (nocomp)</span>
                             </label>
+                        </div>
+                        <div class="form-group" data-visibility-key="kcpFields">
+                            <label data-i18n="label_kcp_sndwnd">Send Window</label>
+                            <input type="number" name="kcpSndWnd" class="form-control" value="128" min="1">
+                        </div>
+                        <div class="form-group" data-visibility-key="kcpFields">
+                            <label data-i18n="label_kcp_rcvwnd">Receive Window</label>
+                            <input type="number" name="kcpRcvWnd" class="form-control" value="512" min="1">
+                        </div>
+                        <div class="form-group" data-visibility-key="kcpFields">
+                            <label data-i18n="label_kcp_mtu">MTU</label>
+                            <input type="number" name="kcpMtu" class="form-control" value="1350" min="100">
+                        </div>
+                        <div class="form-group" data-visibility-key="kcpFields">
+                            <label data-i18n="label_kcp_smuxver">SMUX Version</label>
+                            <select name="kcpSmuxVer" class="form-control">
+                                <option value="1">v1</option>
+                                <option value="2" selected>v2</option>
+                            </select>
+                        </div>
+                        <div class="form-group" data-visibility-key="kcpFields">
+                            <label data-i18n="label_kcp_keepalive">Keep-Alive (seconds)</label>
+                            <input type="number" name="kcpKeepAlive" class="form-control" value="10" min="1">
                         </div>
 
                         <!-- UDP Custom Fields -->
