@@ -4,8 +4,8 @@ github.com/NNdroid/dns_custom v0.0.0-20260910133924-077d845e08af h1:76bQE3X7+xVM
 github.com/NNdroid/dns_custom v0.0.0-20260910133924-077d845e08af/go.mod h1:0jScqXP1or9CIH4J9hbNZkLRiZQW4aAC78Bma5dGvi8=
 github.com/NNdroid/h2tunnel v1.0.20260425-0.20260910130217-af9b96b980e8 h1:6r160HCXunXLGwv37gMQ//gMemhbA25o6K3uzMvslow=
 github.com/NNdroid/h2tunnel v1.0.20260425-0.20260910130217-af9b96b980e8/go.mod h1:k5/6Kv4TQSNsMyBdasz4AVHGuVaTsvAZyIG/coc9+A4=
-github.com/NNdroid/icmp_custom v0.0.0-20260911074301-c71084375ee5 h1:gIj0yjOo4qi2g67+kmVqyhDu8zgIrfJgspLVe8S5gv8=
-github.com/NNdroid/icmp_custom v0.0.0-20260911074301-c71084375ee5/go.mod h1:xdgneWkf61J8HvtbvPagW68JMm/hXgutL9MSLAFIduk=
+github.com/NNdroid/icmp_custom v0.0.0-20260911113051-dcd965e901b7 h1:YeMzCPkM4u/+Lm8t0QMlfZPYeTA3eBriL/qokNCYpDc=
+github.com/NNdroid/icmp_custom v0.0.0-20260911113051-dcd965e901b7/go.mod h1:xdgneWkf61J8HvtbvPagW68JMm/hXgutL9MSLAFIduk=
 github.com/NNdroid/udp_custom v0.0.0-20260910131847-eda73b0015c1 h1:Ie2oJbI/VFe52db8G5fNmg5ZnRk/M22OShQw4BUAA4Q=
 github.com/NNdroid/udp_custom v0.0.0-20260910131847-eda73b0015c1/go.mod h1:bFtnFXZXHYcmiR/tahEOisQCWTI6Z9J8ebTezJ90vxc=
 github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260910130438-a1fe91c9cc2c h1:jQXMFxM77V2yjO3Qzsw2OY3hr5SMPYOUc7B7LiGKmAw=
