@@ -40,6 +40,7 @@ func dialKcptunSDK(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net
 	if psk == "" {
 		return nil, errors.New("kcp_password is required")
 	}
+	warnWeakPSK("kcptun", psk)
 
 	// kcptun 兼容密钥派生：PBKDF2-HMAC-SHA1, salt "kcp-go", 4096 轮, 32 字节。
 	pass := pbkdf2.Key([]byte(psk), []byte("kcp-go"), 4096, 32, sha1.New)
@@ -67,7 +68,6 @@ func dialKcptunSDK(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net
 	if params, ok := kcptun.PredefinedModes[strings.ToLower(strings.TrimSpace(cfg.KcpMode))]; ok {
 		noDelay, interval, resend, noCongestion = params.NoDelay, params.Interval, params.Resend, params.NoCongestion
 	}
-	sess.SetNoDelay(noDelay, interval, resend, noCongestion)
 	snd, rcv := cfg.KcpSndWnd, cfg.KcpRcvWnd
 	if snd <= 0 {
 		snd = 128
@@ -75,12 +75,19 @@ func dialKcptunSDK(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net
 	if rcv <= 0 {
 		rcv = 512
 	}
+	sess.SetNoDelay(noDelay, interval, resend, noCongestion)
 	sess.SetWindowSize(snd, rcv)
 	mtu := cfg.KcpMtu
 	if mtu <= 0 {
 		mtu = 1350
 	}
-	sess.SetMtu(mtu)
+	// SetMtu 返回 bool（非法值报 false）——必须 fail-fast：非法 MTU 会让
+	// 会话带着错误参数运行，表现为难以排查的丢包而非明确拨号失败。
+	if !sess.SetMtu(mtu) {
+		sess.Close()
+		baseConn.Close()
+		return nil, fmt.Errorf("tune kcp session: invalid mtu %d", mtu)
+	}
 	sess.SetACKNoDelay(true)
 
 	// 会话层：Snappy 压缩（NoComp 关闭时启用）→ SMUX（v1/v2）。

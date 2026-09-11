@@ -5,13 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
 	"myssh"
 
+	"go.uber.org/zap"
 	_ "modernc.org/sqlite"
 )
 
@@ -130,6 +133,10 @@ func InitDB(dbPath string) error {
 	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
+	}
+	// 数据库包含明文凭据：收紧文件权限（0600）；Windows 忽略失败。
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ Failed to tighten db file permissions: %v", err)
 	}
 
 	_, err = db.Exec(`
@@ -318,12 +325,67 @@ func GetSettings() (*Settings, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.DirectSiteTags = strings.Split(directSiteTags, ",")
-	s.DirectIPTags = strings.Split(directIPTags, ",")
+	s.DirectSiteTags = filterEmptyTags(strings.Split(directSiteTags, ","))
+	s.DirectIPTags = filterEmptyTags(strings.Split(directIPTags, ","))
 	return &s, nil
 }
 
+// filterEmptyTags 过滤 CSV 拆分产生的空元素（空串/纯空白），避免把空 tag
+// 送进路由匹配。
+func filterEmptyTags(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// checkHostPort 校验 "host:port" 形态的地址配置：空值放行（运行时用默认），
+// 非空则必须带合法端口（1-65535）。
+func checkHostPort(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return fmt.Errorf("%s must be host:port (got %q)", field, value)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("%s has an invalid port %q", field, port)
+	}
+	return nil
+}
+
+// validateSettings 在落库前校验设置项的格式与枚举值——错误配置推迟到
+// 启动代理时才报错的话，排查成本会高得多。
+func validateSettings(s *Settings) error {
+	for field, value := range map[string]string{
+		"local_addr":        s.LocalAddr,
+		"dns_addr":          s.DnsAddr,
+		"local_dns_server":  s.LocalDnsServer,
+		"remote_dns_server": s.RemoteDnsServer,
+		"udpgw_addr":        s.UdpgwAddr,
+	} {
+		if err := checkHostPort(field, value); err != nil {
+			return err
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(s.UdpgwVersion)) {
+	case "", "badvpn", "tun2proxy":
+	default:
+		return fmt.Errorf("udpgw_version must be badvpn or tun2proxy (got %q)", s.UdpgwVersion)
+	}
+	return nil
+}
+
 func UpdateSettings(s Settings) error {
+	if err := validateSettings(&s); err != nil {
+		return err
+	}
 	dbMu.Lock()
 	defer dbMu.Unlock()
 

@@ -29,6 +29,7 @@ func dialICMPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	if psk == "" {
 		return nil, errors.New("icmp_custom_psk is required by icmp_custom protocol v2")
 	}
+	warnWeakPSK("icmp_custom", psk)
 	magic, err := parseICMPMagicSDK(cfg.IcmpCustomMagic)
 	if err != nil {
 		return nil, err

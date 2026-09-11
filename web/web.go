@@ -161,6 +161,16 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 	router := gin.New()
 	router.Use(gin.Recovery())
 
+	// 安全响应头：CSP 收紧到同源（index.html 无内联脚本/样式，script.js 的
+	// 动态样式全部走 CSSOM，不受 style-src 限制），防点击劫持与 MIME 嗅探。
+	router.Use(func(c *gin.Context) {
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Next()
+	})
+
 	// Parse the HTML template
 	tmpl, err := template.ParseFS(webFS, "html/index.html")
 	if err != nil {
@@ -195,8 +205,9 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 		}
 		zap.L().Sugar().Infof("%s [WebServer] 🔒 JWT Authentication is ENABLED for the web panel.", TAG)
 
-		// 开放的登录接口 (发放 JWT)
-		router.POST("/api/v1/login", rateLimitMiddleware(), func(c *gin.Context) {
+		// 开放的登录接口 (发放 JWT)。独立限流：5 次/分钟，爆破成本远高于
+		// 全局的 10 req/s。
+		router.POST("/api/v1/login", rateLimitMiddleware(5, time.Minute), func(c *gin.Context) {
 			var req struct {
 				Username string `json:"username"`
 				Password string `json:"password"`
@@ -245,7 +256,7 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 
 	// Protect all API routes
 	apiV1 := authorized.Group("/api/v1")
-	apiV1.Use(rateLimitMiddleware())
+	apiV1.Use(rateLimitMiddleware(10, time.Second))
 	{
 		// --- Dashboard Stats ---
 		apiV1.GET("/dashboard-stats", func(c *gin.Context) {
@@ -442,6 +453,22 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 				proxyRunning = true
 				proxyRunningNode = req.NodeID
 				c.JSON(http.StatusOK, gin.H{"message": "Proxy started"})
+
+				// TOFU pin 回写：未开启指纹校验且尚未 pin 的 profile，在首次
+				// 连接成功后把 sshd 的实际主机指纹记下来——后续连接由
+				// checkSSHHostKey 强制比对，主机密钥变更会被拒绝。
+				go func() {
+					prof, err := GetProfile(req.NodeID)
+					if err != nil || prof.VerifyFingerprint || strings.TrimSpace(prof.ServerFingerprint) != "" {
+						return
+					}
+					if fp, fpErr := myssh.GetSSHFingerprint(prof.SshAddr); fpErr == nil && fp != "" {
+						prof.ServerFingerprint = fp
+						if err := UpdateProfile(req.NodeID, *prof); err == nil {
+							zap.L().Sugar().Infof("%s [WebServer] 🔒 TOFU: pinned SSH host key fingerprint for node %s — enable 'Verify SSH Fingerprint' to enforce it", TAG, req.NodeID)
+						}
+					}
+				}()
 			} else {
 				proxyRunning = false
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start proxy"})
@@ -571,7 +598,9 @@ const (
 	rateLimiterSweepSize = 1024
 )
 
-func rateLimitMiddleware() gin.HandlerFunc {
+// rateLimitMiddleware 按客户端 IP 做令牌桶限流：maxTokens 为桶容量（突发
+// 上限），period 为补充周期（每 period 补满 maxTokens 个令牌）。
+func rateLimitMiddleware(maxTokens float64, period time.Duration) gin.HandlerFunc {
 	limiters := make(map[string]*rateLimiter)
 	var mu sync.Mutex
 
@@ -580,7 +609,7 @@ func rateLimitMiddleware() gin.HandlerFunc {
 		ip := c.ClientIP()
 		limiter, exists := limiters[ip]
 		if !exists {
-			limiter = newRateLimiter(10, time.Second)
+			limiter = newRateLimiter(maxTokens, period)
 			limiters[ip] = limiter
 		}
 		// 周期性淘汰长时间未活跃的 IP，防止 map 无限增长。

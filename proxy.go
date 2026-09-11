@@ -665,6 +665,59 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	}
 }
 
+// checkSSHHostKey 实现 SSH 主机密钥校验的三档语义：
+//
+//  1. VerifySSHFingerprint=true：指纹必须与配置一致（MD5 或 SHA256）；
+//  2. VerifySSHFingerprint=false 但已记录过指纹（TOFU pin 非空）：指纹必须
+//     与首连时一致，防止已知主机被静默替换——这是默认开启的中间人防线；
+//  3. 首连（pin 为空）：放行并告警，宿主应在连接成功后回写指纹完成 pin。
+//     重置信任 = 清空配置中的指纹字段。
+func checkSSHHostKey(cfg ProxyConfig, key ssh.PublicKey) error {
+	fpSHA256 := ssh.FingerprintSHA256(key)
+	fpMD5 := ssh.FingerprintLegacyMD5(key)
+
+	if cfg.VerifySSHFingerprint {
+		if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
+			return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)
+		}
+		return nil
+	}
+
+	pinned := strings.TrimSpace(cfg.ServerSSHFingerprint)
+	if pinned == "" {
+		zlog.Warnf("%s [SSH-Handshake] ⚠️ Host key verification is DISABLED — accepted %s on first sight (TOFU). Pin this fingerprint via the profile's fingerprint field to detect MITM.", TAG, fpSHA256)
+		return nil
+	}
+	if !(fpMD5 == pinned || fpSHA256 == pinned) {
+		return fmt.Errorf("host key CHANGED since first connection (pinned %s, got [%s,%s]) — possible MITM; if the server was rebuilt, clear the stored fingerprint to re-trust", pinned, fpMD5, fpSHA256)
+	}
+	return nil
+}
+
+// isPermanentConfigError 判定拨号错误是否为配置类永久错误（类型不存在、
+// 必填字段缺失、参数非法）——这类错误重连永远不会成功，AutoSSH 应终止
+// 而不是无限循环重试刷日志。
+func isPermanentConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"unsupported tunnel type",
+		" is required",
+		"must be ",
+		"must contain ",
+		"requires a ",
+		"not valid for",
+		"invalid ",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // startSshTProxy  info  AutoSSH mode info ： info  DNS  info 、SOCKS5  info ，
 //
 //	info  SSH tunnel info 。 info  0  info Started successfully， info  0  info 。
@@ -743,6 +796,17 @@ func startSshTProxy(configJson string) int {
 				zlog.Errorf("%s [AutoSSH] ❌ Connection failed: %v", TAG, err)
 				emitState(StateReconnecting, err.Error())
 				emitNodeEvent(cfg.SshAddr, NodeEventFailed, err.Error())
+				// 配置类永久错误（类型不存在/必填缺失/参数非法）重连永远不会
+				// 成功：报错误并终止重连循环，而不是每 3 秒刷一次失败。
+				if isPermanentConfigError(err) {
+					zlog.Errorf("%s [AutoSSH] 🛑 Permanent configuration error, giving up reconnects", TAG)
+					emitError(-2, "permanent config error: "+err.Error())
+					emitState(StateError, err.Error())
+					mu.Lock()
+					sshClient = nil
+					mu.Unlock()
+					return
+				}
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -872,12 +936,7 @@ func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (
 			zlog.Debugf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
 			zlog.Debugf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
 			zlog.Debugf("%s [SSH-Handshake] ===========================", TAG)
-			if cfg.VerifySSHFingerprint {
-				if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
-					return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)
-				}
-			}
-			return nil
+			return checkSSHHostKey(cfg, key)
 		}
 	}
 

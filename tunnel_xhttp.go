@@ -25,6 +25,9 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 	if cfg.XhttpChunkSizeKB < 0 {
 		return nil, errors.New("xhttp_chunk_size_kb must be non-negative")
 	}
+	if cfg.XhttpChunkSizeKB > 900 {
+		return nil, errors.New("xhttp_chunk_size_kb must be <= 900")
+	}
 	psk := ""
 	if cfg.ProxyAuthRequired {
 		psk = strings.TrimSpace(cfg.ProxyAuthToken)

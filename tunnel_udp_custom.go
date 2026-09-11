@@ -84,22 +84,31 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	if psk == "" {
 		return nil, errors.New("udp_custom_psk is required by udp_custom protocol v2")
 	}
+	warnWeakPSK("udp_custom", psk)
 	magic, err := parseUDPCMagicSDK(cfg.UdpCustomMagic)
 	if err != nil {
 		return nil, err
 	}
 
 	paths := cfg.UdpCustomPaths
-	if paths == 0 {
+	if paths <= 0 {
 		paths = 32
+	}
+	sockets := cfg.UdpCustomSockets
+	if sockets <= 0 {
+		sockets = 1
+	}
+	sendWindow := cfg.UdpCustomSendWindow
+	if sendWindow <= 0 {
+		sendWindow = 256
 	}
 	clientCfg := udpclient.ClientConfig{
 		ServerAddr: serverAddr,
 		Passwords:  []string{psk},
 		Magic:      magic,
-		Sockets:    cfg.UdpCustomSockets,
+		Sockets:    sockets,
 		Paths:      paths,
-		SendWindow: cfg.UdpCustomSendWindow,
+		SendWindow: sendWindow,
 		Logger:     sdkUDPLogger("udp_custom"),
 		ListenUDP: func(network string, laddr *net.UDPAddr) (*net.UDPConn, error) {
 			pc, err := rangeListenConfig(cfg).ListenPacket(ctx, network, laddr.String())

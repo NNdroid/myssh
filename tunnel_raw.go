@@ -36,6 +36,9 @@ func init() {
 			baseConn.Close()
 			return nil, err
 		}
+		if !cfg.VerifyCertificateFingerprint {
+			zlog.Warnf("%s [Tunnel] ⚠️ Certificate verification is DISABLED (no fingerprint pinned) — the TLS server's identity is not checked; pin a fingerprint to detect MITM", TAG)
+		}
 		zlog.Infof("%s [Tunnel] 2. Preparing TLS (utls SNI Proxy) handshake, Spoofed SNI: %s, ALPN: %v", TAG, cfg.ServerName, alpn)
 
 		utlsConfig := buildUTLSConfig(cfg, alpn)

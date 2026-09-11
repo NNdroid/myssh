@@ -102,11 +102,23 @@ func sdkQUICDialer(cfg ProxyConfig) func(context.Context, string, *tls.Config, *
 	}
 }
 
+// sdkTLSConfig 构造 SDK 侧 TLS 配置：证书校验完全依赖指纹锁定
+// （InsecureSkipVerify 恒为 true，由 VerifyPeerCertificate 里的指纹比对兜底）。
 func sdkTLSConfig(cfg ProxyConfig) *tls.Config {
 	return &tls.Config{
 		ServerName:            strings.TrimSpace(cfg.ServerName),
 		InsecureSkipVerify:    true,
 		VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
+	}
+}
+
+// warnWeakPSK 弱预共享密钥告警：UDP/ICMP 载体的 PSK 可被在线爆破
+// （icmp_custom 的文档明确点名），16 字符以下的高熵不足在保存/拨号时
+// 就应当被看见。只告警不拒绝——避免破坏已部署的短密钥。
+func warnWeakPSK(source, psk string) {
+	trimmed := strings.TrimSpace(psk)
+	if trimmed != "" && len(trimmed) < 16 {
+		zlog.Warnf("%s [Tunnel] ⚠️ %s PSK is only %d characters — short PSKs are brute-forceable online; use a high-entropy secret (16+ chars)", TAG, source, len(trimmed))
 	}
 }
 

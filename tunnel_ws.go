@@ -132,6 +132,9 @@ func init() {
 			zlog.Errorf("%s [Tunnel] ❌ WebSocket handshake failed: %v", TAG, err)
 			return nil, err
 		}
+		if isWSS && !cfg.VerifyCertificateFingerprint {
+			zlog.Warnf("%s [Tunnel] ⚠️ Certificate verification is DISABLED (no fingerprint pinned) — the TLS server's identity is not checked; pin a fingerprint to detect MITM", TAG)
+		}
 
 		zlog.Infof("%s [Tunnel] ✅ WebSocket handshake successful (Status: %d), Negotiated protocol: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
 		return &wsStream{conn: wsConn}, nil

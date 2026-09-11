@@ -704,6 +704,10 @@ document.addEventListener('DOMContentLoaded', () => {
         exportNodes: async () => {
             const res = await api.get('/nodes');
             if (Array.isArray(res)) {
+                // 导出包含明文密码/私钥/PSK——先让用户明确确认
+                if (!(await asyncConfirm(i18n.t('alert_export_credentials') || 'The export contains all credentials in PLAINTEXT. Continue?'))) {
+                    return;
+                }
                 // Blob URL 不受 data URI 的浏览器长度限制，大配置导出更可靠
                 const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
