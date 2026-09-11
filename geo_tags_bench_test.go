@@ -68,9 +68,12 @@ func BenchmarkGeoTagScan(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tags, err := extractGeoFileTags(path)
+				tags, truncated, err := extractGeoFileTags(path)
 				if err != nil {
 					b.Fatal(err)
+				}
+				if truncated {
+					b.Fatal("synthetic file must not be flagged truncated")
 				}
 				if len(tags) != tc.numTags {
 					b.Fatalf("tags = %d, want %d", len(tags), tc.numTags)

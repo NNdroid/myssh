@@ -50,9 +50,12 @@ func TestExtractGeoFileTags(t *testing.T) {
 	want := []string{"apple@cn", "cn", "geolocation-!cn", "private", "telegram"}
 	path := buildTestGeoFile(t, []string{"cn", "geolocation-!cn", "private", "apple@cn", "cn", "telegram"})
 
-	got, err := extractGeoFileTags(path)
+	got, truncated, err := extractGeoFileTags(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("well-formed file must not be flagged truncated")
 	}
 	if len(got) != len(want) {
 		t.Fatalf("tags = %v, want %v", got, want)
@@ -61,6 +64,34 @@ func TestExtractGeoFileTags(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("tags = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestExtractGeoFileTagsTruncated 验证下载不完整（文件在 record 中间被截断）
+// 的文件：返回已解析的部分 tag 且 truncated=true，提示宿主重新下载。
+func TestExtractGeoFileTagsTruncated(t *testing.T) {
+	path := buildTestGeoFile(t, []string{"cn", "private", "telegram"})
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) < 20 {
+		t.Fatalf("test file too small: %d", len(full))
+	}
+	// 从尾部截掉一大块，制造"最后一条 entry 不完整"的文件
+	if err := os.WriteFile(path, full[:len(full)-12], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, truncated, err := extractGeoFileTags(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("truncated file must set the truncated flag")
+	}
+	if len(got) == 0 {
+		t.Fatal("expected partial tags before the truncation point")
 	}
 }
 
