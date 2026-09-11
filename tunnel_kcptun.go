@@ -12,7 +12,7 @@ import (
 	"github.com/xtaci/smux"
 	"golang.org/x/crypto/pbkdf2"
 
-	kcptun "github.com/dumbybumby/kcptun-archive/std"
+	kcptun "myssh/pkg/kcptun"
 )
 
 // kcptun 隧道：兼容 kcptun 协议（原 Go kcptun / kcptun-rs）的客户端实现。

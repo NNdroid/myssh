@@ -34,4 +34,4 @@ go.work.sum
 bin/
 libs/
 .workbuddy/
-.codebuddy/kcptun-archive-main.zip
+.codebuddy/

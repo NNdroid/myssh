@@ -5,13 +5,13 @@ go 1.26.1
 require (
 	github.com/NNdroid/dns_custom v0.0.0-20260910133924-077d845e08af
 	github.com/NNdroid/h2tunnel v1.0.20260425-0.20260910130217-af9b96b980e8
-	github.com/NNdroid/icmp_custom v0.0.0-20260911034037-c002f59d85b8
+	github.com/NNdroid/icmp_custom v0.0.0-20260911074301-c71084375ee5
 	github.com/NNdroid/udp_custom v0.0.0-20260910131847-eda73b0015c1
 	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260910130438-a1fe91c9cc2c
 	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396
-	github.com/dumbybumby/kcptun-archive v0.0.0-20260410202025-1d256a464cf9
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/golang/snappy v1.0.0
 	github.com/lxzan/gws v1.10.1
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.60.0
@@ -36,7 +36,6 @@ require (
 	github.com/bytedance/sonic v1.15.2 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
-	github.com/coreos/go-iptables v0.8.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -47,8 +46,6 @@ require (
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
-	github.com/golang/snappy v1.0.0 // indirect
-	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
@@ -71,8 +68,6 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/txthinking/runnergroup v0.0.0-20250224021307-5864ffeb65ae // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
-	github.com/xtaci/qpp v1.1.25 // indirect
-	github.com/xtaci/tcpraw v1.2.32 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.28.0 // indirect
