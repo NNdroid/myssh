@@ -15,6 +15,10 @@ func NewDNSTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	if strings.TrimSpace(cfg.SshAddr) == "" {
 		return nil, errors.New("ssh_addr is required")
 	}
+	psk := strings.TrimSpace(cfg.DnsTunnelPsk)
+	if psk != "" {
+		warnWeakPSK("dns_custom", psk)
+	}
 	client, err := dnstunnel.NewClient(dnstunnel.ClientConfig{
 		Domain:       strings.TrimSpace(cfg.DnsTunnelDomain),
 		Servers:      cfg.DnsTunnelServers,
@@ -22,6 +26,8 @@ func NewDNSTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		PublicKey:    strings.TrimSpace(cfg.DnsTunnelPublicKey),
 		Target:       "tcp://" + strings.TrimSpace(cfg.SshAddr),
 		EDNS0:        cfg.DnsTunnelEDNS0,
+		PSK:          psk,
+		Marker:       strings.TrimSpace(cfg.DnsTunnelMarker),
 		Logger:       sdkSugared("dns_custom"),
 		EventHandler: emitDNSEvent,
 		Dialer:       newProtectedDialer(cfg, 4*time.Second),

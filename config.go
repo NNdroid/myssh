@@ -44,6 +44,8 @@ type ProxyConfig struct {
 	DnsTunnelType      string   `json:"dns_tunnel_type"`       //  info ：txt(default)/null/cname/a
 	DnsTunnelPublicKey string   `json:"dns_tunnel_public_key"` // Noise  info
 	DnsTunnelEDNS0     bool     `json:"dns_tunnel_edns0"`      // announce 1232-byte DNS answers; server must match
+	DnsTunnelPsk       string   `json:"dns_tunnel_psk"`        // PSK auth secret for dns servers configured with psks; empty = anonymous
+	DnsTunnelMarker    string   `json:"dns_tunnel_marker"`     // custom tunnel marker label; both ends must agree; empty = default
 
 	// KCP (kcptun protocol) tunnel config
 	KcpPassword     string `json:"kcp_password"`      // kcptun key

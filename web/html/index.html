@@ -404,6 +404,14 @@
                             <label data-i18n="label_dns_tunnel_public_key">Server Noise Public Key</label>
                             <input type="text" name="dnsTunnelPublicKey" class="form-control" data-i18n-placeholder="ph_dns_tunnel_public_key">
                         </div>
+                        <div class="form-group" data-visibility-key="dnsTunnelFields">
+                            <label data-i18n="label_dns_tunnel_psk">DNS Tunnel PSK (auth)</label>
+                            <input type="password" name="dnsTunnelPsk" class="form-control" data-i18n-placeholder="ph_dns_tunnel_psk">
+                        </div>
+                        <div class="form-group" data-visibility-key="dnsTunnelFields">
+                            <label data-i18n="label_dns_tunnel_marker">Tunnel Marker (custom label)</label>
+                            <input type="text" name="dnsTunnelMarker" class="form-control" data-i18n-placeholder="ph_dns_tunnel_marker">
+                        </div>
                         <div class="checkbox-group" data-visibility-key="dnsTunnelFields">
                             <label class="checkbox-label">
                                 <input type="checkbox" name="dnsTunnelEDNS0">
