@@ -467,7 +467,7 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="verifyCertFingerprint"]', supportsCertFingerprint);
             setVis('[data-visibility-key="serverCertFingerprint"]', supportsCertFingerprint && el('verifyCertFingerprint').checked);
 
-            setVis('[data-visibility-key="alpn"]', isXhttp || (isRaw && tlsOn));
+            setVis('[data-visibility-key="alpn"]', isXhttp);
         }
     };
 
