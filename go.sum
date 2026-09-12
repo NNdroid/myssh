@@ -1,7 +1,7 @@
 cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
-github.com/NNdroid/dns_custom v0.0.0-20260910133924-077d845e08af h1:76bQE3X7+xVMGbrbszI5BOIjaDxFO5AODTtR56WVZb8=
-github.com/NNdroid/dns_custom v0.0.0-20260910133924-077d845e08af/go.mod h1:0jScqXP1or9CIH4J9hbNZkLRiZQW4aAC78Bma5dGvi8=
+github.com/NNdroid/dns_custom v0.0.0-20260912043924-a382000a2eca h1:axS32kug60rcMqW2wmZrbWLztxolYWI74UzFFFcLPG0=
+github.com/NNdroid/dns_custom v0.0.0-20260912043924-a382000a2eca/go.mod h1:0jScqXP1or9CIH4J9hbNZkLRiZQW4aAC78Bma5dGvi8=
 github.com/NNdroid/h2tunnel v1.0.20260425-0.20260910130217-af9b96b980e8 h1:6r160HCXunXLGwv37gMQ//gMemhbA25o6K3uzMvslow=
 github.com/NNdroid/h2tunnel v1.0.20260425-0.20260910130217-af9b96b980e8/go.mod h1:k5/6Kv4TQSNsMyBdasz4AVHGuVaTsvAZyIG/coc9+A4=
 github.com/NNdroid/icmp_custom v0.0.0-20260911113051-dcd965e901b7 h1:YeMzCPkM4u/+Lm8t0QMlfZPYeTA3eBriL/qokNCYpDc=
