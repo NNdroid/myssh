@@ -87,10 +87,10 @@ type ProxyConfig struct {
 	// 在 CDN/反代 idle 阈值之前主动发 KEEPALIVE 帧保活主流，避免空闲流被掐断。
 	HeartbeatIntervalMs int `json:"heartbeat_interval_ms"` // 空闲心跳保活间隔(ms)；0→默认 25000；仅 h2 家族
 
-	// h2tunnel 家族（h2/grpc/h3/webtransport/masque）新增调优：
-	// PaddingMinBytes 出站帧最小字节数（流量混淆）：0 => myssh 默认 1420（SDK 本身把 0 视为 900，myssh 覆写为 1420），负数 => 关闭，上限 0xFFFF。
+	// h2tunnel 家族（h2/grpc/h3/webtransport/masque）新增调优（padding 现覆盖全部 h2tunnel 传输）：
+	// PaddingMinBytes 出站记录填充下限：0 => myssh 默认 1420；负数 => 关闭填充；正数 => 该下限（须 >16）。上限由 h2tunnel 自动取 min+25%。
 	// MasqueAlpn 仅 masque 有效：SDK 取值 ""(auto)/"h2"/"h3"；配置面 "h3,h2"(或空/auto)=>auto、"h3"=>h3、"h2"=>h2。
-	PaddingMinBytes int    `json:"padding_min_bytes"` // 出站帧最小填充字节；0→1420，负→关闭；仅 h2 家族
+	PaddingMinBytes int    `json:"padding_min_bytes"` // 填充下限字节；0→默认1420，负→关闭，正→按值(>16)；仅 h2 家族
 	MasqueAlpn      string `json:"masque_alpn"`       // masque 承载 ALPN："h3,h2"→auto / h3 / h2；仅 masque
 }
 

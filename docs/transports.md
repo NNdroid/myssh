@@ -112,7 +112,7 @@
 - `h2`：`tunnel_tls_enabled=true`→`TransportH2`（TLS），`false`→`TransportH2C`（明文）
 - `grpc`：由 `tunnel_tls_enabled` 决定是否 TLS，走 `TransportGRPC`
 - uTLS：h2tunnel SDK 现自带 Chrome ClientHello 伪装；myssh 对 **TCP-TLS 的 h2/grpc 固定 `UtlxFingerprint="chrome"`**（不可配，与 raw/ws/xhttp 一致；QUIC 类不接受该参数）。
-- `padding_min_bytes`：出站帧最小字节（流量混淆）。`0`→myssh 默认 **1420**（SDK 本身把 0 视为 900，myssh 覆写为 1420），`-1`/负数→关闭，上限 0xFFFF。
+- `padding_min_bytes`：应用层记录填充下限（流量混淆）。自 h2tunnel `f9817cd` 起填充覆盖**全部** h2tunnel 传输（h2/grpc/h3/wt/masque，含 QUIC）。`0`→myssh 默认 **1420**（SDK 本身把 0 视为“关闭”），负数→关闭，正数→该下限（须 >16）；上限由 SDK 自动取 `min+25%`（跨度 ≥8B，≤65535）。
 - 校验：`heartbeat_interval_ms < 0` 报错；`ssh_addr` 空报错；`proxy_auth_required=true` 且 token 空报错
 
 ### 4.5 `h3` / `webtransport` / `masque`（custom，固定 TLS，QUIC 承载）
@@ -217,7 +217,7 @@
 - udp_custom：`paths`32、`sockets`1、`send_window`256、`max_pkt`→1450、`mtu_probe` 空→开、`magic`→`UDPC`
 - icmp_custom：`mtu_mode`→probe、`max_payload`/`pace_ms`→SDK 默认、`magic`→SDK `MagicDefault`（地址族非可配项，SDK 按对端自动选族）
 - xhttp：`chunk_size_kb` 0→256、`stream_mode` 空→auto
-- h2 家族：`heartbeat_interval_ms` 0→25000ms、`padding_min_bytes` 0→1420（myssh 覆写 SDK 的 900；负数关闭）、`masque_alpn` 空→auto
+- h2 家族：`heartbeat_interval_ms` 0→25000ms、`padding_min_bytes` 0→1420（负数关闭；上限 SDK 自动 min+25%）、`masque_alpn` 空→auto
 
 **建连前即拒绝（硬错误）：**
 - `ssh_addr` 为空（自拨类）

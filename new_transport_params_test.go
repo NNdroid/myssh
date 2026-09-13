@@ -82,10 +82,10 @@ func TestNewTransportParamJSONTags(t *testing.T) {
 	}
 }
 
-// TestResolveH2PaddingMin 锁定 padding_min_bytes 的翻译：0(未配置)=>1420，
-// 正数原样、负数原样（关闭）。防止有人把 myssh 默认误退回 SDK 的 900。
+// TestResolveH2PaddingMin 锁定 padding_min_bytes → PaddingTuning.MinRecordBytes 翻译：
+// 0(未配置)=>1420；负数=>0（关闭，因 SDK 语义 0=off 且拒负数）；正数=>原样。
 func TestResolveH2PaddingMin(t *testing.T) {
-	cases := map[int]int{0: 1420, 1: 1, 900: 900, 1420: 1420, -1: -1, -900: -900}
+	cases := map[int]int{0: 1420, 1: 1, 100: 100, 1420: 1420, -1: 0, -900: 0}
 	for in, want := range cases {
 		if got := resolveH2PaddingMin(in); got != want {
 			t.Errorf("resolveH2PaddingMin(%d) = %d, want %d", in, got, want)

@@ -2,8 +2,8 @@ cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMT
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/NNdroid/dns_custom v0.0.0-20260912143833-f5be30284cb1 h1:nlTGFh1vAOMPZY/0xZ9fyFvggh4njG6OTT4iTXgE5aE=
 github.com/NNdroid/dns_custom v0.0.0-20260912143833-f5be30284cb1/go.mod h1:0jScqXP1or9CIH4J9hbNZkLRiZQW4aAC78Bma5dGvi8=
-github.com/NNdroid/h2tunnel v1.0.20260425-0.20260913034629-7c6d2017608f h1:wNSGkh9g6n5voq5/RMsto9aKkIn4iyaNHA3ynstkmMk=
-github.com/NNdroid/h2tunnel v1.0.20260425-0.20260913034629-7c6d2017608f/go.mod h1:cU4XOCxgziQ/1Ejn69rfHkepIHAnpQkZ4Slg7PmV7lI=
+github.com/NNdroid/h2tunnel v1.0.20260425-0.20260913095304-f9817cd85db0 h1:KkvYsZK6cSpvEIFF323pai/rGlXogL2JTfJuqSy2/LE=
+github.com/NNdroid/h2tunnel v1.0.20260425-0.20260913095304-f9817cd85db0/go.mod h1:cU4XOCxgziQ/1Ejn69rfHkepIHAnpQkZ4Slg7PmV7lI=
 github.com/NNdroid/icmp_custom v0.0.0-20260912173914-c08cc52efefa h1:jl2pugeUrAQlBDOQrIKoEj3fOv69HT88lN7RmVZBkuc=
 github.com/NNdroid/icmp_custom v0.0.0-20260912173914-c08cc52efefa/go.mod h1:xdgneWkf61J8HvtbvPagW68JMm/hXgutL9MSLAFIduk=
 github.com/NNdroid/udp_custom v0.0.0-20260913011811-5f663fe80027 h1:cYqAiakQcCnNOmvlryzEiOrz40G8jwwe2tkzxNhivCw=

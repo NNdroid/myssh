@@ -48,7 +48,11 @@ func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transpor
 		Credentials: credentials,
 		Tuning: h2tunnel.ClientTuning{
 			HeartbeatInterval: heartbeat,
-			PaddingMinBytes:   resolveH2PaddingMin(cfg.PaddingMinBytes), // 0 => myssh 默认 1420；正数按值；负数关闭
+			Padding: h2tunnel.PaddingTuning{
+				// MinRecordBytes: 0 => myssh 默认 1420；负数配置 => 0（SDK：关闭填充）；正数 => 按值。
+				// MaxRecordBytes 留 0，由 SDK 自动取 min+25%（跨度 ≥8B）。
+				MinRecordBytes: resolveH2PaddingMin(cfg.PaddingMinBytes),
+			},
 		},
 		EventHandler: emitH2Event,
 		Logger:       sdkSlog("h2tunnel"),
@@ -97,19 +101,25 @@ func registerH2SDK(name string, transport h2tunnel.Transport, tlsEnabled bool) {
 	})
 }
 
-// h2PaddingDefaultBytes 是 h2 家族出站帧最小填充字节的 myssh 默认值。
-// h2tunnel SDK 把 0 视作 900，myssh 统一改用 1420（贴近典型路径 MTU）作为“未配置”时的取值。
+// h2PaddingDefaultBytes 是 h2 家族出站记录填充下限的 myssh 默认值。
+// h2tunnel 把 MinRecordBytes=0 视作“不填充”，myssh 在未配置(0)时覆写为 1420。
 const h2PaddingDefaultBytes = 1420
 
-// resolveH2PaddingMin 把配置面的 padding_min_bytes 翻译为 SDK 取值：
-//   - 0（未配置）=> 1420；
-//   - 负数 => 原样（SDK：关闭填充）；
-//   - 正数 => 原样（自定义下限，SDK 会夹到上限 0xFFFF）。
+// resolveH2PaddingMin 把配置面的 padding_min_bytes 翻译为 h2tunnel 的 PaddingTuning.MinRecordBytes：
+//   - 0（未配置）=> 1420（myssh 默认，SDK 本身视 0 为关闭，故这里显式给默认）；
+//   - 负数 => 0（关闭填充；SDK 语义下 0/0 即不填充，且 SDK 拒绝负数）；
+//   - 正数 => 原样（作为记录下限；须 >16，否则由 SDK 校验报错）。
+//
+// MaxRecordBytes 不下发，由 SDK 自动取 min+25%。
 func resolveH2PaddingMin(v int) int {
-	if v == 0 {
+	switch {
+	case v == 0:
 		return h2PaddingDefaultBytes
+	case v < 0:
+		return 0
+	default:
+		return v
 	}
-	return v
 }
 
 // h2UtlxFingerprint 决定 TCP-TLS 的 h2/grpc 用哪个浏览器 ClientHello 伪装。
