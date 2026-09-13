@@ -34,11 +34,25 @@ jobs:
           cache: false
 
       - name: Warm module cache (direct VCS)
-        # 兜底：清掉 runner 上可能残留的模块缓存，再以 direct 单线程预下载全部依赖，
-        # 避免后续 go vet/build/test 并发拉取时踩到损坏的浅克隆；如偶发网络抖动可重跑。
+        # GOPROXY=direct 时 Go 会把私有 fork 以浅克隆拉进 cache/vcs，再 `git fetch
+        # --unshallow` 取全量对象；runner 上 git 的后台 gc/maintenance 会在 unshallow
+        # 期间改写 .git/shallow，触发 “shallow file has changed since we read it”。
+        # 先全局关闭自动 gc/maintenance 消除并发写，再对 go mod download 做重试兜底
+        # （该错误为时序竞态，重试常即通过；重试间清掉损坏的 vcs 浅克隆）。
         run: |
+          git config --global gc.auto 0
+          git config --global gc.autoDetach false
+          git config --global maintenance.auto false
           go clean -modcache 2>/dev/null || true
-          go mod download
+          ok=0
+          for i in 1 2 3 4 5; do
+            if go mod download; then ok=1; break; fi
+            echo "go mod download failed (attempt $i/5); clearing vcs cache and retrying"
+            rm -rf "$(go env GOMODCACHE)/cache/vcs"
+            sleep 3
+          done
+          [ "$ok" = "1" ] || { echo "go mod download failed after retries"; exit 1; }
+          go mod verify
 
       - name: gofmt
         # 任何未格式化文件都会使本次检查失败（提交门槛）。
