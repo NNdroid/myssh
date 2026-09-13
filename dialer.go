@@ -137,7 +137,7 @@ func watchEngineCtx(ctx context.Context, conn net.Conn) net.Conn {
 func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	tunnelType := strings.ToLower(cfg.TunnelType)
 	if tunnelType == "" {
-		tunnelType = "base"
+		tunnelType = "raw"
 	}
 
 	proto, exists := tunnelRegistry[tunnelType]
@@ -146,7 +146,8 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	}
 
 	target := cfg.ProxyAddr
-	if tunnelType == "base" {
+	// raw模式且未开启tls则是纯SSH
+	if tunnelType == "raw" && !cfg.TunnelTLSEnabled {
 		target = cfg.SshAddr
 	}
 

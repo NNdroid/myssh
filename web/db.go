@@ -410,7 +410,7 @@ func UpdateSettings(s Settings) error {
 func (p *Profile) ToProxyConfig(s *Settings) (string, error) {
 	tunnelType := p.TunnelType
 	if tunnelType == "" {
-		tunnelType = "base"
+		tunnelType = "raw"
 	}
 	if tunnelType == "vaydns" || tunnelType == "dns" {
 		tunnelType = "dns_custom"

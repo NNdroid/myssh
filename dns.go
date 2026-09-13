@@ -379,9 +379,9 @@ func (l *LocalDnsServer) lookupDNS(requestMsg *dns.Msg) ([]byte, *dns.Msg, strin
 		var finalErr error
 
 		for attempt := 1; attempt <= 3; attempt++ {
-			if attempt > 1 {
-				zlog.Warnf("%s [DNS] ⚠️ Retry parsing #%d: %s", TAG, attempt, domainName)
-			}
+			//if attempt > 1 {
+			//zlog.Warnf("%s [DNS] ⚠️ Retry parsing #%d: %s", TAG, attempt, domainName)
+			//}
 
 			if strings.HasPrefix(serverUrl, "https://") || strings.HasPrefix(serverUrl, "doh://") {
 				target := strings.Replace(serverUrl, "doh://", "https://", 1)
