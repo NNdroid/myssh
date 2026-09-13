@@ -27,6 +27,18 @@ jobs:
           # 采用最新稳定版 Go，可满足 go.mod 中声明的语言版本要求。
           go-version: "stable"
           check-latest: true
+          # 关闭内置模块缓存：GOPROXY=direct 会把依赖以 git 浅克隆形式落在
+          # cache/vcs 里；actions 恢复一个半旧/复用的浅克隆后，go 的
+          # `git fetch --unshallow` 会撞上 “shallow file has changed since we read it”
+          # 这类 git 竞态并导致构建失败。用 direct 拉取本就无需这层缓存。
+          cache: false
+
+      - name: Warm module cache (direct VCS)
+        # 兜底：清掉 runner 上可能残留的模块缓存，再以 direct 单线程预下载全部依赖，
+        # 避免后续 go vet/build/test 并发拉取时踩到损坏的浅克隆；如偶发网络抖动可重跑。
+        run: |
+          go clean -modcache 2>/dev/null || true
+          go mod download
 
       - name: gofmt
         # 任何未格式化文件都会使本次检查失败（提交门槛）。
