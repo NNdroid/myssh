@@ -50,8 +50,8 @@ func dialICMPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 			return nil, fmt.Errorf("invalid icmp_custom_public_key: %w", err)
 		}
 	}
-	// 空值交给 SDK 默认：family=auto，mtu_mode=probe。
-	clientCfg.ICMP.Family = strings.ToLower(strings.TrimSpace(cfg.IcmpCustomFamily))
+	// 空值交给 SDK 默认：mtu_mode=probe。地址族自 icmp_custom c08cc52 起不再是可配项——
+	// 客户端 socket 族由对端地址决定（IPv4 对端走 v4、IPv6 走 v6），myssh 已移除该配置字段。
 	clientCfg.ICMP.MTUMode = strings.ToLower(strings.TrimSpace(cfg.IcmpCustomMtuMode))
 	if v := cfg.IcmpCustomMaxPayload; v > 0 {
 		clientCfg.ICMP.MaxPayload = v

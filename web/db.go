@@ -51,7 +51,6 @@ type Profile struct {
 	ProxyAuthUser         string `json:"proxyAuthUser"`
 	ProxyAuthPass         string `json:"proxyAuthPass"`
 	HttpPayload           string `json:"httpPayload"`
-	Type                  string `json:"type"`
 	UdpgwVersion          string `json:"udpgwVersion"`
 	UdpgwAddr             string `json:"udpgwAddr"`
 	DisableStatusCheck    bool   `json:"disableStatusCheck"`
@@ -91,11 +90,14 @@ type Profile struct {
 	IcmpCustomPsk         string `json:"icmpCustomPsk"`
 	IcmpCustomMagic       string `json:"icmpCustomMagic"`
 	IcmpCustomPublicKey   string `json:"icmpCustomPublicKey"`
-	IcmpCustomFamily      string `json:"icmpCustomFamily"`
 	IcmpCustomMtuMode     string `json:"icmpCustomMtuMode"`
 	IcmpCustomMaxPayload  int    `json:"icmpCustomMaxPayload"`
 	IcmpCustomPaceMS      int    `json:"icmpCustomPaceMS"`
 	IcmpCustomIdRange     string `json:"icmpCustomIdRange"`
+	MasqueAlpn            string `json:"masqueAlpn"`
+	PaddingMinBytes       int    `json:"paddingMinBytes"`
+	UdpCustomMaxPkt       int    `json:"udpCustomMaxPkt"`
+	UdpCustomMtuProbe     string `json:"udpCustomMtuProbe"`
 	DnsOverride           bool   `json:"dnsOverride"`
 	RemoteDns             string `json:"remoteDns"`
 	LocalDns              string `json:"localDns"`
@@ -147,7 +149,7 @@ func InitDB(dbPath string) error {
 		name TEXT, sshAddr TEXT, user TEXT, pass TEXT, authType TEXT, privateKey TEXT, keyPass TEXT,
 		tunnelType TEXT, proxyAddr TEXT, customHost TEXT, serverName TEXT, customPath TEXT, enableCustomPath BOOLEAN,
 		proxyAuthRequired BOOLEAN, proxyAuthToken TEXT, proxyAuthUser TEXT, proxyAuthPass TEXT, httpPayload TEXT,
-		type TEXT, udpgwVersion TEXT, udpgwAddr TEXT, disableStatusCheck BOOLEAN, verifyFingerprint BOOLEAN,
+		udpgwVersion TEXT, udpgwAddr TEXT, disableStatusCheck BOOLEAN, verifyFingerprint BOOLEAN,
 		serverFingerprint TEXT, verifyCertFingerprint BOOLEAN, serverCertFingerprint TEXT, alpn TEXT,
 		bindInterface TEXT,
 		dnsOverride BOOLEAN, remoteDns TEXT, localDns TEXT, 
@@ -164,9 +166,11 @@ func InitDB(dbPath string) error {
 		dnsTunnelPublicKey TEXT DEFAULT '', dnsTunnelEDNS0 BOOLEAN DEFAULT 0,
 		xhttpChunkSizeKB INTEGER DEFAULT 256, xhttpStreamMode TEXT DEFAULT '', heartbeatIntervalMs INTEGER DEFAULT 25000,
 		icmpCustomPsk TEXT DEFAULT '', icmpCustomMagic TEXT DEFAULT '', icmpCustomPublicKey TEXT DEFAULT '',
-		icmpCustomFamily TEXT DEFAULT '', icmpCustomMtuMode TEXT DEFAULT '', icmpCustomMaxPayload INTEGER DEFAULT 0,
+		icmpCustomMtuMode TEXT DEFAULT '', icmpCustomMaxPayload INTEGER DEFAULT 0,
 		icmpCustomPaceMS INTEGER DEFAULT 0, icmpCustomIdRange TEXT DEFAULT '',
-		tunnelTLSEnabled BOOLEAN, dnsTunnelPsk TEXT DEFAULT '', dnsTunnelMarker TEXT DEFAULT ''
+		tunnelTLSEnabled BOOLEAN, dnsTunnelPsk TEXT DEFAULT '', dnsTunnelMarker TEXT DEFAULT '',
+		masqueAlpn TEXT DEFAULT '', paddingMinBytes INTEGER DEFAULT 0,
+		udpCustomMaxPkt INTEGER DEFAULT 0, udpCustomMtuProbe TEXT DEFAULT ''
 	);
 	CREATE TABLE IF NOT EXISTS settings (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -224,7 +228,6 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE profiles ADD COLUMN icmpCustomPsk TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN icmpCustomMagic TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN icmpCustomPublicKey TEXT DEFAULT '';",
-		"ALTER TABLE profiles ADD COLUMN icmpCustomFamily TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN icmpCustomMtuMode TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN icmpCustomMaxPayload INTEGER DEFAULT 0;",
 		"ALTER TABLE profiles ADD COLUMN icmpCustomPaceMS INTEGER DEFAULT 0;",
@@ -232,6 +235,10 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE profiles ADD COLUMN tunnelTLSEnabled BOOLEAN;",
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelPsk TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelMarker TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN masqueAlpn TEXT DEFAULT '';",
+		"ALTER TABLE profiles ADD COLUMN paddingMinBytes INTEGER DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN udpCustomMaxPkt INTEGER DEFAULT 0;",
+		"ALTER TABLE profiles ADD COLUMN udpCustomMtuProbe TEXT DEFAULT '';",
 		"ALTER TABLE settings ADD COLUMN udpgw_addr TEXT DEFAULT '127.0.0.1:7300';",
 		"ALTER TABLE settings ADD COLUMN udpgw_version TEXT DEFAULT 'badvpn';",
 		"ALTER TABLE settings ADD COLUMN geosite_filepath TEXT DEFAULT 'geosite.dat';",
@@ -250,7 +257,7 @@ func GetProfiles() ([]Profile, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
-	rows, err := db.Query("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomFamily, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker FROM profiles")
+	rows, err := db.Query("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker, masqueAlpn, paddingMinBytes, udpCustomMaxPkt, udpCustomMtuProbe FROM profiles")
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +268,7 @@ func GetProfiles() ([]Profile, error) {
 	for rows.Next() {
 		var p Profile
 		var tlsNull sql.NullBool
-		if err := rows.Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpMode, &p.KcpSndWnd, &p.KcpRcvWnd, &p.KcpMtu, &p.KcpNoComp, &p.KcpSmuxVer, &p.KcpKeepAlive, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPsk, &p.UdpCustomMagic, &p.UdpCustomPublicKey, &p.UdpCustomPaths, &p.UdpCustomSockets, &p.UdpCustomSendWindow, &p.DnsTunnelPublicKey, &p.DnsTunnelEDNS0, &p.XhttpChunkSizeKB, &p.XhttpStreamMode, &p.HeartbeatIntervalMs, &p.IcmpCustomPsk, &p.IcmpCustomMagic, &p.IcmpCustomPublicKey, &p.IcmpCustomFamily, &p.IcmpCustomMtuMode, &p.IcmpCustomMaxPayload, &p.IcmpCustomPaceMS, &p.IcmpCustomIdRange, &tlsNull, &p.DnsTunnelPsk, &p.DnsTunnelMarker); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpMode, &p.KcpSndWnd, &p.KcpRcvWnd, &p.KcpMtu, &p.KcpNoComp, &p.KcpSmuxVer, &p.KcpKeepAlive, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPsk, &p.UdpCustomMagic, &p.UdpCustomPublicKey, &p.UdpCustomPaths, &p.UdpCustomSockets, &p.UdpCustomSendWindow, &p.DnsTunnelPublicKey, &p.DnsTunnelEDNS0, &p.XhttpChunkSizeKB, &p.XhttpStreamMode, &p.HeartbeatIntervalMs, &p.IcmpCustomPsk, &p.IcmpCustomMagic, &p.IcmpCustomPublicKey, &p.IcmpCustomMtuMode, &p.IcmpCustomMaxPayload, &p.IcmpCustomPaceMS, &p.IcmpCustomIdRange, &tlsNull, &p.DnsTunnelPsk, &p.DnsTunnelMarker, &p.MasqueAlpn, &p.PaddingMinBytes, &p.UdpCustomMaxPkt, &p.UdpCustomMtuProbe); err != nil {
 			return nil, err
 		}
 		p.TunnelTLSEnabled = tlsNull.Bool
@@ -276,8 +283,8 @@ func GetProfile(id string) (*Profile, error) {
 
 	var p Profile
 	var tlsNull sql.NullBool
-	err := db.QueryRow("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomFamily, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker FROM profiles WHERE id = ?", id).
-		Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.Type, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpMode, &p.KcpSndWnd, &p.KcpRcvWnd, &p.KcpMtu, &p.KcpNoComp, &p.KcpSmuxVer, &p.KcpKeepAlive, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPsk, &p.UdpCustomMagic, &p.UdpCustomPublicKey, &p.UdpCustomPaths, &p.UdpCustomSockets, &p.UdpCustomSendWindow, &p.DnsTunnelPublicKey, &p.DnsTunnelEDNS0, &p.XhttpChunkSizeKB, &p.XhttpStreamMode, &p.HeartbeatIntervalMs, &p.IcmpCustomPsk, &p.IcmpCustomMagic, &p.IcmpCustomPublicKey, &p.IcmpCustomFamily, &p.IcmpCustomMtuMode, &p.IcmpCustomMaxPayload, &p.IcmpCustomPaceMS, &p.IcmpCustomIdRange, &tlsNull, &p.DnsTunnelPsk, &p.DnsTunnelMarker)
+	err := db.QueryRow("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker, masqueAlpn, paddingMinBytes, udpCustomMaxPkt, udpCustomMtuProbe FROM profiles WHERE id = ?", id).
+		Scan(&p.ID, &p.Name, &p.SshAddr, &p.User, &p.Pass, &p.AuthType, &p.PrivateKey, &p.KeyPass, &p.TunnelType, &p.ProxyAddr, &p.CustomHost, &p.ServerName, &p.CustomPath, &p.EnableCustomPath, &p.ProxyAuthRequired, &p.ProxyAuthToken, &p.ProxyAuthUser, &p.ProxyAuthPass, &p.HttpPayload, &p.UdpgwVersion, &p.UdpgwAddr, &p.DisableStatusCheck, &p.VerifyFingerprint, &p.ServerFingerprint, &p.VerifyCertFingerprint, &p.ServerCertFingerprint, &p.Alpn, &p.BindInterface, &p.DnsOverride, &p.RemoteDns, &p.LocalDns, &p.RoutingOverride, &p.GeositeDirect, &p.GeoipDirect, &p.TotalTx, &p.TotalRx, &p.DnsTunnelDomain, &p.DnsTunnelServers, &p.DnsTunnelType, &p.KcpPassword, &p.KcpCrypt, &p.KcpMode, &p.KcpSndWnd, &p.KcpRcvWnd, &p.KcpMtu, &p.KcpNoComp, &p.KcpSmuxVer, &p.KcpKeepAlive, &p.KcpDataShards, &p.KcpParityShards, &p.UdpCustomPsk, &p.UdpCustomMagic, &p.UdpCustomPublicKey, &p.UdpCustomPaths, &p.UdpCustomSockets, &p.UdpCustomSendWindow, &p.DnsTunnelPublicKey, &p.DnsTunnelEDNS0, &p.XhttpChunkSizeKB, &p.XhttpStreamMode, &p.HeartbeatIntervalMs, &p.IcmpCustomPsk, &p.IcmpCustomMagic, &p.IcmpCustomPublicKey, &p.IcmpCustomMtuMode, &p.IcmpCustomMaxPayload, &p.IcmpCustomPaceMS, &p.IcmpCustomIdRange, &tlsNull, &p.DnsTunnelPsk, &p.DnsTunnelMarker, &p.MasqueAlpn, &p.PaddingMinBytes, &p.UdpCustomMaxPkt, &p.UdpCustomMtuProbe)
 	if err != nil {
 		return nil, err
 	}
@@ -293,8 +300,8 @@ func AddProfile(p Profile) (string, error) {
 		p.ID = generateUUID()
 	}
 
-	_, err := db.Exec("INSERT INTO profiles (id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, type, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomFamily, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-		p.ID, p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.Type, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpMode, p.KcpSndWnd, p.KcpRcvWnd, p.KcpMtu, p.KcpNoComp, p.KcpSmuxVer, p.KcpKeepAlive, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPsk, p.UdpCustomMagic, p.UdpCustomPublicKey, p.UdpCustomPaths, p.UdpCustomSockets, p.UdpCustomSendWindow, p.DnsTunnelPublicKey, p.DnsTunnelEDNS0, p.XhttpChunkSizeKB, p.XhttpStreamMode, p.HeartbeatIntervalMs, p.IcmpCustomPsk, p.IcmpCustomMagic, p.IcmpCustomPublicKey, p.IcmpCustomFamily, p.IcmpCustomMtuMode, p.IcmpCustomMaxPayload, p.IcmpCustomPaceMS, p.IcmpCustomIdRange, p.TunnelTLSEnabled, p.DnsTunnelPsk, p.DnsTunnelMarker)
+	_, err := db.Exec("INSERT INTO profiles (id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, enableCustomPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker, masqueAlpn, paddingMinBytes, udpCustomMaxPkt, udpCustomMtuProbe) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		p.ID, p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpMode, p.KcpSndWnd, p.KcpRcvWnd, p.KcpMtu, p.KcpNoComp, p.KcpSmuxVer, p.KcpKeepAlive, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPsk, p.UdpCustomMagic, p.UdpCustomPublicKey, p.UdpCustomPaths, p.UdpCustomSockets, p.UdpCustomSendWindow, p.DnsTunnelPublicKey, p.DnsTunnelEDNS0, p.XhttpChunkSizeKB, p.XhttpStreamMode, p.HeartbeatIntervalMs, p.IcmpCustomPsk, p.IcmpCustomMagic, p.IcmpCustomPublicKey, p.IcmpCustomMtuMode, p.IcmpCustomMaxPayload, p.IcmpCustomPaceMS, p.IcmpCustomIdRange, p.TunnelTLSEnabled, p.DnsTunnelPsk, p.DnsTunnelMarker, p.MasqueAlpn, p.PaddingMinBytes, p.UdpCustomMaxPkt, p.UdpCustomMtuProbe)
 	if err != nil {
 		return "", err
 	}
@@ -305,8 +312,8 @@ func UpdateProfile(id string, p Profile) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
-	_, err := db.Exec("UPDATE profiles SET name=?, sshAddr=?, user=?, pass=?, authType=?, privateKey=?, keyPass=?, tunnelType=?, proxyAddr=?, customHost=?, serverName=?, customPath=?, enableCustomPath=?, proxyAuthRequired=?, proxyAuthToken=?, proxyAuthUser=?, proxyAuthPass=?, httpPayload=?, type=?, udpgwVersion=?, udpgwAddr=?, disableStatusCheck=?, verifyFingerprint=?, serverFingerprint=?, verifyCertFingerprint=?, serverCertFingerprint=?, alpn=?, bindInterface=?, dnsOverride=?, remoteDns=?, localDns=?, routingOverride=?, geositeDirect=?, geoipDirect=?, totalTx=?, totalRx=?, dnsTunnelDomain=?, dnsTunnelServers=?, dnsTunnelType=?, kcpPassword=?, kcpCrypt=?, kcpMode=?, kcpSndWnd=?, kcpRcvWnd=?, kcpMtu=?, kcpNoComp=?, kcpSmuxVer=?, kcpKeepAlive=?, kcpDataShards=?, kcpParityShards=?, udpCustomPsk=?, udpCustomMagic=?, udpCustomPublicKey=?, udpCustomPaths=?, udpCustomSockets=?, udpCustomSendWindow=?, dnsTunnelPublicKey=?, dnsTunnelEDNS0=?, xhttpChunkSizeKB=?, xhttpStreamMode=?, heartbeatIntervalMs=?, icmpCustomPsk=?, icmpCustomMagic=?, icmpCustomPublicKey=?, icmpCustomFamily=?, icmpCustomMtuMode=?, icmpCustomMaxPayload=?, icmpCustomPaceMS=?, icmpCustomIdRange=?, tunnelTLSEnabled=?, dnsTunnelPsk=?, dnsTunnelMarker=? WHERE id=?",
-		p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.Type, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpMode, p.KcpSndWnd, p.KcpRcvWnd, p.KcpMtu, p.KcpNoComp, p.KcpSmuxVer, p.KcpKeepAlive, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPsk, p.UdpCustomMagic, p.UdpCustomPublicKey, p.UdpCustomPaths, p.UdpCustomSockets, p.UdpCustomSendWindow, p.DnsTunnelPublicKey, p.DnsTunnelEDNS0, p.XhttpChunkSizeKB, p.XhttpStreamMode, p.HeartbeatIntervalMs, p.IcmpCustomPsk, p.IcmpCustomMagic, p.IcmpCustomPublicKey, p.IcmpCustomFamily, p.IcmpCustomMtuMode, p.IcmpCustomMaxPayload, p.IcmpCustomPaceMS, p.IcmpCustomIdRange, p.TunnelTLSEnabled, p.DnsTunnelPsk, p.DnsTunnelMarker, id)
+	_, err := db.Exec("UPDATE profiles SET name=?, sshAddr=?, user=?, pass=?, authType=?, privateKey=?, keyPass=?, tunnelType=?, proxyAddr=?, customHost=?, serverName=?, customPath=?, enableCustomPath=?, proxyAuthRequired=?, proxyAuthToken=?, proxyAuthUser=?, proxyAuthPass=?, httpPayload=?, udpgwVersion=?, udpgwAddr=?, disableStatusCheck=?, verifyFingerprint=?, serverFingerprint=?, verifyCertFingerprint=?, serverCertFingerprint=?, alpn=?, bindInterface=?, dnsOverride=?, remoteDns=?, localDns=?, routingOverride=?, geositeDirect=?, geoipDirect=?, totalTx=?, totalRx=?, dnsTunnelDomain=?, dnsTunnelServers=?, dnsTunnelType=?, kcpPassword=?, kcpCrypt=?, kcpMode=?, kcpSndWnd=?, kcpRcvWnd=?, kcpMtu=?, kcpNoComp=?, kcpSmuxVer=?, kcpKeepAlive=?, kcpDataShards=?, kcpParityShards=?, udpCustomPsk=?, udpCustomMagic=?, udpCustomPublicKey=?, udpCustomPaths=?, udpCustomSockets=?, udpCustomSendWindow=?, dnsTunnelPublicKey=?, dnsTunnelEDNS0=?, xhttpChunkSizeKB=?, xhttpStreamMode=?, heartbeatIntervalMs=?, icmpCustomPsk=?, icmpCustomMagic=?, icmpCustomPublicKey=?, icmpCustomMtuMode=?, icmpCustomMaxPayload=?, icmpCustomPaceMS=?, icmpCustomIdRange=?, tunnelTLSEnabled=?, dnsTunnelPsk=?, dnsTunnelMarker=?, masqueAlpn=?, paddingMinBytes=?, udpCustomMaxPkt=?, udpCustomMtuProbe=? WHERE id=?",
+		p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.EnableCustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpMode, p.KcpSndWnd, p.KcpRcvWnd, p.KcpMtu, p.KcpNoComp, p.KcpSmuxVer, p.KcpKeepAlive, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPsk, p.UdpCustomMagic, p.UdpCustomPublicKey, p.UdpCustomPaths, p.UdpCustomSockets, p.UdpCustomSendWindow, p.DnsTunnelPublicKey, p.DnsTunnelEDNS0, p.XhttpChunkSizeKB, p.XhttpStreamMode, p.HeartbeatIntervalMs, p.IcmpCustomPsk, p.IcmpCustomMagic, p.IcmpCustomPublicKey, p.IcmpCustomMtuMode, p.IcmpCustomMaxPayload, p.IcmpCustomPaceMS, p.IcmpCustomIdRange, p.TunnelTLSEnabled, p.DnsTunnelPsk, p.DnsTunnelMarker, p.MasqueAlpn, p.PaddingMinBytes, p.UdpCustomMaxPkt, p.UdpCustomMtuProbe, id)
 	return err
 }
 
@@ -488,12 +495,15 @@ func (p *Profile) ToProxyConfig(s *Settings) (string, error) {
 		IcmpCustomPsk:                p.IcmpCustomPsk,
 		IcmpCustomMagic:              p.IcmpCustomMagic,
 		IcmpCustomPublicKey:          p.IcmpCustomPublicKey,
-		IcmpCustomFamily:             p.IcmpCustomFamily,
 		IcmpCustomMtuMode:            p.IcmpCustomMtuMode,
 		IcmpCustomMaxPayload:         p.IcmpCustomMaxPayload,
 		IcmpCustomPaceMS:             p.IcmpCustomPaceMS,
 		IcmpCustomIdRange:            p.IcmpCustomIdRange,
 		TunnelTLSEnabled:             p.TunnelTLSEnabled,
+		MasqueAlpn:                   p.MasqueAlpn,
+		PaddingMinBytes:              p.PaddingMinBytes,
+		UdpCustomMaxPkt:              p.UdpCustomMaxPkt,
+		UdpCustomMtuProbe:            p.UdpCustomMtuProbe,
 	}
 
 	b, err := json.Marshal(config)

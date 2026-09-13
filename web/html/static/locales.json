@@ -27,7 +27,6 @@
                "label_icmp_custom_psk": "ICMP-Custom-PSK (Pre-shared Key)",
                "label_icmp_custom_magic": "Record-Magic (8 Hex-Zeichen, leer = Standard)",
                "label_icmp_custom_public_key": "Server-Noise-Public-Key (Hex/Base64)",
-               "label_icmp_custom_family": "Adressfamilie",
                "label_icmp_custom_mtu_mode": "MTU-Modus",
                "label_icmp_custom_max_payload": "Maximale Nutzlast (Bytes)",
                "label_icmp_custom_pace_ms": "Paket-Pacing (ms)",
@@ -218,7 +217,17 @@
                "ph_dns_tunnel_marker": "Muss auf beiden Seiten übereinstimmen (optional)",
                "label_dns_tunnel_edns0": "Enable EDNS0 (server must match)",
                "label_xhttp_chunk_size": "XHTTP Chunk Size (KB)",
-               "label_heartbeat_interval": "Resume Heartbeat (ms)"
+               "label_heartbeat_interval": "Resume Heartbeat (ms)",
+              "label_udp_custom_max_pkt": "Max Packet (bytes)",
+              "label_udp_custom_mtu_probe": "MTU Probing",
+              "opt_udp_mtu_probe_auto": "Auto (default: enabled)",
+              "opt_udp_mtu_probe_on": "Force on",
+              "opt_udp_mtu_probe_off": "Off (pin max packet)",
+              "label_padding_min_bytes": "Padding Min Bytes",
+              "label_masque_alpn": "Masque Carrier (ALPN)",
+              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_h3": "h3 only",
+              "opt_masque_alpn_h2": "h2 only"
            },
     "en":  {
                "_lang_display_name_":  "🇺🇸 EN",
@@ -248,7 +257,6 @@
                "label_icmp_custom_psk": "ICMP Custom PSK (Pre-shared Key)",
                "label_icmp_custom_magic": "Record Magic (8 hex chars, empty = default)",
                "label_icmp_custom_public_key": "Server Noise Public Key (hex/base64)",
-               "label_icmp_custom_family": "Address Family",
                "label_icmp_custom_mtu_mode": "MTU Mode",
                "label_icmp_custom_max_payload": "Max Payload (bytes)",
                "label_icmp_custom_pace_ms": "Packet Pace (ms)",
@@ -440,7 +448,17 @@
                "ph_dns_tunnel_marker": "Both ends must match (optional)",
                "label_dns_tunnel_edns0": "Enable EDNS0 (server must match)",
                "label_xhttp_chunk_size": "XHTTP Chunk Size (KB)",
-               "label_heartbeat_interval": "Resume Heartbeat (ms)"
+               "label_heartbeat_interval": "Resume Heartbeat (ms)",
+              "label_udp_custom_max_pkt": "Max Packet (bytes)",
+              "label_udp_custom_mtu_probe": "MTU Probing",
+              "opt_udp_mtu_probe_auto": "Auto (default: enabled)",
+              "opt_udp_mtu_probe_on": "Force on",
+              "opt_udp_mtu_probe_off": "Off (pin max packet)",
+              "label_padding_min_bytes": "Padding Min Bytes",
+              "label_masque_alpn": "Masque Carrier (ALPN)",
+              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_h3": "h3 only",
+              "opt_masque_alpn_h2": "h2 only"
            },
     "fr":  {
                "_lang_display_name_":  "🇫🇷 FR",
@@ -470,7 +488,6 @@
                "label_icmp_custom_psk": "PSK ICMP Custom (clé pré-partagée)",
                "label_icmp_custom_magic": "Magic d'enregistrement (8 caractères hex, vide = défaut)",
                "label_icmp_custom_public_key": "Clé publique Noise du serveur (hex/base64)",
-               "label_icmp_custom_family": "Famille d'adresses",
                "label_icmp_custom_mtu_mode": "Mode MTU",
                "label_icmp_custom_max_payload": "Charge utile max (octets)",
                "label_icmp_custom_pace_ms": "Cadence des paquets (ms)",
@@ -661,7 +678,17 @@
                "ph_dns_tunnel_marker": "Doit correspondre des deux côtés (facultatif)",
                "label_dns_tunnel_edns0": "Enable EDNS0 (server must match)",
                "label_xhttp_chunk_size": "XHTTP Chunk Size (KB)",
-               "label_heartbeat_interval": "Resume Heartbeat (ms)"
+               "label_heartbeat_interval": "Resume Heartbeat (ms)",
+              "label_udp_custom_max_pkt": "Max Packet (bytes)",
+              "label_udp_custom_mtu_probe": "MTU Probing",
+              "opt_udp_mtu_probe_auto": "Auto (default: enabled)",
+              "opt_udp_mtu_probe_on": "Force on",
+              "opt_udp_mtu_probe_off": "Off (pin max packet)",
+              "label_padding_min_bytes": "Padding Min Bytes",
+              "label_masque_alpn": "Masque Carrier (ALPN)",
+              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_h3": "h3 only",
+              "opt_masque_alpn_h2": "h2 only"
            },
     "ja":  {
                "_lang_display_name_":  "🇯🇵 日本語",
@@ -691,7 +718,6 @@
                "label_icmp_custom_psk": "ICMP Custom PSK（事前共有キー）",
                "label_icmp_custom_magic": "レコード Magic（16進 8 文字、空欄 = デフォルト）",
                "label_icmp_custom_public_key": "サーバー Noise 公開鍵（hex/base64）",
-               "label_icmp_custom_family": "アドレスファミリー",
                "label_icmp_custom_mtu_mode": "MTU モード",
                "label_icmp_custom_max_payload": "最大ペイロード（バイト）",
                "label_icmp_custom_pace_ms": "パケット送出間隔 (ms)",
@@ -882,7 +908,17 @@
                "ph_dns_tunnel_marker": "両端で一致が必要（任意）",
                "label_dns_tunnel_edns0": "Enable EDNS0 (server must match)",
                "label_xhttp_chunk_size": "XHTTP Chunk Size (KB)",
-               "label_heartbeat_interval": "Resume Heartbeat (ms)"
+               "label_heartbeat_interval": "Resume Heartbeat (ms)",
+              "label_udp_custom_max_pkt": "Max Packet (bytes)",
+              "label_udp_custom_mtu_probe": "MTU Probing",
+              "opt_udp_mtu_probe_auto": "Auto (default: enabled)",
+              "opt_udp_mtu_probe_on": "Force on",
+              "opt_udp_mtu_probe_off": "Off (pin max packet)",
+              "label_padding_min_bytes": "Padding Min Bytes",
+              "label_masque_alpn": "Masque Carrier (ALPN)",
+              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_h3": "h3 only",
+              "opt_masque_alpn_h2": "h2 only"
            },
     "zh-CN":  {
                   "_lang_display_name_":  "🇨🇳 中文",
@@ -912,7 +948,6 @@
                   "label_icmp_custom_psk": "ICMP Custom PSK（预共享密钥）",
                   "label_icmp_custom_magic": "记录魔数（8 位 hex，留空用默认）",
                   "label_icmp_custom_public_key": "服务器 Noise 公钥（hex/base64）",
-                  "label_icmp_custom_family": "地址族",
                   "label_icmp_custom_mtu_mode": "MTU 模式",
                   "label_icmp_custom_max_payload": "最大载荷（字节）",
                   "label_icmp_custom_pace_ms": "发包节奏 (ms)",
@@ -1102,6 +1137,16 @@
                   "ph_dns_tunnel_marker": "两端必须一致（可选）",
                   "label_dns_tunnel_edns0": "启用 EDNS0（服务端必须一致）",
                   "label_xhttp_chunk_size": "XHTTP 分块大小（KB）",
-                  "label_heartbeat_interval": "恢复心跳间隔（毫秒）"
+                  "label_heartbeat_interval": "恢复心跳间隔（毫秒）",
+                  "label_udp_custom_max_pkt": "最大报文（字节）",
+                  "label_udp_custom_mtu_probe": "MTU 探测",
+                  "opt_udp_mtu_probe_auto": "自动（默认：开启）",
+                  "opt_udp_mtu_probe_on": "强制开启",
+                  "opt_udp_mtu_probe_off": "关闭（固定最大报文）",
+                  "label_padding_min_bytes": "填充最小字节",
+                  "label_masque_alpn": "Masque 承载（ALPN）",
+                  "opt_masque_alpn_auto": "自动（h3,h2）",
+                  "opt_masque_alpn_h3": "仅 h3",
+                  "opt_masque_alpn_h2": "仅 h2"
               }
 }

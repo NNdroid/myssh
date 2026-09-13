@@ -62,17 +62,17 @@ func TestICMPEventSessionFormat(t *testing.T) {
 	}
 }
 
-// TestICMPFamilyAndMtuValues 文档化合法取值，防止 webui 选项与 SDK 漂移。
-func TestICMPFamilyAndMtuValues(t *testing.T) {
-	for _, family := range []string{"", "auto", "ipv4", "ipv6"} {
-		_ = family
-	}
+// TestICMPMtuValues 文档化 icmp_custom_mtu_mode 的合法取值，防止 webui 选项与
+// SDK 漂移。地址族（family）自 icmp_custom c08cc52 起已从 myssh 与 SDK 移除，
+// 客户端按对端地址自动选族，故此处不再涉及 family。
+func TestICMPMtuValues(t *testing.T) {
 	for _, mode := range []string{"", "probe", "auto", "fixed"} {
-		_ = mode
+		if mode == "ipv4" || mode == "ipv6" {
+			t.Fatalf("unexpected family value %q in mtu-mode set (family was removed)", mode)
+		}
 	}
-	// 实际归一化在 SDK 的 parseICMPFamily/parseMTUMode 中；此处仅校验
-	// myssh 透传时统一转小写。
-	if v := strings.ToLower("IPV4"); v != "ipv4" {
+	// myssh 透传时统一转小写（见 dialICMPCustomSDK：strings.ToLower(cfg.IcmpCustomMtuMode)）。
+	if v := strings.ToLower("PROBE"); v != "probe" {
 		t.Fatal("unreachable")
 	}
 }

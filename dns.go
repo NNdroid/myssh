@@ -3,7 +3,6 @@ package myssh
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/singleflight"
 )
@@ -221,7 +221,7 @@ type LocalDnsServer struct {
 
 var (
 	localDnsServer  atomic.Pointer[LocalDnsServer]
-	dotSessionCache = tls.NewLRUClientSessionCache(64)
+	dotSessionCache = utls.NewLRUClientSessionCache(64)
 )
 
 // ====================  info  ====================
@@ -739,12 +739,10 @@ func (l *LocalDnsServer) getDoTConnFromPool(addr string, isDirect bool, client *
 	}
 
 	host, _, _ := net.SplitHostPort(addr)
-	tlsConn := tls.Client(trackedConn, &tls.Config{
-		ServerName:         host,
-		ClientSessionCache: dotSessionCache,
-	})
-	if err := tlsConn.Handshake(); err != nil {
-		tlsConn.Close()
+	hsCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tlsConn, err := newChromeUConn(hsCtx, trackedConn, host, []string{"dot"}, dotSessionCache, true)
+	if err != nil {
 		return nil, "", err
 	}
 

@@ -28,6 +28,14 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 	if cfg.XhttpChunkSizeKB > 900 {
 		return nil, errors.New("xhttp_chunk_size_kb must be <= 900")
 	}
+	// 与其他 TLS 隧道对齐：xhttp 的指纹校验在 xhttptunnel SDK 内（verifyFingerprint），
+	// 当传入指纹为空串时它是 fail-open（返回 nil 校验器 → 接受任意证书）。而 raw/ws/quic/h2
+	// 用的 MakePeerCertVerifier 在“开启校验却没给指纹”时会比对失败（fail-closed）。
+	// 这里提前拒绝，避免 xhttp 在 verify_certificate_finger_print=true 却漏填
+	// server_certificate_finger_print 时静默暴露于中间人。仅在启用 TLS 时生效。
+	if tlsEnabled && cfg.VerifyCertificateFingerprint && strings.TrimSpace(cfg.ServerCertificateFingerprint) == "" {
+		return nil, errors.New("verify_certificate_finger_print is enabled but server_certificate_finger_print is empty")
+	}
 	psk := ""
 	if cfg.ProxyAuthRequired {
 		psk = strings.TrimSpace(cfg.ProxyAuthToken)

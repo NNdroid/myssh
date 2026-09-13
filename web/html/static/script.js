@@ -446,6 +446,7 @@ document.addEventListener('DOMContentLoaded', () => {
             setVis('[data-visibility-key="dnsTunnelFields"]', isDns);
             setVis('[data-visibility-key="xhttpSDKFields"]', isXhttp);
             setVis('[data-visibility-key="h2SDKFields"]', isH2SDK);
+            setVis('[data-visibility-key="masqueFields"]', tunnelType === 'masque');
             setVis('[data-visibility-key="customHost"]', !isBase && !isDns && !isKcp && !isUdpCustom && !isIcmpCustom && !isRaw && tunnelType !== 'quic');
             setVis('[data-visibility-key="serverName"]', ['h3', 'masque', 'webtransport', 'quic'].includes(tunnelType) || tlsOn);
             setVis('[data-visibility-key="httpPayload"]', isHttp);
@@ -596,7 +597,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(form);
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
-            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'xhttpChunkSizeKB', 'heartbeatIntervalMs', 'icmpCustomMaxPayload', 'icmpCustomPaceMS', 'kcpDataShards', 'kcpParityShards', 'kcpSndWnd', 'kcpRcvWnd', 'kcpMtu', 'kcpSmuxVer', 'kcpKeepAlive']) {
+            for (const key of ['udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'udpCustomMaxPkt', 'paddingMinBytes', 'xhttpChunkSizeKB', 'heartbeatIntervalMs', 'icmpCustomMaxPayload', 'icmpCustomPaceMS', 'kcpDataShards', 'kcpParityShards', 'kcpSndWnd', 'kcpRcvWnd', 'kcpMtu', 'kcpSmuxVer', 'kcpKeepAlive']) {
                 nodeData[key] = Number.parseInt(nodeData[key] || '0', 10) || 0;
             }
             

@@ -25,6 +25,26 @@ func parseUDPCMagicSDK(value string) (uint32, error) {
 	return v, nil
 }
 
+// normalizeUdpMtuProbe 解析 udp_custom_mtu_probe 配置为 SDK 的 *bool：
+//   - ""/auto => nil（走 SDK 默认：开启，对端为旧版时自动回落）
+//   - "on"/"true"/"1" => &true（强制开启路径 MTU 探测）
+//   - "off"/"false"/"0" => &false（关闭探测，按 MaxPkt 固定分片）
+//   - 其它值报错，不静默猜测。
+func normalizeUdpMtuProbe(value string) (*bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return nil, nil
+	case "on", "true", "1":
+		t := true
+		return &t, nil
+	case "off", "false", "0":
+		f := false
+		return &f, nil
+	default:
+		return nil, fmt.Errorf("udp_custom_mtu_probe must be one of: auto, on, off (got %q)", value)
+	}
+}
+
 // parseMagicSDK 两种自定义隧道的统一魔数解析核心：
 //   - 空值 → 0（默认魔数的语义由调用方/SDK 决定）；
 //   - 0x/0X 前缀 → 1-8 位十六进制，左补零；
@@ -128,6 +148,17 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid udp_custom_public_key: %w", err)
 		}
+	}
+	if cfg.UdpCustomMaxPkt < 0 {
+		return nil, errors.New("udp_custom_max_pkt must be non-negative")
+	}
+	if cfg.UdpCustomMaxPkt > 0 {
+		clientCfg.MaxPkt = cfg.UdpCustomMaxPkt // 0 => SDK 默认 1450，此处仅在显式设置时下发
+	}
+	if probe, err := normalizeUdpMtuProbe(cfg.UdpCustomMtuProbe); err != nil {
+		return nil, err
+	} else if probe != nil {
+		clientCfg.MtuProbe = probe // nil 走 SDK 默认（开启）
 	}
 
 	client, err := udpclient.NewClient(clientCfg)

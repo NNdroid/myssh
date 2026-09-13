@@ -339,6 +339,18 @@
                             <label data-i18n="label_udp_custom_send_window">Send Window</label>
                             <input type="number" name="udpCustomSendWindow" class="form-control" value="256" min="0">
                         </div>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_max_pkt">Max Packet (bytes)</label>
+                            <input type="number" name="udpCustomMaxPkt" class="form-control" value="0" min="0">
+                        </div>
+                        <div class="form-group" data-visibility-key="udpCustomFields">
+                            <label data-i18n="label_udp_custom_mtu_probe">MTU Probing</label>
+                            <select name="udpCustomMtuProbe" class="form-control">
+                                <option value="" data-i18n="opt_udp_mtu_probe_auto">Auto (default: enabled)</option>
+                                <option value="on" data-i18n="opt_udp_mtu_probe_on">Force on</option>
+                                <option value="off" data-i18n="opt_udp_mtu_probe_off">Off (pin max packet)</option>
+                            </select>
+                        </div>
 
                         <!-- ICMP Custom Fields -->
                         <div class="form-group" data-visibility-key="icmpCustomFields">
@@ -352,14 +364,6 @@
                         <div class="form-group grid-full" data-visibility-key="icmpCustomFields">
                             <label data-i18n="label_icmp_custom_public_key">Server Noise Public Key (hex/base64)</label>
                             <input type="text" name="icmpCustomPublicKey" class="form-control" data-i18n-placeholder="ph_udp_custom_public_key">
-                        </div>
-                        <div class="form-group" data-visibility-key="icmpCustomFields">
-                            <label data-i18n="label_icmp_custom_family">Address Family</label>
-                            <select name="icmpCustomFamily" class="form-control">
-                                <option value="auto" selected>auto</option>
-                                <option value="ipv4">ipv4</option>
-                                <option value="ipv6">ipv6</option>
-                            </select>
                         </div>
                         <div class="form-group" data-visibility-key="icmpCustomFields">
                             <label data-i18n="label_icmp_custom_mtu_mode">MTU Mode</label>
@@ -444,6 +448,18 @@
                         <div class="form-group" data-visibility-key="h2SDKFields">
                             <label data-i18n="label_heartbeat_interval">Resume Heartbeat (ms)</label>
                             <input type="number" name="heartbeatIntervalMs" class="form-control" value="25000" min="0">
+                        </div>
+                        <div class="form-group" data-visibility-key="h2SDKFields">
+                            <label data-i18n="label_padding_min_bytes">Padding Min Bytes</label>
+                            <input type="number" name="paddingMinBytes" class="form-control" value="0" min="-1">
+                        </div>
+                        <div class="form-group" data-visibility-key="masqueFields">
+                            <label data-i18n="label_masque_alpn">Masque Carrier (ALPN)</label>
+                            <select name="masqueAlpn" class="form-control">
+                                <option value="h3,h2" selected data-i18n="opt_masque_alpn_auto">Auto (h3,h2)</option>
+                                <option value="h3" data-i18n="opt_masque_alpn_h3">h3 only</option>
+                                <option value="h2" data-i18n="opt_masque_alpn_h2">h2 only</option>
+                            </select>
                         </div>
 
                         <div class="form-group" data-visibility-key="customHost">

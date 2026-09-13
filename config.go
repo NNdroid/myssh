@@ -67,19 +67,17 @@ type ProxyConfig struct {
 	UdpCustomPaths      int    `json:"udp_custom_paths"`       // UDP Custom multipath path count (client-selected random ports); 0 => 32
 	UdpCustomSockets    int    `json:"udp_custom_sockets"`     // local UDP sockets; 0 => 1
 	UdpCustomSendWindow int    `json:"udp_custom_send_window"` // in-flight frames; 0 => SDK default 256
+	UdpCustomMaxPkt     int    `json:"udp_custom_max_pkt"`     // largest v2 record on the wire (UDP payload bytes); 0 => SDK default 1450; probe ceiling when MtuProbe on
+	UdpCustomMtuProbe   string `json:"udp_custom_mtu_probe"`   // auto path-MTU probing: ""/auto (default: enabled), "on" (force enable), "off" (pin MaxPkt verbatim)
 
 	// ICMP Custom tunnel (SSH-over-ICMP) config
 	IcmpCustomPsk        string `json:"icmp_custom_psk"`         // ICMP Custom PSK (mandatory)
 	IcmpCustomMagic      string `json:"icmp_custom_magic"`       // 4-byte record magic as 8 hex chars; empty = SDK MagicDefault
 	IcmpCustomPublicKey  string `json:"icmp_custom_public_key"`  // server Noise static key (hex 64 / base64); empty = PSK-only
-	IcmpCustomFamily     string `json:"icmp_custom_family"`      // ""/auto (default), ipv4, ipv6
 	IcmpCustomMtuMode    string `json:"icmp_custom_mtu_mode"`    // ""/probe (default), auto, fixed
 	IcmpCustomMaxPayload int    `json:"icmp_custom_max_payload"` // complete-record ceiling; 0 = SDK default
 	IcmpCustomPaceMS     int    `json:"icmp_custom_pace_ms"`     // outbound packet spacing; 0 = SDK default
 	IcmpCustomIdRange    string `json:"icmp_custom_id_range"`    // echo identifier pool, e.g. "1000-1999"
-
-	//  info  Noise  info
-	NoisePublicKey string `json:"noise_public_key"` //  info  Noise  info
 
 	// XHTTP tunnel (xhttp/xhttpc) config
 	XhttpChunkSizeKB int    `json:"xhttp_chunk_size_kb"` // upstream request body in KB; default 256, range 16-900
@@ -88,6 +86,12 @@ type ProxyConfig struct {
 	// Resume/2 空闲心跳间隔（毫秒）。0 表示使用默认 25000ms。
 	// 在 CDN/反代 idle 阈值之前主动发 KEEPALIVE 帧保活主流，避免空闲流被掐断。
 	HeartbeatIntervalMs int `json:"heartbeat_interval_ms"`
+
+	// h2tunnel 家族（h2/grpc/h3/webtransport/masque）新增调优：
+	// PaddingMinBytes 出站帧最小字节数（流量混淆）：0 => myssh 默认 1420（SDK 本身把 0 视为 900，myssh 覆写为 1420），负数 => 关闭，上限 0xFFFF。
+	// MasqueAlpn 仅 masque 有效：SDK 取值 ""(auto)/"h2"/"h3"；配置面 "h3,h2"(或空/auto)=>auto、"h3"=>h3、"h2"=>h2。
+	PaddingMinBytes int    `json:"padding_min_bytes"`
+	MasqueAlpn      string `json:"masque_alpn"`
 }
 
 type GlobalConfig struct {
