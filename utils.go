@@ -276,6 +276,10 @@ func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
 
 	startTime := time.Now()
 	var capturedKey ssh.PublicKey
+	// 用户认证 banner（SSH_MSG_USERAUTH_BANNER，MOTD/服务器提示）在认证流程中、
+	// 认证结果判定**之前**下发 —— 所以假凭据认证失败也能收到。没有 BannerCallback
+	// 时这块信息直接丢失，WebUI「SSH 详情」的 banner 会永远是空（2026-09-15 修复）。
+	var capturedBanner string
 	config := &ssh.ClientConfig{
 		User: "probe",
 		Auth: []ssh.AuthMethod{
@@ -283,6 +287,10 @@ func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
 		},
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			capturedKey = key
+			return nil
+		},
+		BannerCallback: func(message string) error {
+			capturedBanner = message
 			return nil
 		},
 		Timeout: 6 * time.Second,
@@ -310,9 +318,16 @@ func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
 		return nil, fmt.Errorf("failed to retrieve ssh host key")
 	}
 
+	// 优先用户认证 banner（真正的 MOTD/提示）；没发 banner 的服务器退回版本标识行，
+	// 保证探测总能给出点信息 —— 但不再把 banner 恒空。
+	banner := strings.TrimRight(capturedBanner, "\r\n")
+	if banner == "" {
+		banner = serverVersion
+	}
+
 	return &SSHServerDetails{
 		Address:           addr,
-		Banner:            serverVersion,
+		Banner:            banner,
 		KeyType:           capturedKey.Type(),
 		FingerprintSHA256: ssh.FingerprintSHA256(capturedKey),
 		FingerprintMD5:    ssh.FingerprintLegacyMD5(capturedKey),
