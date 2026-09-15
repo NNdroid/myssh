@@ -42,7 +42,14 @@ var (
 	tcpConnMap sync.Map
 	udpgwMap   sync.Map //  info  UDP client ->  info  UDPGW  info  TCP  info
 
-	wg sync.WaitGroup
+	// 后台任务计数（替代 sync.WaitGroup）。WgWait 暴露给 Java 且可能长期阻塞，
+	// 若在 Wait 尚未返回时下一次 Start/连接处理器又对同一 WaitGroup 执行
+	// Add(1)（计数器 0→正），运行时会 panic：
+	// "sync: WaitGroup is reused before previous Wait has returned"。
+	// 互斥锁 + Cond 计数对任意 Add/Wait 交错都安全。
+	taskMu    sync.Mutex
+	taskCond  = sync.NewCond(&taskMu)
+	liveTasks int
 
 	//  info  singleflight： info  UDP  info  info  UDPGW  info  info ， info  info  info
 	//  info  sshClient.Dial  info  info  info ， info  channel open  info  info  "unexpected packet"  info
@@ -127,8 +134,8 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 	}
 
 	if r.Cmd == socks5.CmdConnect {
-		wg.Add(1)
-		defer wg.Done()
+		taskTrack()
+		defer taskRelease()
 
 		connKey := c.RemoteAddr().String() + "->" + r.Address()
 		tcpConnMap.Store(connKey, c)
@@ -351,12 +358,12 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				if Debug {
 					zlog.Debugf("%s [ROUTER-Direct] 🟢 Created new local direct session -> %s", TAG, sessionKey)
 				}
-				wg.Add(1)
+				taskTrack()
 				//  info address info ， info
 				dstAddrCopy := cloneSlice(d.DstAddr)
 				dstPortCopy := cloneSlice(d.DstPort)
 				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
-					defer wg.Done()
+					defer taskRelease()
 					defer conn.Close()
 					defer udpNatMap.Delete(key)
 
@@ -463,11 +470,11 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			if Debug {
 				zlog.Debugf("%s [ROUTER-Proxy] 🟢 Created new proxy session (UDPGW) -> Client: %s | Tunnel target: %s", TAG, sessionKey, targetAddrStr)
 			}
-			wg.Add(1)
+			taskTrack()
 			dstAddrCopy := cloneSlice(d.DstAddr)
 			dstPortCopy := cloneSlice(d.DstPort)
 			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
-				defer wg.Done()
+				defer taskRelease()
 				defer conn.Close()
 				defer udpgwMap.Delete(key)
 
@@ -545,9 +552,32 @@ func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *ne
 
 // -----  info  -----
 
+// taskTrack / taskRelease 标记一个后台 goroutine 的存活期，供 wgWait 等待。
+// 两者必须在同一 goroutine 内成对出现（Add 在启动 goroutine 前，Done 在其退出时）。
+func taskTrack() {
+	taskMu.Lock()
+	liveTasks++
+	taskMu.Unlock()
+}
+
+func taskRelease() {
+	taskMu.Lock()
+	liveTasks--
+	if liveTasks == 0 {
+		taskCond.Broadcast()
+	}
+	taskMu.Unlock()
+}
+
+// wgWait 阻塞直到当前全部后台任务退出。计数模型下，等待期间即使有任务
+// 再次 track（如引擎重启），也只是延长等待，绝不会像 WaitGroup 复用那样 panic。
 func wgWait() {
 	zlog.Infof("%s [Core] Waiting for all background tasks to exit completely...", TAG)
-	wg.Wait()
+	taskMu.Lock()
+	for liveTasks > 0 {
+		taskCond.Wait()
+	}
+	taskMu.Unlock()
 	zlog.Infof("%s [Core] ✅ All background tasks safely cleaned up, program can exit safely", TAG)
 }
 
@@ -766,9 +796,9 @@ func startSshTProxy(configJson string) int {
 		UdpgwVersion: cfg.UdpgwVersion,
 	}
 
-	wg.Add(1)
+	taskTrack()
 	go func() {
-		defer wg.Done()
+		defer taskRelease()
 		zlog.Infof("%s [SOCKS5] 🚀 SOCKS5 proxy service started: %s", TAG, cfg.LocalAddr)
 		if err := srv.ListenAndServe(handler); err != nil && !strings.Contains(err.Error(), "closed network connection") {
 			zlog.Errorf("%s [SOCKS5] ❌ Service exited abnormally: %v", TAG, err)
@@ -776,9 +806,9 @@ func startSshTProxy(configJson string) int {
 		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 service has completely stopped", TAG)
 	}()
 
-	wg.Add(1)
+	taskTrack()
 	go func() {
-		defer wg.Done()
+		defer taskRelease()
 
 		for {
 			select {
