@@ -15,8 +15,10 @@ jobs:
     name: Lint & Test (with -race)
     runs-on: ubuntu-latest
     env:
-      # 依赖仓库均为公开 GitHub 仓库，直接走 VCS 拉取，不经受任何模块代理。
-      GOPROXY: direct
+      # 公共模块（含 gopkg.in/*，其源站反向代理间歇性 502）优先走官方模块代理，
+      # 不再直连 gopkg.in；NNdroid/* 公共仓库代理同样可供给，若代理 404/410
+      # 则自动落到 direct（git VCS 直连）兜底，行为与纯 direct 一致。
+      GOPROXY: https://proxy.golang.org,direct
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,14 +29,14 @@ jobs:
           # 采用最新稳定版 Go，可满足 go.mod 中声明的语言版本要求。
           go-version: "stable"
           check-latest: true
-          # 关闭内置模块缓存：GOPROXY=direct 会把依赖以 git 浅克隆形式落在
+          # 关闭内置模块缓存：direct 兜底路径会把依赖以 git 浅克隆形式落在
           # cache/vcs 里；actions 恢复一个半旧/复用的浅克隆后，go 的
           # `git fetch --unshallow` 会撞上 “shallow file has changed since we read it”
-          # 这类 git 竞态并导致构建失败。用 direct 拉取本就无需这层缓存。
+          # 这类 git 竞态并导致构建失败。
           cache: false
 
-      - name: Warm module cache (direct VCS)
-        # GOPROXY=direct 时 Go 会把私有 fork 以浅克隆拉进 cache/vcs，再 `git fetch
+      - name: Warm module cache (with retry)
+        # 走 direct 兜底路径的依赖，Go 会以浅克隆拉进 cache/vcs，再 `git fetch
         # --unshallow` 取全量对象；runner 上 git 的后台 gc/maintenance 会在 unshallow
         # 期间改写 .git/shallow，触发 “shallow file has changed since we read it”。
         # 先全局关闭自动 gc/maintenance 消除并发写，再对 go mod download 做重试兜底

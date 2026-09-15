@@ -72,3 +72,10 @@ func (p *SshTProxy) TriggerTestCrash(tag string) {
 func (p *SshTProxy) SetLogLevel(levelStr string) {
 	SetLogLevel(levelStr)
 }
+
+// GetSSHHandshakeInfo 返回 addr 最近一次真实 SSH 握手的 JSON（{address, client_version,
+// server_version, banner, updated_at}）。addr 无记录时回退到最近一次握手；全无记录返回空串。
+// server_version 为 RFC 4253 版本标识行，banner 为认证阶段服务端提示文本（可能为空）。
+func (p *SshTProxy) GetSSHHandshakeInfo(addr string) string {
+	return getSSHHandshakeInfoJSON(addr)
+}

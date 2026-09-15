@@ -903,6 +903,86 @@ func stopSshTProxy() {
 	zlog.Infof("%s [Core] All active SSH/Proxy connections destroyed", TAG)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SSH 握手信息（供 UI 展示服务器标识）
+//
+// 两类 banner 语义不同，切勿混为一谈：
+//   ServerVersion —— RFC 4253 版本标识行（如 SSH-2.0-OpenSSH_9.6），版本交换阶段即确定；
+//   Banner        —— SSH_MSG_USERAUTH_BANNER 认证阶段文本（服务端自定义提示 / MOTD），可能为空。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SSHHandshakeInfo 一次真实 SSH 握手中可对外展示的信息。
+type SSHHandshakeInfo struct {
+	Address       string `json:"address"`
+	ClientVersion string `json:"client_version"`
+	ServerVersion string `json:"server_version"`
+	Banner        string `json:"banner"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+var (
+	sshHandshakeMu    sync.Mutex
+	sshHandshakeCache = make(map[string]*SSHHandshakeInfo)
+	sshHandshakeLast  *SSHHandshakeInfo
+)
+
+// recordSSHHandshakeVersion 记录握手中的版本标识行（认证成功后才可达）。
+func recordSSHHandshakeVersion(addr, clientVersion, serverVersion string) {
+	sshHandshakeMu.Lock()
+	defer sshHandshakeMu.Unlock()
+	info := sshHandshakeCache[addr]
+	if info == nil {
+		info = &SSHHandshakeInfo{Address: addr}
+		sshHandshakeCache[addr] = info
+	}
+	info.ClientVersion = clientVersion
+	info.ServerVersion = serverVersion
+	info.UpdatedAt = time.Now().UnixMilli()
+	sshHandshakeLast = info
+}
+
+// recordSSHHandshakeBanner 记录认证阶段 banner（服务端未配置时为空，此时保留旧值）。
+func recordSSHHandshakeBanner(addr, banner string) {
+	banner = strings.TrimSpace(banner)
+	if banner == "" {
+		return
+	}
+	sshHandshakeMu.Lock()
+	defer sshHandshakeMu.Unlock()
+	info := sshHandshakeCache[addr]
+	if info == nil {
+		info = &SSHHandshakeInfo{Address: addr}
+		sshHandshakeCache[addr] = info
+	}
+	info.Banner = banner
+	info.UpdatedAt = time.Now().UnixMilli()
+	sshHandshakeLast = info
+}
+
+// getSSHHandshakeInfoJSON 返回 addr 最近一次真实握手的 JSON；
+// addr 无记录时回退到最近一次握手，保证节点切换后仍能展示当前连接的信息；全无记录返回 ""。
+func getSSHHandshakeInfoJSON(addr string) string {
+	sshHandshakeMu.Lock()
+	info := sshHandshakeCache[addr]
+	if info == nil {
+		info = sshHandshakeLast
+	}
+	var snapshot SSHHandshakeInfo
+	if info != nil {
+		snapshot = *info
+	}
+	sshHandshakeMu.Unlock()
+
+	if info == nil {
+		return ""
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (*ssh.Client, error) {
 	var sshAuthMethod []ssh.AuthMethod
 	if cfg.AuthType == "password" {
@@ -953,6 +1033,8 @@ func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (
 		User: cfg.User,
 		Auth: sshAuthMethod,
 		BannerCallback: func(message string) error {
+			// 认证阶段 banner（服务端自定义提示 / MOTD）：捕获供 UI 展示，探测路径同样记录
+			recordSSHHandshakeBanner(cfg.SshAddr, message)
 			if !isPing {
 				zlog.Warnf("===== SSH Banner START =====\n%s\n===== SSH Banner END =====", message)
 			}
@@ -989,9 +1071,12 @@ func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (
 		return nil, err
 	}
 
+	cv := string(scc.ClientVersion())
+	sv := string(scc.ServerVersion())
+	// 版本标识行：认证已通过，记入缓存供连接详情面板展示
+	recordSSHHandshakeVersion(cfg.SshAddr, cv, sv)
+
 	if !isPing {
-		cv := string(scc.ClientVersion())
-		sv := string(scc.ServerVersion())
 		zlog.Warnf("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
 		zlog.Warnf("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
 	}
