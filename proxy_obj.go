@@ -39,6 +39,13 @@ func (p *SshTProxy) PingNodes(profilesJson, targetUrl string, timeoutMs int) str
 	return pingNodes(profilesJson, targetUrl, timeoutMs)
 }
 
+// SpeedTest  info  info  info （ info  SpeedTestResult）：
+// info  configJson  info  ProxyConfig  info （ info  pingNodes  info ），
+// info  downUrl/upUrl  info  Cloudflare speed  info 。
+func (p *SshTProxy) SpeedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) string {
+	return speedTest(configJson, downUrl, upUrl, upBytes, timeoutMs)
+}
+
 // WgWait  info  goroutine  info （ info  Android  info ）。
 func (p *SshTProxy) WgWait() {
 	wgWait()
