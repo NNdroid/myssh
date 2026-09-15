@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+// SpeedTestProgressCallback reports bytes sent over the dedicated test connection.
+// Phase is download, download_done, upload, or upload_done.
+type SpeedTestProgressCallback interface {
+	OnSpeedTestProgress(phase string, transferred, elapsedMs int64)
+}
+
 // SpeedTestResult 是 speedTest 的结构化返回（字节/秒 + 折算 Mbps）。
 type SpeedTestResult struct {
 	Ok         bool    `json:"ok"`
@@ -29,6 +35,10 @@ type SpeedTestResult struct {
 // 与 pingNodes 同理走 DialNode 建立 SSH 隧道，再 sshClient.Dial("tcp", addr) 把 HTTP 流量导进隧道，
 // 因此测到的是“本机→节点→出口”的隧道吞吐，而不是直连本机网卡。
 func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) string {
+	return speedTestWithProgress(configJson, downUrl, upUrl, upBytes, timeoutMs, nil)
+}
+
+func speedTestWithProgress(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int, progress SpeedTestProgressCallback) string {
 	var cfg ProxyConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
 		return marshalSpeedError("config unmarshal: " + err.Error())
@@ -37,7 +47,7 @@ func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) 
 		timeoutMs = 30000
 	}
 	if strings.TrimSpace(downUrl) == "" {
-		downUrl = "https://speed.cloudflare.com/__down?bytes=104857600"
+		downUrl = "https://speed.cloudflare.com/__down?bytes=10485760"
 	}
 	if strings.TrimSpace(upUrl) == "" {
 		upUrl = "https://speed.cloudflare.com/__up"
@@ -47,7 +57,9 @@ func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) 
 	}
 
 	totalStart := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	// The dial context owns the tunnel connection; keep it alive for both test phases.
+	// Each HTTP phase has its own timeout below, so the aggregate needs a larger budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
 	zlog.Infof("[SpeedTest] dial node start: down=%s up=%s upBytes=%d timeout=%dms", downUrl, upUrl, upBytes, timeoutMs)
@@ -81,22 +93,30 @@ func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) 
 		downUrl = "http://" + downUrl
 	}
 	{
-		req, err := http.NewRequestWithContext(ctx, "GET", downUrl, nil)
+		phaseCtx, phaseCancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+		defer phaseCancel()
+		req, err := http.NewRequestWithContext(phaseCtx, "GET", downUrl, nil)
 		if err != nil {
-			return marshalSpeedError("down req: " + err.Error())
+			return marshalPartialSpeedError(res, totalStart, "down req: "+err.Error())
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/SpeedTest")
 		start := time.Now()
+		reportProgress(progress, "download", 0, start)
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			zlog.Errorf("[SpeedTest] down http failed: %v", err)
-			return marshalSpeedError("down http: " + err.Error())
+			return marshalPartialSpeedError(res, totalStart, "down http: "+err.Error())
 		}
-		n, err := io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return marshalPartialSpeedError(res, totalStart, "down status: "+resp.Status)
+		}
+		counter := &speedProgressWriter{phase: "download", start: start, callback: progress}
+		n, err := io.Copy(counter, resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			zlog.Errorf("[SpeedTest] down read failed: %v", err)
-			return marshalSpeedError("down read: " + err.Error())
+			return marshalPartialSpeedError(res, totalStart, "down read: "+err.Error())
 		}
 		d := time.Since(start).Seconds()
 		if d <= 0 {
@@ -105,6 +125,7 @@ func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) 
 		res.BytesDown = n
 		res.DownBps = float64(n) / d
 		res.DownMbps = res.DownBps * 8 / 1e6
+		reportProgress(progress, "download_done", n, start)
 		zlog.Infof("[SpeedTest] down done: %d bytes in %.2fs -> %.2f Mbps", n, d, res.DownMbps)
 	}
 
@@ -113,22 +134,30 @@ func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) 
 		upUrl = "http://" + upUrl
 	}
 	{
+		phaseCtx, phaseCancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+		defer phaseCancel()
 		body := make([]byte, upBytes)
 		if _, err := rand.Read(body); err != nil {
 			// 退化：零填充也足以测吞吐
 			zlog.Warnf("[SpeedTest] rand.Read failed, fall back to zero body: %v", err)
 		}
-		req, err := http.NewRequestWithContext(ctx, "POST", upUrl, bytes.NewReader(body))
+		start := time.Now()
+		counter := &speedProgressReader{reader: bytes.NewReader(body), phase: "upload", start: start, callback: progress}
+		req, err := http.NewRequestWithContext(phaseCtx, "POST", upUrl, counter)
 		if err != nil {
-			return marshalSpeedError("up req: " + err.Error())
+			return marshalPartialSpeedError(res, totalStart, "up req: "+err.Error())
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/SpeedTest")
 		req.ContentLength = upBytes
-		start := time.Now()
+		reportProgress(progress, "upload", 0, start)
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			zlog.Errorf("[SpeedTest] up http failed: %v", err)
-			return marshalSpeedError("up http: " + err.Error())
+			return marshalPartialSpeedError(res, totalStart, "up http: "+err.Error())
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return marshalPartialSpeedError(res, totalStart, "up status: "+resp.Status)
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
@@ -136,14 +165,64 @@ func speedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) 
 		if d <= 0 {
 			d = 1e-6
 		}
-		res.BytesUp = upBytes
-		res.UpBps = float64(upBytes) / d
+		res.BytesUp = counter.transferred
+		res.UpBps = float64(counter.transferred) / d
 		res.UpMbps = res.UpBps * 8 / 1e6
-		zlog.Infof("[SpeedTest] up done: %d bytes in %.2fs -> %.2f Mbps", upBytes, d, res.UpMbps)
+		reportProgress(progress, "upload_done", counter.transferred, start)
+		zlog.Infof("[SpeedTest] up done: %d bytes in %.2fs -> %.2f Mbps", counter.transferred, d, res.UpMbps)
 	}
 
 	res.Ok = true
 	res.DurationMs = time.Since(totalStart).Milliseconds()
+	out, _ := json.Marshal(res)
+	return string(out)
+}
+
+type speedProgressWriter struct {
+	phase       string
+	start       time.Time
+	callback    SpeedTestProgressCallback
+	transferred int64
+	lastReport  time.Time
+}
+
+func (w *speedProgressWriter) Write(p []byte) (int, error) {
+	w.transferred += int64(len(p))
+	if w.callback != nil && time.Since(w.lastReport) >= 250*time.Millisecond {
+		reportProgress(w.callback, w.phase, w.transferred, w.start)
+		w.lastReport = time.Now()
+	}
+	return io.Discard.Write(p)
+}
+
+type speedProgressReader struct {
+	reader      io.Reader
+	phase       string
+	start       time.Time
+	callback    SpeedTestProgressCallback
+	transferred int64
+	lastReport  time.Time
+}
+
+func (r *speedProgressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.transferred += int64(n)
+	if r.callback != nil && time.Since(r.lastReport) >= 250*time.Millisecond {
+		reportProgress(r.callback, r.phase, r.transferred, r.start)
+		r.lastReport = time.Now()
+	}
+	return n, err
+}
+
+func reportProgress(callback SpeedTestProgressCallback, phase string, transferred int64, start time.Time) {
+	if callback != nil {
+		callback.OnSpeedTestProgress(phase, transferred, time.Since(start).Milliseconds())
+	}
+}
+
+func marshalPartialSpeedError(res SpeedTestResult, start time.Time, msg string) string {
+	res.Error = msg
+	res.DurationMs = time.Since(start).Milliseconds()
 	out, _ := json.Marshal(res)
 	return string(out)
 }

@@ -46,6 +46,11 @@ func (p *SshTProxy) SpeedTest(configJson, downUrl, upUrl string, upBytes int64, 
 	return speedTest(configJson, downUrl, upUrl, upBytes, timeoutMs)
 }
 
+// SpeedTestWithProgress exposes directional progress from the test's own SSH connection.
+func (p *SshTProxy) SpeedTestWithProgress(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int, cb SpeedTestProgressCallback) string {
+	return speedTestWithProgress(configJson, downUrl, upUrl, upBytes, timeoutMs, cb)
+}
+
 // WgWait  info  goroutine  info （ info  Android  info ）。
 func (p *SshTProxy) WgWait() {
 	wgWait()
