@@ -19,13 +19,22 @@ DEBUG_OUTPUT_PATH="${OUTPUT_DIR}/${DEBUG_OUTPUT_FILE}"
 RELEASE_OUTPUT_PATH="${OUTPUT_DIR}/${RELEASE_OUTPUT_FILE}"
 
 # 定义发版版本号：默认绑定当前 myssh 提交，允许通过环境变量 VERSION 覆盖。
+# 格式：v1.0.YYYYMMDD.<git-count>-<short-hash>
+# 例如：v1.0.20260916.1234-8f60417
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -z "${VERSION:-}" ]; then
+    BUILD_DATE="$(date -u +%Y%m%d)"
     GIT_HASH="$(git -C "$PROJECT_ROOT" rev-parse --short=7 HEAD 2>/dev/null || true)"
+    GIT_COUNT="$(git -C "$PROJECT_ROOT" rev-list --count HEAD 2>/dev/null || true)"
+
     if [ -z "$GIT_HASH" ]; then
         GIT_HASH="unknown"
     fi
-    VERSION="v1.0.$(date -u +%Y%m%d)-$GIT_HASH"
+    if [ -z "$GIT_COUNT" ]; then
+        GIT_COUNT="0"
+    fi
+
+    VERSION="v1.0.${BUILD_DATE}.${GIT_COUNT}-${GIT_HASH}"
 fi
 # ============================================
 
