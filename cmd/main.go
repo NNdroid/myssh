@@ -14,16 +14,16 @@ import (
 
 func main() {
 	// 1. 定义并解析命令行参数
-	confPath := flag.String("conf", "config.json", "指定配置文件的路径")
+	confPath := flag.String("conf", "config.json", "path to the config file")
 	logLevel := flag.String("level", "debug", "Log level (debug, info, warn, error)")
-	pprofAddr := flag.String("pprof", "", "指定 pprof 性能分析监听地址 (例如: localhost:6060)")
+	pprofAddr := flag.String("pprof", "", "pprof profiling listen address (e.g. localhost:6060)")
 	flag.Parse()
 
 	if *pprofAddr != "" {
 		go func() {
-			fmt.Printf("[Main] 🔍 启动 pprof 性能分析服务器: http://%s/debug/pprof/\n", *pprofAddr)
+			fmt.Printf("[Main] 🔍 pprof profiling server listening: http://%s/debug/pprof/\n", *pprofAddr)
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
-				fmt.Printf("[Main] ⚠️ pprof 服务器启动失败: %v\n", err)
+				fmt.Printf("[Main] ⚠️ pprof server failed to start: %v\n", err)
 			}
 		}()
 	}
@@ -31,7 +31,7 @@ func main() {
 	// 2. 读取配置文件内容
 	configBytes, err := os.ReadFile(*confPath)
 	if err != nil {
-		fmt.Printf("[Main] ❌ 无法读取配置文件 %s: %v\n", *confPath, err)
+		fmt.Printf("[Main] ❌ cannot read config file %s: %v\n", *confPath, err)
 		os.Exit(1)
 	}
 	configStr := string(configBytes)
@@ -39,7 +39,7 @@ func main() {
 	// 初始化日志：控制台输出，级别取自 -level 命令行参数（默认 debug），不写文件
 	// 如果你要写文件，可以改成 myssh.InitLogger("/var/log/myssh.log", "INFO")
 	if logRes := myssh.InitLogger("", strings.ToUpper(*logLevel)); logRes != 0 {
-		fmt.Printf("[Main] ❌ 日志系统初始化失败\n")
+		fmt.Printf("[Main] ❌ logger initialization failed\n")
 		os.Exit(1)
 	}
 
@@ -49,12 +49,12 @@ func main() {
 	// 3. 加载全局路由与 DNS 配置 (如果你的 JSON 包含 GlobalConfig)
 	// 如果配置文件中没有全局配置字段，解析失败会返回负数，这里仅做警告不中断
 	if loadRes := myssh.NewSshTProxy().LoadGlobalConfig(configStr); loadRes != 0 {
-		fmt.Printf("[Main] ⚠️ 全局配置加载异常或未配置，返回值: %d\n", loadRes)
+		fmt.Printf("[Main] ⚠️ global config load returned non-zero (missing or invalid): %d\n", loadRes)
 	}
 
 	// 4. 启动 SSH 代理主引擎
 	if startRes := myssh.NewSshTProxy().Start(configStr); startRes != 0 {
-		fmt.Printf("[Main] ❌ SSH 代理引擎启动失败，错误码: %d\n", startRes)
+		fmt.Printf("[Main] ❌ SSH proxy engine failed to start, error code: %d\n", startRes)
 		os.Exit(1)
 	}
 
@@ -63,12 +63,12 @@ func main() {
 	// syscall.SIGINT 对应 Ctrl+C，syscall.SIGTERM 对应 kill 命令
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Printf("[Main] 🚀 代理程序正在后台运行，配置文件: %s\n", *confPath)
-	fmt.Printf("[Main] 💡 按 Ctrl+C 可以安全停止程序\n")
+	fmt.Printf("[Main] 🚀 proxy engine running in background, config: %s\n", *confPath)
+	fmt.Printf("[Main] 💡 press Ctrl+C to stop safely\n")
 
 	// 6. 阻塞主线程，直到接收到退出信号
 	<-sigCh
-	fmt.Println("\n[Main] 🛑 接收到系统终止信号，开始清理资源...")
+	fmt.Println("\n[Main] 🛑 termination signal received, cleaning up resources...")
 
 	// 7. 触发安全的关闭流程
 	myssh.NewSshTProxy().Stop()
@@ -76,5 +76,5 @@ func main() {
 	// 8. 等待所有后台 goroutine 完成资源回收
 	myssh.NewSshTProxy().WgWait()
 
-	fmt.Println("[Main] 👋 资源已彻底清理，程序安全退出。")
+	fmt.Println("[Main] 👋 all resources cleaned up, exiting safely.")
 }
