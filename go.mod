@@ -3,11 +3,11 @@ module myssh
 go 1.26.1
 
 require (
-	github.com/NNdroid/dns_custom v1.0.20260916-d134158
-	github.com/NNdroid/h2tunnel v1.0.20260916
-	github.com/NNdroid/icmp_custom v1.0.20260916-6a6f65b
-	github.com/NNdroid/udp_custom v1.0.20260916-5a8796c
-	github.com/NNdroid/xhttptunnel v1.0.20260916-efc3509
+	github.com/NNdroid/dns_custom v0.0.0-20260916234217-5214a1a9d951
+	github.com/NNdroid/h2tunnel v1.0.20260425-0.20260917010808-fbef22a450f8
+	github.com/NNdroid/icmp_custom v0.0.0-20260916233650-89b9cf596a76
+	github.com/NNdroid/udp_custom v0.0.0-20260916234937-6da8c648c9db
+	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260916232446-2b95a0fc1a88
 	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1

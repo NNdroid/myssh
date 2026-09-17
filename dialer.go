@@ -77,6 +77,39 @@ func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (
 		zlog.Debugf("%s [Dialer] 🌐 No bind interface specified, using default routing", TAG)
 	}
 
+	//
+	// IP4P resolution.
+	//
+	// Must happen BEFORE DialContext because standard net.Dialer cannot
+	// extract/replace the port encoded inside an IP4P AAAA record.
+	//
+	resolvedAddress, ip4p, err := resolveIP4PDialAddress(
+		ctx,
+		dialer,
+		network,
+		address,
+	)
+	if err != nil {
+		zlog.Errorf(
+			"%s [Dialer] ❌ IP4P resolution failed for %s: %v",
+			TAG,
+			address,
+			err,
+		)
+		return nil, err
+	}
+
+	if ip4p {
+		zlog.Infof(
+			"%s [Dialer] 🧩 IP4P resolved: %s -> %s",
+			TAG,
+			address,
+			resolvedAddress,
+		)
+
+		address = resolvedAddress
+	}
+
 	// Apply Android VpnService Protect.
 	safeDialer := wrapAndroidProtect(dialer)
 
