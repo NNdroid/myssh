@@ -117,7 +117,7 @@
 
 ### 4.5 `h3` / `webtransport` / `masque`（custom，固定 TLS，QUIC 承载）
 - 参数与 §4.4 相同（含 `padding_min_bytes`），但 **`tunnel_tls_enabled` 被忽略（恒开 TLS）**；uTLS 不适用（QUIC 内部做 TLS）
-- `masque` 额外读 **`masque_alpn`**（仅 masque）：承载选择，SDK 取值 `""`(auto)/`h2`/`h3`；配置面 `h3,h2`（或 `auto`/空）→auto、`h3`→仅 h3、`h2`→仅 h2
+- `masque` 额外读 **`masque_alpn`**（仅 masque）：承载选择，SDK 取值只有 `""`(auto)/`h2`/`h3`（严格相等，不做逗号拆分）；配置面 `auto`（或空）→auto、`h3`→仅 h3、`h2`→仅 h2
 - 走 `sdkQUICDialer`（含 `bind_interface`）；ALPN 语义由 SDK 传输固定（h3/wt）
 
 ### 4.6 `quic`（udp，固定 TLS，SSH-over-QUIC）
@@ -204,7 +204,7 @@
 - **`icmp_custom_mtu_mode`**：`probe`(默认) / `auto` / `fixed`
 - **`xhttp_stream_mode`**：`auto`(默认) / `stream` / `poll`
 - **`udp_custom_mtu_probe`**：`auto`(默认=开) / `on` / `off`
-- **`masque_alpn`**（仅 masque）：配置面 `h3,h2`(=auto，默认) / `h3` / `h2`；映射到 SDK `""`/`h3`/`h2`
+- **`masque_alpn`**（仅 masque）：配置面 `auto`(=SDK `""`，默认) / `h3` / `h2`；映射到 SDK `""`/`h3`/`h2`
 - **`h2tunnel UtlxFingerprint`**：myssh 固定 `chrome`（`HelloChrome_Auto`），仅 TCP-TLS 的 h2/grpc；不可配
 - **ALPN（不可配）**：`raw`=`["h2","http/1.1"]`，`websocket`=`["http/1.1"]`，`quic`=`h3`；`alpn` 字段仅 `xhttp` 生效
 

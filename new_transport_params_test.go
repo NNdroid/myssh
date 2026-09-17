@@ -7,14 +7,20 @@ import (
 )
 
 func TestNormalizeMasqueALPN(t *testing.T) {
+	// SDK 只认 ""/h2/h3（client_api.go 严格相等，不拆逗号）：多值一律原样透传交 SDK 拒绝。
+	// 历史上这里曾把 "h3,h2"/"h2,h3" 翻译成 auto——那是配置面的虚假选项（SDK 没有
+	// “优先级排序”这一语义），已从 UI/校验/文案/文档中移除，此处锁定不再翻译。
 	cases := map[string]string{
 		"":        "", // auto
 		"auto":    "", // auto
-		"h3,h2":   "", // 用户书写“两者皆可”=> SDK auto
-		"H2, H3 ": "", // 大小写/空格归一后仍是 auto
+		"AUTO":    "", // 大小写归一后仍是 auto
+		"  ":      "", // 纯空白归一为空 => auto
 		"h3":      "h3",
 		"H3":      "h3",
 		"h2":      "h2",
+		"h2 ":     "h2",
+		"h3,h2":   "h3,h2", // 多值不再翻译 => 原样返回（SDK 拒绝）
+		"H2, H3 ": "h2,h3", // 归一后仍是多值 => 原样（SDK 拒绝）
 		"bogus":   "bogus", // 原样返回，交 SDK 校验拒绝
 	}
 	for in, want := range cases {
@@ -60,7 +66,7 @@ func pBool(p *bool) bool { return p != nil && *p }
 // TestNewTransportParamJSONTags 锁定 4 个新字段的 JSON key（web/Android/API round-trip 依赖）。
 func TestNewTransportParamJSONTags(t *testing.T) {
 	cfg := ProxyConfig{
-		MasqueAlpn:        "h3,h2",
+		MasqueAlpn:        "h3",
 		PaddingMinBytes:   1200,
 		UdpCustomMaxPkt:   1400,
 		UdpCustomMtuProbe: "off",
@@ -71,7 +77,7 @@ func TestNewTransportParamJSONTags(t *testing.T) {
 	}
 	s := string(b)
 	for _, want := range []string{
-		`"masque_alpn":"h3,h2"`,
+		`"masque_alpn":"h3"`,
 		`"padding_min_bytes":1200`,
 		`"udp_custom_max_pkt":1400`,
 		`"udp_custom_mtu_probe":"off"`,

@@ -227,7 +227,7 @@
               "opt_udp_mtu_probe_off": "Off (pin max packet)",
               "label_padding_min_bytes": "Padding Min Bytes",
               "label_masque_alpn": "Masque Carrier (ALPN)",
-              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_auto": "Auto (h3 → h2)",
               "opt_masque_alpn_h3": "h3 only",
               "opt_masque_alpn_h2": "h2 only"
            },
@@ -460,7 +460,7 @@
               "opt_udp_mtu_probe_off": "Off (pin max packet)",
               "label_padding_min_bytes": "Padding Min Bytes",
               "label_masque_alpn": "Masque Carrier (ALPN)",
-              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_auto": "Auto (h3 → h2)",
               "opt_masque_alpn_h3": "h3 only",
               "opt_masque_alpn_h2": "h2 only"
            },
@@ -692,7 +692,7 @@
               "opt_udp_mtu_probe_off": "Off (pin max packet)",
               "label_padding_min_bytes": "Padding Min Bytes",
               "label_masque_alpn": "Masque Carrier (ALPN)",
-              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_auto": "Auto (h3 → h2)",
               "opt_masque_alpn_h3": "h3 only",
               "opt_masque_alpn_h2": "h2 only"
            },
@@ -924,7 +924,7 @@
               "opt_udp_mtu_probe_off": "Off (pin max packet)",
               "label_padding_min_bytes": "Padding Min Bytes",
               "label_masque_alpn": "Masque Carrier (ALPN)",
-              "opt_masque_alpn_auto": "Auto (h3,h2)",
+              "opt_masque_alpn_auto": "Auto (h3 → h2)",
               "opt_masque_alpn_h3": "h3 only",
               "opt_masque_alpn_h2": "h2 only"
            },
@@ -1157,7 +1157,7 @@
                   "opt_udp_mtu_probe_off": "关闭（固定最大报文）",
                   "label_padding_min_bytes": "填充最小字节",
                   "label_masque_alpn": "Masque 承载（ALPN）",
-                  "opt_masque_alpn_auto": "自动（h3,h2）",
+                  "opt_masque_alpn_auto": "自动（h3 → h2）",
                   "opt_masque_alpn_h3": "仅 h3",
                   "opt_masque_alpn_h2": "仅 h2"
               }

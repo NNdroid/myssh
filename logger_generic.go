@@ -103,10 +103,3 @@ func InitLogger(logPath string, logLevelStr string) int {
 
 	return 0
 }
-
-// SyncLogger  info  main  info ， info
-func SyncLogger() {
-	if zlog != nil {
-		_ = zlog.Sync()
-	}
-}

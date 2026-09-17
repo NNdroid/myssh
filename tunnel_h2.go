@@ -134,13 +134,19 @@ func h2UtlxFingerprint(tlsEnabled, isQUIC bool) string {
 }
 
 // normalizeMasqueALPN 把配置面的 MASQUE 承载选择翻译为 h2tunnel SDK 取值：
-//   - ""、auto、"h3,h2"、"h2,h3" => ""（SDK 自动协商）；
+//   - ""、auto => ""（SDK 自动协商：h3 优先，grace 失败后 pin h2）；
 //   - "h3" => "h3"，"h2" => "h2"；
-//   - 其它值小写后原样返回，交由 SDK 校验并拒绝（避免在此静默改写非法输入）。
+//   - 其它值小写去空格后原样返回，交由 SDK 校验并拒绝（避免在此静默改写非法输入）。
+//
+// SDK 侧只有 ""/"h2"/"h3" 三个合法取值（transport_masque_client.go 定义、client_api.go
+// 按严格字符串相等校验，不做逗号拆分），所以这里不再做"多值"翻译。历史上曾把
+// "h3,h2"/"h2,h3" 当作 auto 的别名，但那两个写法并不表达任何 SDK 支持的能力
+// （不存在"优先级排序"这一语义），属于配置面的虚假选项，已在 UI/校验/文案/文档中
+// 一并移除；此处改为原样透传，交给 SDK 拒绝。
 func normalizeMasqueALPN(value string) string {
 	v := strings.ToLower(strings.ReplaceAll(value, " ", ""))
 	switch v {
-	case "", "auto", "h3,h2", "h2,h3":
+	case "", "auto":
 		return ""
 	case "h3":
 		return "h3"

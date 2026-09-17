@@ -89,9 +89,10 @@ type ProxyConfig struct {
 
 	// h2tunnel 家族（h2/grpc/h3/webtransport/masque）新增调优（padding 现覆盖全部 h2tunnel 传输）：
 	// PaddingMinBytes 出站记录填充下限：0 => myssh 默认 1420；负数 => 关闭填充；正数 => 该下限（须 >16）。上限由 h2tunnel 自动取 min+25%。
-	// MasqueAlpn 仅 masque 有效：SDK 取值 ""(auto)/"h2"/"h3"；配置面 "h3,h2"(或空/auto)=>auto、"h3"=>h3、"h2"=>h2。
+	// MasqueAlpn 仅 masque 有效：SDK 取值只有 ""(auto)/"h2"/"h3"（严格字符串比较，不做逗号拆分）；
+	// 配置面 "auto"(或空)=>auto、"h3"=>h3、"h2"=>h2，其余原样透传交 SDK 拒绝。
 	PaddingMinBytes int    `json:"padding_min_bytes"` // 填充下限字节；0→默认1420，负→关闭，正→按值(>16)；仅 h2 家族
-	MasqueAlpn      string `json:"masque_alpn"`       // masque 承载 ALPN："h3,h2"→auto / h3 / h2；仅 masque
+	MasqueAlpn      string `json:"masque_alpn"`       // masque 承载 ALPN：auto(=""，SDK 默认) / h3 / h2；仅 masque
 }
 
 type GlobalConfig struct {

@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -25,16 +26,36 @@ const (
 	GEOSITE_URL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
 )
 
-// shouldDownload checks if the file is missing or older than 24 hours
+// shouldDownload reports whether filePath needs to be (re)downloaded: it is
+// missing, older than 24 hours, or structurally unusable.
+//
+// The age check alone is not enough. A truncated download lands with a fresh
+// mtime, so it would otherwise sit on disk for a full refresh cycle and keep
+// breaking every LoadGeoSite/LoadGeoIP in between.
 func shouldDownload(filePath string) bool {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return true // File does not exist or cannot be accessed
 	}
-	return time.Since(info.ModTime()) > 24*time.Hour
+	if time.Since(info.ModTime()) > 24*time.Hour {
+		return true
+	}
+	if info.Size() == 0 {
+		return true
+	}
+	// Reuse the tag scanner as a structural check: a file whose top-level wire
+	// stream stops early is truncated or not a rule file at all, either way it
+	// is unusable.
+	if _, truncated, err := extractGeoFileTags(filePath); err != nil || truncated {
+		return true
+	}
+	return false
 }
 
 // DownloadRuleFiles downloads geoip.dat and geosite.dat to the specified directory.
+//
+// The two files are refreshed independently: a failure on one must not strand
+// the other on a stale copy, and both failures are reported.
 func DownloadRuleFiles(destDir string) error {
 	// Check and create the destination directory (MkdirAll returns nil if it already exists).
 	// 0755 permissions: owner has read, write, execute; others have read, execute.
@@ -42,35 +63,41 @@ func DownloadRuleFiles(destDir string) error {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Download geoip.dat
-	geoipPath := filepath.Join(destDir, "geoip.dat")
-	if shouldDownload(geoipPath) {
-		zlog.Debugf("Downloading geoip.dat...")
-		if err := downloadFile(GEOIP_URL, geoipPath); err != nil {
-			return fmt.Errorf("failed to download geoip.dat: %w", err)
+	var errs []error
+	for _, f := range []struct {
+		name string
+		url  string
+	}{
+		{name: "geoip.dat", url: GEOIP_URL},
+		{name: "geosite.dat", url: GEOSITE_URL},
+	} {
+		path := filepath.Join(destDir, f.name)
+		if !shouldDownload(path) {
+			zlog.Debugf("%s is up to date, skipping download.", f.name)
+			continue
 		}
-		zlog.Debugf("geoip.dat downloaded and updated successfully!")
-	} else {
-		zlog.Debugf("geoip.dat is up to date, skipping download.")
+
+		zlog.Debugf("Downloading %s...", f.name)
+		if err := downloadFile(f.url, path); err != nil {
+			zlog.Warnf("%s download failed, previous copy kept: %v", f.name, err)
+			errs = append(errs, fmt.Errorf("failed to download %s: %w", f.name, err))
+			continue
+		}
+		zlog.Debugf("%s downloaded and updated successfully!", f.name)
 	}
 
-	// Download geosite.dat
-	geositePath := filepath.Join(destDir, "geosite.dat")
-	if shouldDownload(geositePath) {
-		zlog.Debugf("Downloading geosite.dat...")
-		if err := downloadFile(GEOSITE_URL, geositePath); err != nil {
-			return fmt.Errorf("failed to download geosite.dat: %w", err)
-		}
-		zlog.Debugf("geosite.dat downloaded and updated successfully!")
-	} else {
-		zlog.Debugf("geosite.dat is up to date, skipping download.")
-	}
-
-	return nil
+	return errors.Join(errs...)
 }
 
 // downloadFile contains the core download logic: download to a temporary file first,
 // then overwrite the original file upon success.
+//
+// The bytes are validated before the rename. jsdelivr (or any middlebox in front
+// of it) can answer HTTP 200 and simply stop sending before the file is
+// complete, and io.Copy reports that as success. Left unchecked, a truncated
+// rule file lands on disk and LoadGeoIP later fails with the misleading
+// "no specified tags found" — the reported failure mode was intermittent
+// because it depended on how far the transfer got cut off.
 func downloadFile(url string, destPath string) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
@@ -96,7 +123,13 @@ func downloadFile(url string, destPath string) error {
 
 	// Use io.Copy to write the response stream to the file.
 	// This avoids loading the entire file into memory.
-	_, err = io.Copy(out, resp.Body)
+	written, err := io.Copy(out, resp.Body)
+
+	// Flush to stable storage. Best effort: the rename is what makes the new
+	// file atomic for readers, the sync only guards against power loss.
+	if serr := out.Sync(); serr != nil {
+		zlog.Warnf("Failed to flush temporary file %s: %v", tempPath, serr)
+	}
 
 	// Ensure the file handle is closed regardless of whether writing succeeded.
 	// Note: We cannot rely solely on 'defer out.Close()' here. On Windows,
@@ -113,6 +146,28 @@ func downloadFile(url string, destPath string) error {
 	if closeErr != nil {
 		os.Remove(tempPath)
 		return fmt.Errorf("failed to close temporary file safely: %w", closeErr)
+	}
+
+	// Short body: the server promised more bytes than it delivered.
+	if resp.ContentLength > 0 && written != resp.ContentLength {
+		os.Remove(tempPath)
+		return fmt.Errorf("received %d of %d bytes from %s; previous copy kept", written, resp.ContentLength, url)
+	}
+
+	// Structural check: the top-level wire stream must run to EOF and carry at
+	// least one tagged entry. This also rejects a CDN error page served as 200.
+	tags, truncated, verr := extractGeoFileTags(tempPath)
+	if verr != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("downloaded file is not a readable rule file: %w", verr)
+	}
+	if truncated {
+		os.Remove(tempPath)
+		return fmt.Errorf("downloaded file is truncated (%d bytes, %d entries before EOF); previous copy kept", written, len(tags))
+	}
+	if len(tags) == 0 {
+		os.Remove(tempPath)
+		return fmt.Errorf("downloaded file contains no rule entries; previous copy kept")
 	}
 
 	// Download is complete and successful. Rename the temporary file to the target file.
@@ -181,9 +236,14 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 
 	//  info  protowire  info bytes info
 	b := data
+	// truncated marks that the top-level wire stream did not reach EOF — the
+	// only observable signal of a truncated rule file. Without it a file that
+	// was only half written degrades into an empty rule set.
+	var truncated bool
 	for len(b) > 0 {
 		num, typ, length := protowire.ConsumeTag(b)
 		if length < 0 {
+			truncated = true
 			break
 		}
 		b = b[length:]
@@ -191,6 +251,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		if num == 1 && typ == protowire.BytesType { // GeoSiteList.entry
 			entryBytes, n := protowire.ConsumeBytes(b)
 			if n < 0 {
+				truncated = true
 				break
 			}
 			b = b[n:]
@@ -285,13 +346,21 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		} else {
 			n := protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
+				truncated = true
 				break
 			}
 			b = b[n:]
 		}
 	}
 
+	if truncated {
+		zlog.Warnf("%s [Router] ⚠️ geosite.dat is truncated: wire parse stopped after %d of %d bytes (%d matching tag(s) read), so routing is partial — re-download the rule file", TAG, len(data)-len(b), len(data), foundCount)
+	}
+
 	if foundCount == 0 && len(targetTags) > 0 {
+		if truncated {
+			return fmt.Errorf("geosite.dat is truncated (wire parse stopped after %d of %d bytes), so no specified tags could be read: %v", len(data)-len(b), len(data), targetTags)
+		}
 		return fmt.Errorf("no specified tags found in geosite: %v", targetTags)
 	}
 
@@ -369,9 +438,14 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 
 	//  info  protowire  info  GeoIP
 	b := data
+	// truncated marks that the top-level wire stream did not reach EOF — the
+	// only observable signal of a truncated rule file. Without it a file that
+	// was only half written degrades into an empty rule set.
+	var truncated bool
 	for len(b) > 0 {
 		num, typ, length := protowire.ConsumeTag(b)
 		if length < 0 {
+			truncated = true
 			break
 		}
 		b = b[length:]
@@ -379,6 +453,7 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 		if num == 1 && typ == protowire.BytesType { // GeoIPList.entry
 			entryBytes, n := protowire.ConsumeBytes(b)
 			if n < 0 {
+				truncated = true
 				break
 			}
 			b = b[n:]
@@ -463,13 +538,21 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 		} else {
 			n := protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
+				truncated = true
 				break
 			}
 			b = b[n:]
 		}
 	}
 
+	if truncated {
+		zlog.Warnf("%s [Router] ⚠️ geoip.dat is truncated: wire parse stopped after %d of %d bytes (%d matching tag(s) read), so routing is partial — re-download the rule file", TAG, len(data)-len(b), len(data), foundCount)
+	}
+
 	if foundCount == 0 && len(targetTags) > 0 {
+		if truncated {
+			return fmt.Errorf("geoip.dat is truncated (wire parse stopped after %d of %d bytes), so no specified tags could be read: %v", len(data)-len(b), len(data), targetTags)
+		}
 		return fmt.Errorf("no specified tags found in geoip: %v", targetTags)
 	}
 

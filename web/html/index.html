@@ -456,7 +456,8 @@
                         <div class="form-group" data-visibility-key="masqueFields">
                             <label data-i18n="label_masque_alpn">Masque Carrier (ALPN)</label>
                             <select name="masqueAlpn" class="form-control">
-                                <option value="h3,h2" selected data-i18n="opt_masque_alpn_auto">Auto (h3,h2)</option>
+                                <!-- 值用 "auto"（myssh normalizeMasqueALPN 翻成 SDK 空串）；SDK 只有这三个取值 -->
+                                <option value="auto" selected data-i18n="opt_masque_alpn_auto">Auto (h3 → h2)</option>
                                 <option value="h3" data-i18n="opt_masque_alpn_h3">h3 only</option>
                                 <option value="h2" data-i18n="opt_masque_alpn_h2">h2 only</option>
                             </select>
