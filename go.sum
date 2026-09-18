@@ -8,8 +8,8 @@ github.com/NNdroid/icmp_custom v0.0.0-20260916233650-89b9cf596a76 h1:4VdOy2gEq4T
 github.com/NNdroid/icmp_custom v0.0.0-20260916233650-89b9cf596a76/go.mod h1:xdgneWkf61J8HvtbvPagW68JMm/hXgutL9MSLAFIduk=
 github.com/NNdroid/udp_custom v0.0.0-20260916234937-6da8c648c9db h1:lPZlECB9SpE3T4jWw2lOieRBArr+bD96D+C/E/gTuS8=
 github.com/NNdroid/udp_custom v0.0.0-20260916234937-6da8c648c9db/go.mod h1:bFtnFXZXHYcmiR/tahEOisQCWTI6Z9J8ebTezJ90vxc=
-github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260918112529-586254d6466b h1:R/v+750rqw2s0mAslyTI/uApASMggV++gSuQNvAoyRc=
-github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260918112529-586254d6466b/go.mod h1:uHKgt2tb529k1Dl+vIb5cQDozjqc3nSLaAXWYN8myI8=
+github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260918113519-18bfa9c9d92a h1:YfpVb/99waDEyZFX2hxw7mTjbhYwq+BuTSMDGi95p1Q=
+github.com/NNdroid/xhttptunnel v1.0.20260613-0.20260918113519-18bfa9c9d92a/go.mod h1:uHKgt2tb529k1Dl+vIb5cQDozjqc3nSLaAXWYN8myI8=
 github.com/andybalholm/brotli v1.2.4 h1:649LN6qF+/7JJYNN3Wdu4Dt5PS6eC/yP/Go3Bb0/AHI=
 github.com/andybalholm/brotli v1.2.4/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/bytedance/gopkg v0.1.4 h1:oZnQwnX82KAIWb7033bEwtxvTqXcYMxDBaQxo5JJHWM=
