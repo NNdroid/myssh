@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/cloudflare/ahocorasick"
 	"github.com/miekg/dns"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -197,10 +197,29 @@ type GeoRouter struct {
 	regexGrouped []*regexp.Regexp
 
 	ipTrie            *ipTrie
-	domainCache       sync.Map     //  info  L1  info
-	routeIPCache      sync.Map     //  info ： info → info  IP  info ， info
-	cacheCount        atomic.Int32 // L1  info
-	routeIPCacheCount atomic.Int32 // routeIP  info
+	domainCache       sync.Map // L1 域名判定缓存（domainCacheEntry）
+	routeIPCache      sync.Map // 域名→已解析 IP 缓存（routeResolved），带 TTL
+	cacheCount        atomic.Int32
+	routeIPCacheCount atomic.Int32
+
+	// resolveGroup 对同一域名的并发 DNS 回退解析去重：UDP 数据面每个包
+	// 都会走到 ShouldDirect，缓存冷启动窗口内的并发包必须共享一次解析，
+	// 否则会形成 DNS 查询风暴。
+	resolveGroup singleflight.Group
+}
+
+// routeCacheCleanThreshold 是 L1 缓存的后台清理触发阈值：每写入 N 条触发
+// 一次只删过期项的清理（非全清，保留热点，无命中率抖动）。
+const routeCacheCleanThreshold = 5000
+
+// domainCacheTTL 是域名判定缓存的存活期。过期条目在读取时惰性失效并
+// 重算，保证规则语义最终一致。
+const domainCacheTTL = 10 * time.Minute
+
+// domainCacheEntry 是 L1 域名判定的缓存值；带 expire 支持惰性过期。
+type domainCacheEntry struct {
+	matched bool
+	expire  time.Time
 }
 
 func newGeoRouter() *GeoRouter {
@@ -372,12 +391,11 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 		r.keywordAC = ahocorasick.NewStringMatcher(r.keywordList)
 	}
 
-	// cleanup info
-	data = nil       //  info bytes info
-	keywordMap = nil //  info
-
-	//  info  GC， info  Protobuf  info  Android  info
-	debug.FreeOSMemory()
+	// cleanup：解除大块字节引用，交由 GC 自然回收。
+	// 注意：不要在这里调用 debug.FreeOSMemory()——它强制 STW 并向 OS 归还
+	// 内存，在 Android 上会造成可见的掉帧，收益却只是推迟下一次分配。
+	data = nil
+	keywordMap = nil
 
 	zlog.Debugf("%s [Router] GeoSite parsing completed, matched %d rule clusters", TAG, foundCount)
 	return nil
@@ -556,11 +574,8 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 		return fmt.Errorf("no specified tags found in geoip: %v", targetTags)
 	}
 
-	// cleanup info
-	data = nil //  info bytes info
-
-	//  info  GC， info  Protobuf  info  Android  info
-	debug.FreeOSMemory()
+	// cleanup：解除大块字节引用，交由 GC 自然回收（理由同 LoadGeoSite）。
+	data = nil
 
 	zlog.Debugf("%s [Router] GeoIP parsing completed, loaded %d CIDR subnets into Radix tree", TAG, ipInsertCount)
 	return nil
@@ -627,41 +642,55 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 		}
 	}
 	if len(ips) == 0 {
-		// A/AAAA 两族并行解析：串行查询会让代理路径上每个新连接的
-		// 建连延迟接近翻倍（解析本身带重试，最坏可达十几秒）。
-		var (
-			ip4, ip6    net.IP
-			resolveDone sync.WaitGroup
-		)
-		resolveDone.Add(2)
-		go func() {
-			defer resolveDone.Done()
-			ip4 = ResolveOne(host, dns.TypeA)
-		}()
-		go func() {
-			defer resolveDone.Done()
-			ip6 = ResolveOne(host, dns.TypeAAAA)
-		}()
-		resolveDone.Wait()
-		if ip4 != nil {
-			ips = append(ips, ip4)
-		}
-		if ip6 != nil {
-			ips = append(ips, ip6)
-		}
-		//  info （ info  TTL）； info ， info
-		r.routeIPCache.Store(host, routeResolved{ips: ips, expire: time.Now().Add(routeIPCacheTTL)})
-		if r.routeIPCacheCount.Add(1) >= 5000 {
-			if r.routeIPCacheCount.CompareAndSwap(5000, 0) {
-				go func() {
-					now := time.Now()
-					r.routeIPCache.Range(func(key, value interface{}) bool {
-						if rc, ok := value.(routeResolved); ok && now.After(rc.expire) {
-							r.routeIPCache.Delete(key)
-						}
-						return true
-					})
-				}()
+		// singleflight：UDP 数据面每个包都会进入这里，缓存冷启动窗口内
+		// 同一域名的并发包只允许触发一次真实解析，其余共享结果——否则
+		// 会形成 DNS 查询风暴（解析自带重试，最坏十几秒）。
+		v, err, _ := r.resolveGroup.Do("resolve:"+host, func() (interface{}, error) {
+			// 双检：等待解析期间其他调用者可能已经填好缓存。
+			if cached, ok := r.routeIPCache.Load(host); ok {
+				rc := cached.(routeResolved)
+				if time.Now().Before(rc.expire) {
+					return rc.ips, nil
+				}
+			}
+			// A/AAAA 两族并行解析：串行查询会让代理路径上每个新连接的
+			// 建连延迟接近翻倍（解析本身带重试，最坏可达十几秒）。
+			var (
+				ip4, ip6    net.IP
+				resolveDone sync.WaitGroup
+			)
+			resolveDone.Add(2)
+			go func() {
+				defer resolveDone.Done()
+				ip4 = ResolveOne(host, dns.TypeA)
+			}()
+			go func() {
+				defer resolveDone.Done()
+				ip6 = ResolveOne(host, dns.TypeAAAA)
+			}()
+			resolveDone.Wait()
+			var resolved []net.IP
+			if ip4 != nil {
+				resolved = append(resolved, ip4)
+			}
+			if ip6 != nil {
+				resolved = append(resolved, ip6)
+			}
+			//  info （ info  TTL）； info ， info
+			r.routeIPCache.Store(host, routeResolved{ips: resolved, expire: time.Now().Add(routeIPCacheTTL)})
+
+			// 计数越过阈值触发一次后台清理。这里必须无条件归零：旧实现
+			// 用 CompareAndSwap(N, 0)，并发下计数跳过 N 后 CAS 永久失配，
+			// 清理从此再也不会触发，缓存无界增长。
+			if r.routeIPCacheCount.Add(1) >= routeCacheCleanThreshold {
+				r.routeIPCacheCount.Store(0)
+				go r.cleanExpiredRouteIPCache()
+			}
+			return resolved, nil
+		})
+		if err == nil {
+			if got, ok := v.([]net.IP); ok {
+				ips = got
 			}
 		}
 	}
@@ -685,29 +714,53 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 	//  info  L1  info  (O(1)  info )
 	//  info  App /  info ， info ， info 。
 	if val, ok := r.domainCache.Load(domain); ok {
-		r.cacheHitCount.Add(1)
-		r.queryCount.Add(1)
-		return val.(bool)
+		entry := val.(domainCacheEntry)
+		if time.Now().Before(entry.expire) {
+			r.cacheHitCount.Add(1)
+			r.queryCount.Add(1)
+			return entry.matched
+		}
+		// 过期条目惰性删除，下面重算并写回。
+		r.domainCache.Delete(domain)
 	}
 
 	r.queryCount.Add(1)
 	matched := r.doMatchDomain(domain)
 
-	//  info  10000  info ， info 。
-	//  info  CAS  info ， info 。
-	if r.cacheCount.Add(1) >= 10000 {
-		if r.cacheCount.CompareAndSwap(10000, 0) {
-			go func() {
-				r.domainCache.Range(func(key, value interface{}) bool {
-					r.domainCache.Delete(key)
-					return true
-				})
-			}()
-		}
+	r.domainCache.Store(domain, domainCacheEntry{matched: matched, expire: time.Now().Add(domainCacheTTL)})
+
+	// 计数越过阈值触发一次后台清理。必须无条件归零：旧实现用
+	// CompareAndSwap(N, 0)，并发下计数跳过 N 后 CAS 永久失配，清理从此
+	// 再也不触发，缓存无界增长。清理只删过期项，不做全清——全清会把
+	// 热点域名一并清掉，造成周期性的命中率归零与 AC/正则匹配尖刺。
+	if r.cacheCount.Add(1) >= routeCacheCleanThreshold {
+		r.cacheCount.Store(0)
+		go r.cleanExpiredDomainCache()
 	}
 
-	r.domainCache.Store(domain, matched)
 	return matched
+}
+
+// cleanExpiredDomainCache 删除 domainCache 中已过期的条目。
+func (r *GeoRouter) cleanExpiredDomainCache() {
+	now := time.Now()
+	r.domainCache.Range(func(key, value interface{}) bool {
+		if e, ok := value.(domainCacheEntry); ok && now.After(e.expire) {
+			r.domainCache.Delete(key)
+		}
+		return true
+	})
+}
+
+// cleanExpiredRouteIPCache 删除 routeIPCache 中已过期的条目。
+func (r *GeoRouter) cleanExpiredRouteIPCache() {
+	now := time.Now()
+	r.routeIPCache.Range(func(key, value interface{}) bool {
+		if rc, ok := value.(routeResolved); ok && now.After(rc.expire) {
+			r.routeIPCache.Delete(key)
+		}
+		return true
+	})
 }
 
 // ResetCacheAndStats  info  L1  info

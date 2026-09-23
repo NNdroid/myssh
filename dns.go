@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,8 +38,26 @@ type dnsCacheEntry struct {
 	// 直接写 wire，完全绕开 Unpack/Pack。
 	packed    []byte
 	ttlOffset []int
+	// ips 是写入时预解析好的 A/AAAA 记录切片（不可变，只读共享）。
+	// 路由热路径 GetCachedIPs 被 UDP 数据面逐包调用，直读该切片即可，
+	// 绝不能在读锁内重新 Unpack 整条 DNS 消息。
+	ips       []net.IP
 	expiresAt time.Time
 	cachedAt  time.Time
+}
+
+// extractAnswerIPs 从 DNS 响应中提取 A/AAAA 记录值，供缓存条目预解析。
+func extractAnswerIPs(msg *dns.Msg) []net.IP {
+	var ips []net.IP
+	for _, ans := range msg.Answer {
+		switch rr := ans.(type) {
+		case *dns.A:
+			ips = append(ips, rr.A)
+		case *dns.AAAA:
+			ips = append(ips, rr.AAAA)
+		}
+	}
+	return ips
 }
 
 // scanWireTTLOffsets 遍历 DNS wire format，返回每个资源记录 4 字节 TTL 字段的
@@ -412,6 +431,7 @@ func (l *LocalDnsServer) lookupDNS(requestMsg *dns.Msg) ([]byte, *dns.Msg, strin
 			entry := dnsCacheEntry{
 				expiresAt: time.Now().Add(time.Duration(l.calculateOptimalTTL(reply)) * time.Second),
 				cachedAt:  time.Now(),
+				ips:       extractAnswerIPs(reply),
 			}
 			// Prefer caching the packed wire form so hits skip Unpack/Pack entirely;
 			// fall back to the structured copy when packing or scanning fails.
@@ -803,13 +823,22 @@ func (l *LocalDnsServer) cleanupExpiredCache() {
 		}
 	}
 	if len(l.cache) >= CacheCleanupThreshold {
-		toDelete := len(l.cache) - MaxCacheSize
-		for k := range l.cache {
-			if toDelete <= 0 {
-				break
-			}
-			delete(l.cache, k)
-			toDelete--
+		// 超限时按过期时间最旧优先淘汰：随机淘汰会误删刚写入的热点域名。
+		// 该路径低频（超过 6000 条才触发），排序开销可接受。
+		type cacheCandidate struct {
+			key       string
+			expiresAt time.Time
+		}
+		candidates := make([]cacheCandidate, 0, len(l.cache))
+		for k, v := range l.cache {
+			candidates = append(candidates, cacheCandidate{key: k, expiresAt: v.expiresAt})
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].expiresAt.Before(candidates[j].expiresAt)
+		})
+		toDelete := len(candidates) - MaxCacheSize
+		for i := 0; i < toDelete; i++ {
+			delete(l.cache, candidates[i].key)
 			deleted++
 		}
 	}
@@ -909,32 +938,16 @@ func GetCachedIPs(domain string) []net.IP {
 	fqdn := dns.Fqdn(domain)
 	var ips []net.IP
 	lds.cacheMu.RLock()
-	defer lds.cacheMu.RUnlock()
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		key := fqdn + "-" + strconv.Itoa(int(qt))
 		if entry, ok := lds.cache[key]; ok && time.Now().Before(entry.expiresAt) {
-			// msg 只在回退路径上保留；packed 路径按需解包。该函数只在
-			// 路由未命中/拨号路径上被低频调用，解包开销可忽略。
-			msg := entry.msg
-			if msg == nil && len(entry.packed) > 0 {
-				msg = new(dns.Msg)
-				if err := msg.Unpack(entry.packed); err != nil {
-					continue
-				}
-			}
-			if msg == nil {
-				continue
-			}
-			for _, ans := range msg.Answer {
-				if a, ok := ans.(*dns.A); ok {
-					ips = append(ips, a.A)
-				}
-				if aaaa, ok := ans.(*dns.AAAA); ok {
-					ips = append(ips, aaaa.AAAA)
-				}
-			}
+			// 直读写入时预解析好的 ips 切片（不可变）。该函数位于 UDP
+			// 数据面逐包热路径上，绝不能在这里 Unpack——旧实现每次命中
+			// 都重新解包整条 DNS 消息且持有读锁，高吞吐下开销显著。
+			ips = append(ips, entry.ips...)
 		}
 	}
+	lds.cacheMu.RUnlock()
 	return ips
 }
 

@@ -48,9 +48,11 @@ var (
 	//  info
 	padPool    []byte
 	padPoolLen = 64 * 1024
-	// tcp:  info 。
-	//  info  4MB  info / info ， info  1MB  info  BDP  info 。
-	tcpOptimizeBufferSize   = 1 * 1024 * 1024
+	// tcp: 逐连接套接字缓冲。
+	// 原值 1MB（读+写各 1MB = 每连接 2MB 内核内存）在移动端 / 大量短连接下
+	// 会显著放大内存占用，这里降到 256KB：仍足以覆盖高 BDP 长肥管道，
+	// 同时把每连接内核内存压到 512KB。
+	tcpOptimizeBufferSize   = 256 * 1024
 	tcpKeepaliveIntervalSec = 15
 )
 

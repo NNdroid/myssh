@@ -236,6 +236,13 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 	return fmt.Errorf("unsupported command: %v", r.Cmd)
 }
 
+// udpHandleInFlight 统计在途 UDP 包处理协程数。socks5 库对每个 UDP 包都
+// 单独起 goroutine 且无并发上限，UDP 洪水下会形成 goroutine 风暴；这里设
+// 软上限，超限直接丢包——UDP 语义允许丢弃，优先保住进程整体稳定。
+const udpHandleMaxInFlight = 1024
+
+var udpHandleInFlight atomic.Int32
+
 func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
 	// 🛡️ Panic  info ， info  UDP abnormal info
 	defer func() {
@@ -243,6 +250,15 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			zlog.Errorf("%s [SOCKS5-UDP] 💥 Severe crash (Panic) occurred -> Client: %s, Error: %v", TAG, addr.String(), err)
 		}
 	}()
+
+	if udpHandleInFlight.Add(1) > udpHandleMaxInFlight {
+		udpHandleInFlight.Add(-1)
+		if Debug {
+			zlog.Warnf("%s [SOCKS5-UDP] 🚦 In-flight UDP handlers exceeded %d, dropping packet -> Source: %s", TAG, udpHandleMaxInFlight, addr.String())
+		}
+		return nil
+	}
+	defer udpHandleInFlight.Add(-1)
 	dstPort := binary.BigEndian.Uint16(d.DstPort)
 
 	// ==========================================
@@ -658,6 +674,9 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Close 掉 client 才能解除内层 goroutine 阻塞在 SendRequest 上的
+			// 等待，否则引擎停止时该 goroutine 会一直挂到 TCP 层超时。
+			client.Close()
 			return
 		case <-ticker.C:
 			resCh := make(chan keepAliveResult, 1)
@@ -676,6 +695,7 @@ func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
 
 			select {
 			case <-ctx.Done():
+				client.Close()
 				return
 
 			case res := <-resCh:
@@ -848,7 +868,13 @@ func startSshTProxy(configJson string) int {
 			emitState(StateConnected, cfg.SshAddr)
 			emitNodeEvent(cfg.SshAddr, NodeEventConnected, "")
 
-			go maintainKeepAlive(ctx, client)
+			// keepalive 属于长生命周期后台任务，纳入 taskTrack 计数，
+			// 保证 wgWait 能等到它退出（ctx 取消 / client 关闭后即返回）。
+			taskTrack()
+			go func() {
+				defer taskRelease()
+				maintainKeepAlive(ctx, client)
+			}()
 
 			err = client.Wait()
 			zlog.Warnf("%s [AutoSSH] ⚠️ Tunnel disconnected (%v), preparing to reconnect automatically...", TAG, err)
@@ -873,32 +899,38 @@ func startSshTProxy(configJson string) int {
 
 // stopSshTProxy  info ， info cleanup info  SSH/ info 、DNS  info  SOCKS5  info 。
 func stopSshTProxy() {
+	// 持锁只做「取快照 + 置空」，把 DNS Stop / SOCKS Shutdown / 遍历关闭
+	// 连接等 I/O 全部移到锁外。旧实现全程持 mu：期间所有新建 TCP 连接都
+	// 会阻塞在 TCPHandle 的 mu.Lock() 上，而关闭操作本身可能阻塞。
 	mu.Lock()
-	defer mu.Unlock()
-
-	if engineCancel != nil {
-		engineCancel()
-		engineCancel = nil
-	}
+	cancel := engineCancel
+	engineCancel = nil
 	b := context.Background()
 	engineCtxHolder.Store(&b)
+	lds := localDnsServer.Load()
+	localDnsServer.Store(nil)
+	srv := socksServer
+	socksServer = nil
+	client := sshClient
+	sshClient = nil
+	mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 
 	zlog.Infof("%s [Core] Stopping resources...", TAG)
 	emitState(StateStopped, "")
 
-	if lds := localDnsServer.Load(); lds != nil {
+	if lds != nil {
 		lds.Stop()
 	}
-	localDnsServer.Store(nil)
-
-	if socksServer != nil {
-		socksServer.Shutdown()
-		socksServer = nil
+	if srv != nil {
+		srv.Shutdown()
 	}
 	closeQuicConnCache()
-	if sshClient != nil {
-		sshClient.Close()
-		sshClient = nil
+	if client != nil {
+		client.Close()
 	}
 
 	killActiveProxyConnections()
@@ -956,10 +988,24 @@ var (
 	sshHandshakeLast  *SSHHandshakeInfo
 )
 
+// sshHandshakeCacheMax 限制按 addr 索引的握手缓存条目数。节点地址集合会随
+// 多节点切换 / 动态端口变化而增长，旧实现只增不删 → 无界增长。
+const sshHandshakeCacheMax = 64
+
+// ensureHandshakeCacheBudget 在缓存达到上限时整表重置。必须在持有
+// sshHandshakeMu 时调用。重置不影响"最近一次握手"展示：sshHandshakeLast
+// 仍指向已捕获的条目。
+func ensureHandshakeCacheBudget() {
+	if len(sshHandshakeCache) >= sshHandshakeCacheMax {
+		sshHandshakeCache = make(map[string]*SSHHandshakeInfo)
+	}
+}
+
 // recordSSHHandshakeVersion 记录握手中的版本标识行（认证成功后才可达）。
 func recordSSHHandshakeVersion(addr, clientVersion, serverVersion string) {
 	sshHandshakeMu.Lock()
 	defer sshHandshakeMu.Unlock()
+	ensureHandshakeCacheBudget()
 	info := sshHandshakeCache[addr]
 	if info == nil {
 		info = &SSHHandshakeInfo{Address: addr}
@@ -979,6 +1025,7 @@ func recordSSHHandshakeBanner(addr, banner string) {
 	}
 	sshHandshakeMu.Lock()
 	defer sshHandshakeMu.Unlock()
+	ensureHandshakeCacheBudget()
 	info := sshHandshakeCache[addr]
 	if info == nil {
 		info = &SSHHandshakeInfo{Address: addr}
