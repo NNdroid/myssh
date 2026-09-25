@@ -75,10 +75,5 @@ func emitDNSEvent(ev dnstunnel.ClientEvent) {
 }
 
 func init() {
-	RegisterTunnel("dns_custom", "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
-		return NewDNSTunnel(ctx, cfg)
-	})
+	registerSelfDial("dns_custom", NewDNSTunnel)
 }

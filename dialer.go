@@ -2,8 +2,10 @@ package myssh
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -231,4 +233,118 @@ func DialNode(ctx context.Context, cfg ProxyConfig, isPing bool) (*ssh.Client, n
 		return nil, nil, fmt.Errorf("ssh err: %v", err)
 	}
 	return client, conn, nil
+}
+
+// decodeIP4PIP reports whether ip is a NATMap IP4P literal and, if so, the
+// encoded IPv4 address and port.
+//
+// IP4P packs an IPv4 address plus port into an IPv6 literal under the
+// 2001::/80 prefix: 2001::<port>:<ipv4>, e.g. 2001::3039:102:304 =
+// 1.2.3.4:12345. Only the first 10 bytes are fixed, so validation is a prefix
+// check plus a zero check on bytes 2-9.
+func decodeIP4PIP(ip net.IP) (net.IP, uint16, bool) {
+	v6 := ip.To16()
+	if v6 == nil || v6[0] != 0x20 || v6[1] != 0x01 {
+		return nil, 0, false
+	}
+	for i := 2; i < 10; i++ {
+		if v6[i] != 0 {
+			return nil, 0, false
+		}
+	}
+	port := binary.BigEndian.Uint16(v6[10:12])
+	return net.IPv4(v6[12], v6[13], v6[14], v6[15]), port, true
+}
+
+// resolveIP4PDialAddress checks whether address is an IP4P literal or whether
+// its hostname has an IP4P AAAA record.
+//
+// If IP4P is found:
+//
+//	example.com:0
+//	    ↓ AAAA
+//	2001::3039:102:304
+//	    ↓
+//	1.2.3.4:12345
+//
+// If no IP4P record exists, the original address is returned unchanged so
+// net.Dialer can continue using the normal DNS resolution path.
+func resolveIP4PDialAddress(
+	ctx context.Context,
+	dialer *net.Dialer,
+	network string,
+	address string,
+) (string, bool, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// Let net.Dialer handle malformed/non-host:port addresses later.
+		return address, false, nil
+	}
+
+	//
+	// 1. address itself may already contain an IP4P literal:
+	//
+	//    [2001::3039:102:304]:0
+	//
+	if ip := net.ParseIP(host); ip != nil {
+		ipv4, port, ok := decodeIP4PIP(ip)
+		if !ok {
+			return address, false, nil
+		}
+
+		if network == "tcp6" || network == "udp6" {
+			return "", false, fmt.Errorf(
+				"IP4P resolves to IPv4 and cannot be used with network %q",
+				network,
+			)
+		}
+
+		return net.JoinHostPort(
+			ipv4.String(),
+			strconv.Itoa(int(port)),
+		), true, nil
+	}
+
+	//
+	// 2. Hostname: explicitly query AAAA.
+	//
+	// Use the Dialer's resolver when configured, otherwise use Go's default
+	// resolver. This keeps behavior consistent with net.Dialer as much as
+	// possible.
+	resolver := dialer.Resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+
+	ips, err := resolver.LookupIP(ctx, "ip6", host)
+	if err != nil {
+		// IMPORTANT:
+		// Failure to obtain AAAA does NOT mean dialing must fail.
+		//
+		// There may still be a normal A record, so return the original address
+		// and let net.Dialer perform its normal resolution.
+		return address, false, nil
+	}
+
+	for _, ip := range ips {
+		ipv4, port, ok := decodeIP4PIP(ip)
+		if !ok {
+			continue
+		}
+
+		if network == "tcp6" || network == "udp6" {
+			return "", false, fmt.Errorf(
+				"IP4P resolves to IPv4 and cannot be used with network %q",
+				network,
+			)
+		}
+
+		return net.JoinHostPort(
+			ipv4.String(),
+			strconv.Itoa(int(port)),
+		), true, nil
+	}
+
+	// No IP4P AAAA found.
+	return address, false, nil
 }

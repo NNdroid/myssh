@@ -4,7 +4,7 @@ package myssh
 
 import (
 	"os"
-	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -18,27 +18,20 @@ type LogReceiver interface {
 }
 
 var (
-	globalReceiver LogReceiver
-	logChan                           = make(chan logItem, 1000)
-	zlog           *zap.SugaredLogger = zap.NewNop().Sugar()
-	atomicLogLevel                    = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	globalReceiverMu sync.RWMutex
+	globalReceiver   LogReceiver
+	// logConsumerOnce 保证转发 goroutine 全进程只启动一个。旧实现在每次
+	// SetLogReceiver 里各起一个消费者，重复绑定（UI 重进/换 Activity）会
+	// 叠加多个 goroutine 争抢同一 channel，同一条日志被多次投递。
+	logConsumerOnce sync.Once
+	logChan                            = make(chan logItem, 1000)
+	zlog            *zap.SugaredLogger = zap.NewNop().Sugar()
+	atomicLogLevel                     = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
 
 // SetLogLevel dynamically updates Go engine log level in real-time
 func SetLogLevel(logLevelStr string) {
-	var level zapcore.Level
-	switch strings.ToUpper(strings.TrimSpace(logLevelStr)) {
-	case "DEBUG":
-		level = zapcore.DebugLevel
-	case "INFO":
-		level = zapcore.InfoLevel
-	case "WARN", "WARNING":
-		level = zapcore.WarnLevel
-	case "ERROR":
-		level = zapcore.ErrorLevel
-	default:
-		level = zapcore.InfoLevel
-	}
+	level := parseLogLevel(logLevelStr)
 	atomicLogLevel.SetLevel(level)
 	if zlog != nil {
 		zlog.Infof("[Logger] Dynamic log level updated to: %s", level.String())
@@ -88,18 +81,26 @@ type logItem struct {
 
 // ---  info  ---
 
-// SetLogReceiver  info  Android  info ， info  Kotlin  info
+// SetLogReceiver 注册 Android 宿主的日志接收器（gomobile 由 Kotlin 实现）。
+// 可重复调用以更换接收器；转发 goroutine 由首次调用触发，仅启动一次。
 func SetLogReceiver(r LogReceiver) {
+	logConsumerOnce.Do(func() { go drainLogChan() })
+	globalReceiverMu.Lock()
 	globalReceiver = r
-	//  info
-	go func() {
-		for item := range logChan {
-			if globalReceiver != nil {
-				// gomobile  info
-				globalReceiver.Receive(item.level, item.tag, item.msg)
-			}
+	globalReceiverMu.Unlock()
+}
+
+// drainLogChan 是唯一的日志转发消费者：从 stunCore 的非阻塞 channel 取出
+// 日志项投递给当前接收器。接收器引用全程持锁读写，旧实现的无锁读是数据竞争。
+func drainLogChan() {
+	for item := range logChan {
+		globalReceiverMu.RLock()
+		r := globalReceiver
+		globalReceiverMu.RUnlock()
+		if r != nil {
+			r.Receive(item.level, item.tag, item.msg)
 		}
-	}()
+	}
 }
 
 type stunCore struct {

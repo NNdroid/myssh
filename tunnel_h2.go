@@ -93,10 +93,7 @@ func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transpor
 }
 
 func registerH2SDK(name string, transport h2tunnel.Transport, tlsEnabled bool) {
-	RegisterTunnel(name, "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
+	registerSelfDial(name, func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		return dialH2SDK(ctx, cfg, transport, tlsEnabled)
 	})
 }
@@ -180,20 +177,14 @@ func emitH2Event(ev h2tunnel.ClientEvent) {
 
 // registerH2SDKToggle 注册 TLS 由配置开关决定的 h2tunnel 隧道（grpc）。
 func registerH2SDKToggle(name string, transport h2tunnel.Transport) {
-	RegisterTunnel(name, "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
+	registerSelfDial(name, func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		return dialH2SDK(ctx, cfg, transport, cfg.TunnelTLSEnabled)
 	})
 }
 
 func init() {
 	// h2：合并型——开关决定 TransportH2(TLS) / TransportH2C(明文)。
-	RegisterTunnel("h2", "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
+	registerSelfDial("h2", func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		if cfg.TunnelTLSEnabled {
 			return dialH2SDK(ctx, cfg, h2tunnel.TransportH2, true)
 		}

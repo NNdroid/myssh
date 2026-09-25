@@ -4,7 +4,6 @@ package myssh
 
 import (
 	"os"
-	"strings"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -18,19 +17,7 @@ var (
 
 // SetLogLevel dynamically updates generic log level in real-time
 func SetLogLevel(logLevelStr string) {
-	var level zapcore.Level
-	switch strings.ToUpper(strings.TrimSpace(logLevelStr)) {
-	case "DEBUG":
-		level = zapcore.DebugLevel
-	case "INFO":
-		level = zapcore.InfoLevel
-	case "WARN", "WARNING":
-		level = zapcore.WarnLevel
-	case "ERROR":
-		level = zapcore.ErrorLevel
-	default:
-		level = zapcore.InfoLevel
-	}
+	level := parseLogLevel(logLevelStr)
 	atomicLogLevel.SetLevel(level)
 	if zlog != nil {
 		zlog.Infof("[Logger] Generic log level updated to: %s", level.String())

@@ -144,7 +144,7 @@ func BenchmarkWSEcho(b *testing.B) {
 		SshAddr:    "127.0.0.1:22",
 		ServerName: "proxy.test",
 	}
-	proto, err := GetTunnel("ws")
+	proto, err := GetTunnel("websocket")
 	if err != nil {
 		b.Fatal(err)
 	}

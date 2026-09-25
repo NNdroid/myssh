@@ -2,23 +2,22 @@ package myssh
 
 import (
 	"context"
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/miekg/dns"
 	"github.com/txthinking/socks5"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/singleflight"
 )
+
+// 本文件持有引擎的包级共享状态与隧道注册表；职责划分：
+//   - engine.go      引擎生命周期（startSshTProxy / stopSshTProxy / keepalive）
+//   - socks5.go      SOCKS5 入站处理（TCP / UDP / DNS 劫持）
+//   - ssh_client.go  SSH 拨号、主机密钥校验、握手信息缓存
 
 const TAG = "[M]"
 
@@ -29,18 +28,16 @@ var (
 	globalConfig atomic.Pointer[GlobalConfig]
 	globalRouter atomic.Pointer[GeoRouter]
 
-	//  info
 	engineCancel context.CancelFunc
 
-	//  info ： info  Stop  info ， info  goroutine  info  ctx  info 。
-	//  info  atomic.Pointer[context.Context]  info  atomic.Value： info  Store  info ，
-	//  info  context.Background()(*emptyCtx)  info  WithCancel  info (*cancelCtx)  info  inconsistent store panic。
+	// engineCtxHolder 存当前引擎 ctx：Stop 时置换为 Background，让新建连接
+	// 立即脱离旧引擎。用 atomic.Pointer[context.Context] 而非 atomic.Value：
+	// 后者 Store 不同具体类型（*emptyCtx 与 *cancelCtx）会 inconsistent store panic。
 	engineCtxHolder atomic.Pointer[context.Context]
 
-	//  info
 	udpNatMap  sync.Map
 	tcpConnMap sync.Map
-	udpgwMap   sync.Map //  info  UDP client ->  info  UDPGW  info  TCP  info
+	udpgwMap   sync.Map // client 侧 UDP session -> 承载 UDPGW 的 TCP 连接
 
 	// 后台任务计数（替代 sync.WaitGroup）。WgWait 暴露给 Java 且可能长期阻塞，
 	// 若在 Wait 尚未返回时下一次 Start/连接处理器又对同一 WaitGroup 执行
@@ -51,22 +48,25 @@ var (
 	taskCond  = sync.NewCond(&taskMu)
 	liveTasks int
 
-	//  info  singleflight： info  UDP  info  info  UDPGW  info  info ， info  info  info
-	//  info  sshClient.Dial  info  info  info ， info  channel open  info  info  "unexpected packet"  info
+	// udpDialGroup 对同一 UDPGW sessionKey 的并发 Dial 去重：SOCKS5 UDP
+	// 每包独立触发建连，并发 channel open 会让 SSH 服务端回复
+	// "unexpected packet in response to channel open" 并断连。
 	udpDialGroup singleflight.Group
 )
 
-// init  info  globalConfig  info  nil  info ， info  startSshTProxy  info
-// loadGlobalConfigFromJson  info ，DNS  info / info  globalConfig.Load()  info  nil  info  panic。
-//
-//	info  globalConfig  info （ info ）， info 。
+// init 预置 globalConfig 为空值，防止 startSshTProxy 未先执行
+// loadGlobalConfigFromJson 时，DNS 劫持等路径 globalConfig.Load() 拿到 nil 而 panic。
 func init() {
 	globalConfig.Store(&GlobalConfig{})
 }
 
-// ----- tunnel info  ( info mode) -----
+// init GOMAXPROCS 交给运行时默认（Go 1.26 已按容器/进程亲和自动设置），
+// 这里显式对齐物理核数，移动端与 gomobile 场景下保持一致行为。
+func init() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+}
 
-// currentEngineCtx  info ， info ； info  Background。
+// currentEngineCtx 返回当前引擎 ctx；引擎未启动时返回 Background。
 func currentEngineCtx() context.Context {
 	if v := engineCtxHolder.Load(); v != nil {
 		return *v
@@ -74,17 +74,19 @@ func currentEngineCtx() context.Context {
 	return context.Background()
 }
 
+// ----- tunnel 注册表 -----
+
 type TunnelHandler func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error)
 
 type TunnelProtocol struct {
-	Network string        //  info : "tcp", "udp",  info  "none"
-	Handler TunnelHandler //  info
+	Network string        // 底层网络: "tcp", "udp", "custom"（协议自拨）, "none"
+	Handler TunnelHandler // 隧道握手处理
 }
 
 var tunnelRegistry = make(map[string]TunnelProtocol)
 
-// RegisterTunnel  info tunnel info tunnel info 。
-// name  info （ info  "h2"/"grpc"），network  info （"tcp"/"udp"/"none"），handler  info 。
+// RegisterTunnel 注册隧道实现。各 tunnel_*.go 在 init 中自注册；
+// name 为配置名（如 "h2"/"grpc"），network 为底层网络需求，handler 为握手逻辑。
 func RegisterTunnel(name string, network string, handler TunnelHandler) {
 	tunnelRegistry[name] = TunnelProtocol{
 		Network: network,
@@ -92,7 +94,7 @@ func RegisterTunnel(name string, network string, handler TunnelHandler) {
 	}
 }
 
-// GetTunnel  info tunnel info ； info 。
+// GetTunnel 按名查找隧道协议；未注册时报错。
 func GetTunnel(name string) (TunnelProtocol, error) {
 	if proto, ok := tunnelRegistry[name]; ok {
 		return proto, nil
@@ -100,473 +102,7 @@ func GetTunnel(name string) (TunnelProtocol, error) {
 	return TunnelProtocol{}, fmt.Errorf("unsupported tunnel type: %s", name)
 }
 
-// -----  info config -----
-
-func init() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-}
-
-// ----- SOCKS5  info  -----
-
-type SshProxyHandler struct {
-	UdpgwAddr    string
-	UdpgwVersion string
-}
-
-func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
-	if r.Cmd == socks5.CmdUDP {
-		localAddr := c.LocalAddr().(*net.TCPAddr)
-		atyp := byte(socks5.ATYPIPv4)
-		ip := localAddr.IP.To4()
-		if ip == nil {
-			atyp = socks5.ATYPIPv6
-			ip = localAddr.IP.To16()
-		}
-		portBytes := make([]byte, 2)
-		binary.BigEndian.PutUint16(portBytes, uint16(localAddr.Port))
-
-		rep := socks5.NewReply(socks5.RepSuccess, atyp, ip, portBytes)
-		if _, err := rep.WriteTo(c); err != nil {
-			return err
-		}
-		io.Copy(io.Discard, c)
-		return nil
-	}
-
-	if r.Cmd == socks5.CmdConnect {
-		taskTrack()
-		defer taskRelease()
-
-		connKey := c.RemoteAddr().String() + "->" + r.Address()
-		tcpConnMap.Store(connKey, c)
-		defer tcpConnMap.Delete(connKey)
-
-		mu.Lock()
-		client := sshClient
-		mu.Unlock()
-
-		if client == nil {
-			if Debug {
-				zlog.Debugf("%s [SOCKS5-TCP] ⚠️ Tunnel is reconnecting, rejecting connection: %s", TAG, r.Address())
-			}
-			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-			rep.WriteTo(c)
-			return fmt.Errorf("ssh client is currently reconnecting")
-		}
-
-		target := r.Address()
-		host, port, err := net.SplitHostPort(target)
-		if err != nil {
-			host = target
-		}
-
-		var isDirect bool
-		var dialHost string
-		if gr := globalRouter.Load(); gr != nil {
-			res := gr.ShouldDirect(host)
-			isDirect = res.IsDirect
-			dialHost = res.DialHost
-		} else {
-			isDirect = false
-			dialHost = host
-		}
-
-		var remote net.Conn
-		var dialErr error
-
-		if isDirect {
-			dialTarget := net.JoinHostPort(dialHost, port)
-			remote, dialErr = dialProtected(currentEngineCtx(), ProxyConfig{}, "tcp", dialTarget, 5*time.Second)
-		} else {
-			remote, dialErr = client.Dial("tcp", target)
-		}
-
-		if dialErr != nil {
-			rep := socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-			_, _ = rep.WriteTo(c)
-			return dialErr
-		}
-
-		// --- Wrap the outbound connection ---
-		remote = WrapConn(remote, target)
-		// ------------------------------------
-
-		defer remote.Close()
-		rep := socks5.NewReply(socks5.RepSuccess, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-		if _, err := rep.WriteTo(c); err != nil {
-			return err
-		}
-
-		errc := make(chan error, 2)
-		go func() {
-			// Proxy -> Client (Rx for local, Tx for proxy logic if viewed from client's download)
-			// remote = direct socket or ssh channel (download data)
-			// c = local client
-			var err error
-			if isDirect {
-				_, err = relayStream(c, remote)
-			} else {
-				_, err = tcpRelay(c, remote)
-			}
-			errc <- err
-		}()
-		go func() {
-			// Client -> Proxy (Tx for local, Rx for proxy logic if viewed from client's upload)
-			// c = local client (upload data)
-			// remote = direct socket or ssh channel
-			var err error
-			if isDirect {
-				_, err = relayStream(remote, c)
-			} else {
-				_, err = tcpRelay(remote, c)
-			}
-			errc <- err
-		}()
-
-		<-errc
-		remote.Close()
-		c.Close()
-		<-errc
-
-		return nil
-	}
-
-	rep := socks5.NewReply(socks5.RepCommandNotSupported, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-	_, _ = rep.WriteTo(c)
-	return fmt.Errorf("unsupported command: %v", r.Cmd)
-}
-
-// udpHandleInFlight 统计在途 UDP 包处理协程数。socks5 库对每个 UDP 包都
-// 单独起 goroutine 且无并发上限，UDP 洪水下会形成 goroutine 风暴；这里设
-// 软上限，超限直接丢包——UDP 语义允许丢弃，优先保住进程整体稳定。
-const udpHandleMaxInFlight = 1024
-
-var udpHandleInFlight atomic.Int32
-
-func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
-	// 🛡️ Panic  info ， info  UDP abnormal info
-	defer func() {
-		if err := recover(); err != nil {
-			zlog.Errorf("%s [SOCKS5-UDP] 💥 Severe crash (Panic) occurred -> Client: %s, Error: %v", TAG, addr.String(), err)
-		}
-	}()
-
-	if udpHandleInFlight.Add(1) > udpHandleMaxInFlight {
-		udpHandleInFlight.Add(-1)
-		if Debug {
-			zlog.Warnf("%s [SOCKS5-UDP] 🚦 In-flight UDP handlers exceeded %d, dropping packet -> Source: %s", TAG, udpHandleMaxInFlight, addr.String())
-		}
-		return nil
-	}
-	defer udpHandleInFlight.Add(-1)
-	dstPort := binary.BigEndian.Uint16(d.DstPort)
-
-	// ==========================================
-	//  info  UDP 443 (QUIC)  info client info  TCP
-	// ==========================================
-	if dstPort == 443 {
-		if Debug {
-			zlog.Debugf("%s [SOCKS5-UDP] 🛡️ Intercepted and silently dropped UDP 443 (QUIC) packet -> Source: %s", TAG, addr.String())
-		}
-		return nil
-	}
-
-	//  info targetaddress
-	var targetHost string
-	switch d.Atyp {
-	case socks5.ATYPIPv4, socks5.ATYPIPv6:
-		targetHost = net.IP(d.DstAddr).String()
-	case socks5.ATYPDomain:
-		if len(d.DstAddr) > 1 {
-			targetHost = string(d.DstAddr[1:])
-		} else {
-			targetHost = "unknown_domain"
-		}
-	default:
-		zlog.Warnf("%s [SOCKS5-UDP] ⚠️ Unknown address type: %v", TAG, d.Atyp)
-		return nil
-	}
-
-	targetAddrStr := net.JoinHostPort(targetHost, strconv.Itoa(int(dstPort)))
-
-	if Debug {
-		zlog.Debugf("%s [SOCKS5-UDP] 📨 Received uplink data | Client: %s | Target: %s | Length: %d bytes", TAG, addr.String(), targetAddrStr, len(d.Data))
-	}
-
-	//  info  DNS
-	if dstPort == 53 {
-		gc := globalConfig.Load()
-		isConfiguredDNS := strings.Contains(gc.LocalDnsServer, targetAddrStr) ||
-			strings.Contains(gc.RemoteDnsServer, targetAddrStr)
-
-		if !isConfiguredDNS {
-			if Debug {
-				zlog.Debugf("%s [SOCKS5-UDP] 🔍 Triggered DNS hijack -> Target: %s", TAG, targetAddrStr)
-			}
-			reqMsg := new(dns.Msg)
-			if err := reqMsg.Unpack(d.Data); err != nil {
-				zlog.Errorf("%s [SOCKS5-UDP] ❌ Failed to parse native DNS: %v", TAG, err)
-				return err
-			}
-
-			if lds := localDnsServer.Load(); lds != nil {
-				replyData, err := lds.HandleDNSRequestPacked(reqMsg)
-				if err == nil {
-					h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
-				}
-				//  info ， info  DNS  info  UDP  info
-				return err
-			}
-		} else {
-			if Debug {
-				zlog.Debugf("%s [SOCKS5-UDP] 🛡️ Target is a configured DNS server (%s), skipping hijack and executing standard routing", TAG, targetAddrStr)
-			}
-		}
-	}
-
-	var isDirect bool
-	var dialHost string
-
-	if gr := globalRouter.Load(); gr != nil {
-		res := gr.ShouldDirect(targetHost)
-		isDirect = res.IsDirect
-		dialHost = res.DialHost
-	} else {
-		isDirect = false
-	}
-
-	cloneSlice := func(b []byte) []byte {
-		c := make([]byte, len(b))
-		copy(c, b)
-		return c
-	}
-
-	// ==========================================
-	//  info ， info  UDP  info
-	// ==========================================
-	if isDirect {
-		directTarget := net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
-		sessionKey := addr.String() + "<->" + directTarget
-
-		var uc net.Conn
-		if val, ok := udpNatMap.Load(sessionKey); ok {
-			uc = val.(net.Conn)
-			if Debug {
-				zlog.Debugf("%s [ROUTER-Direct] ♻️ Reusing local direct session -> %s", TAG, sessionKey)
-			}
-		} else {
-			rawConn, err := dialProtected(currentEngineCtx(), ProxyConfig{}, "udp", directTarget, 5*time.Second)
-			if err != nil {
-				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP: %v", TAG, err)
-				return err
-			}
-
-			// --- Wrap the outbound connection ---
-			uc = WrapConn(rawConn, directTarget)
-			// ------------------------------------
-
-			//  info  LoadOrStore  info target info
-			actual, loaded := udpNatMap.LoadOrStore(sessionKey, uc)
-			if loaded {
-				uc.Close() //  info ， info
-				uc = actual.(net.Conn)
-			} else {
-				if Debug {
-					zlog.Debugf("%s [ROUTER-Direct] 🟢 Created new local direct session -> %s", TAG, sessionKey)
-				}
-				taskTrack()
-				//  info address info ， info
-				dstAddrCopy := cloneSlice(d.DstAddr)
-				dstPortCopy := cloneSlice(d.DstPort)
-				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
-					defer taskRelease()
-					defer conn.Close()
-					defer udpNatMap.Delete(key)
-
-					bufPtr := udpSmallBufPool.Get().(*[]byte)
-					//  info ， info  cap  info ， info  0  info
-					buf := (*bufPtr)[:cap(*bufPtr)]
-					defer udpSmallBufPool.Put(bufPtr)
-
-					for {
-						conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-						n, err := conn.Read(buf)
-						if err != nil {
-							if Debug {
-								zlog.Debugf("%s [ROUTER-Direct] 🔴 Direct downlink read ended -> Session: %s | Reason: %v", TAG, key, err)
-							}
-							break
-						}
-						if Debug {
-							zlog.Debugf("%s [ROUTER-Direct] 📥 Received downlink direct data -> Session: %s | Length: %d bytes", TAG, key, n)
-						}
-						h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
-					}
-				}(uc, sessionKey, d.Atyp, dstAddrCopy, dstPortCopy, addr)
-			}
-		}
-
-		n, err := uc.Write(d.Data)
-		if err != nil {
-			if Debug {
-				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to write uplink data -> %s: %v", TAG, sessionKey, err)
-			}
-		} else {
-			if Debug {
-				zlog.Debugf("%s [ROUTER-Direct] 📤 Successfully wrote uplink data -> %s | Length: %d bytes", TAG, sessionKey, n)
-			}
-		}
-		return nil
-	}
-
-	// ==========================================
-	//  info ， info  UDPGW  info
-	// ==========================================
-	if h.UdpgwAddr == "" {
-		if Debug {
-			zlog.Warnf("%s [ROUTER-Proxy] ⚠️ Intercepted UDP packet -> Target: %s | Reason: UDPGW is not configured", TAG, targetAddrStr)
-		}
-		return nil
-	}
-
-	sessionKey := addr.String() + "<->" + targetAddrStr
-	var uConn net.Conn
-
-	if val, ok := udpgwMap.Load(sessionKey); ok {
-		uConn = val.(net.Conn)
-		if Debug {
-			zlog.Debugf("%s [ROUTER-Proxy] ♻️ Reusing proxy session (UDPGW) -> Client: %s", TAG, sessionKey)
-		}
-	} else {
-		// singleflight： info  UDP  info  sessionKey  info  info  Dial  info ， info  info  SSH  info
-		// concurrent channel open  info  info  "unexpected packet in response to channel open"  info
-		result, derr, _ := udpDialGroup.Do(sessionKey, func() (interface{}, error) {
-			//  info  info ： info  info  info  info  info
-			if existing, ok := udpgwMap.Load(sessionKey); ok {
-				return existing.(net.Conn), nil
-			}
-			mu.Lock()
-			client := sshClient
-			mu.Unlock()
-
-			if client == nil {
-				if Debug {
-					zlog.Warnf("%s [ROUTER-Proxy] ⚠️ Rejected UDP packet -> Target: %s | Reason: SSH is not connected", TAG, targetAddrStr)
-				}
-				return nil, fmt.Errorf("ssh client not ready")
-			}
-
-			var derr2 error
-			var dconn net.Conn
-			if h.UdpgwVersion == "badvpn" {
-				if Debug {
-					zlog.Debugf("%s [ROUTER-Proxy] 🚀 Selected Badvpn protocol to establish UDPGW tunnel", TAG)
-				}
-				dconn, derr2 = DialBadvpnUdpgw(client, h.UdpgwAddr, targetAddrStr)
-			} else {
-				if Debug {
-					zlog.Debugf("%s [ROUTER-Proxy] 🚀 Selected Tun2Proxy protocol to establish UDPGW tunnel", TAG)
-				}
-				dconn, derr2 = DialTun2proxyUdpgw(client, h.UdpgwAddr, targetAddrStr)
-			}
-			if derr2 != nil {
-				return nil, derr2
-			}
-
-			// --- Wrap the UDPGW connection ---
-			dconn = WrapConn(dconn, fmt.Sprintf("UDPGW->%s", targetAddrStr))
-			// ---------------------------------
-
-			actual, loaded := udpgwMap.LoadOrStore(sessionKey, dconn)
-			if loaded {
-				dconn.Close()
-				return actual.(net.Conn), nil
-			}
-
-			if Debug {
-				zlog.Debugf("%s [ROUTER-Proxy] 🟢 Created new proxy session (UDPGW) -> Client: %s | Tunnel target: %s", TAG, sessionKey, targetAddrStr)
-			}
-			taskTrack()
-			dstAddrCopy := cloneSlice(d.DstAddr)
-			dstPortCopy := cloneSlice(d.DstPort)
-			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
-				defer taskRelease()
-				defer conn.Close()
-				defer udpgwMap.Delete(key)
-
-				bufPtr := udpBufPool.Get().(*[]byte)
-				buf := (*bufPtr)[:cap(*bufPtr)]
-				defer udpBufPool.Put(bufPtr)
-
-				for {
-					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-					n, rerr := conn.Read(buf)
-					if rerr != nil {
-						if Debug {
-							zlog.Debugf("%s [ROUTER-Proxy] 🔴 Proxy downlink read ended -> Session: %s | Reason: %v", TAG, key, rerr)
-						}
-						break
-					}
-					if Debug {
-						zlog.Debugf("%s [ROUTER-Proxy] 📥 Received downlink proxy data -> Session: %s | Payload: %d bytes", TAG, key, n)
-					}
-					h.sendSocks5UDPResponse(s, clientAddr, dstAtyp, dstAddr, dstPortBytes, buf[:n])
-				}
-			}(dconn, addr, sessionKey, d.Atyp, dstAddrCopy, dstPortCopy)
-
-			return dconn, nil
-		})
-		if derr != nil {
-			zlog.Errorf("%s [ROUTER-Proxy] ❌ Failed to establish UDPGW tunnel -> Target: %s | Error: %v", TAG, targetAddrStr, derr)
-			// channel open  info  info  SSH  info  info ， info  info  info  info
-			if isSSHConnectionLost(derr) {
-				triggerSSHReconnect()
-			}
-			return derr
-		}
-		uConn = result.(net.Conn)
-	}
-
-	//  info ：UdpgwConn.Write  info  UDPGW  info
-	n, err := uConn.Write(d.Data)
-	if err != nil {
-		if Debug {
-			zlog.Errorf("%s [ROUTER-Proxy] ❌ Failed to write proxy data -> Session: %s | Error: %v", TAG, sessionKey, err)
-		}
-		uConn.Close()
-		udpgwMap.Delete(sessionKey)
-	} else {
-		if Debug {
-			zlog.Debugf("%s [ROUTER-Proxy] 📤 Successfully wrote proxy data -> Session: %s | Length: %d bytes", TAG, sessionKey, n)
-		}
-	}
-	return err
-}
-
-// info  SOCKS5 UDP  info
-func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *net.UDPAddr, atyp byte, addr []byte, port []byte, data []byte) {
-	outLen := 3 + 1 + len(addr) + 2 + len(data)
-	outBufPtr := udpBufPool.Get().(*[]byte)
-	outBuf := *outBufPtr
-	defer udpBufPool.Put(outBufPtr)
-
-	var outPkt []byte
-	if outLen <= cap(outBuf) {
-		outPkt = outBuf[:outLen]
-	} else {
-		//  info ： info ， info
-		outPkt = make([]byte, outLen)
-	}
-
-	outPkt[0], outPkt[1], outPkt[2] = 0x00, 0x00, 0x00
-	outPkt[3] = atyp
-	copy(outPkt[4:], addr)
-	copy(outPkt[4+len(addr):], port)
-	copy(outPkt[4+len(addr)+2:], data)
-	s.UDPConn.WriteToUDP(outPkt, clientAddr)
-}
-
-// -----  info  -----
+// ----- 后台任务计数与连接清理 -----
 
 // taskTrack / taskRelease 标记一个后台 goroutine 的存活期，供 wgWait 等待。
 // 两者必须在同一 goroutine 内成对出现（Add 在启动 goroutine 前，Done 在其退出时）。
@@ -612,27 +148,24 @@ func killActiveProxyConnections() {
 	}
 }
 
-// isSSHConnectionLost  info  error  info  SSH  info  info 。
-// golang.org/x/crypto/ssh  info  openChannel  info  info  SSH  info  info  info
-// channel open  info  info  ch.msg  info  info  info  info  <nil>  info
-//
-//	info  info  "unexpected packet in response to channel open"  info  info  info
+// isSSHConnectionLost 判断 error 是否意味着 SSH 连接已不可用。
+// golang.org/x/crypto/ssh 在连接断开后 openChannel 会得到各种 wrapped 错误，
+// 其中 channel open 收到意外回复时 err 链顶层是 <nil> 而消息以
+// "unexpected packet in response to channel open" 开头，只能按消息匹配。
 func isSSHConnectionLost(err error) bool {
 	if err == nil {
 		return false
 	}
-	//  info  channel open  info  info  SSH  info  info  info  info  info
 	if strings.Contains(err.Error(), "unexpected packet in response to channel open") {
 		return true
 	}
 	return false
 }
 
-// triggerSSHReconnect  info  SSH  info  info  info  info  info  AutoSSH  info  info 。
+// triggerSSHReconnect 在 UDPGW 建连失败且判定 SSH 已断时，立即清空会话并
+// 触发 AutoSSH 重连循环接管。
 //
-//	info  udpgwMap/tcpConnMap  info  info  info  info  SSH 信息 信息 信息 信息 信息 信息 信息
-//
-// 信息 sshClient 信息 信息  client.Close() 信息 信息  AutoSSH 信息  client.Wait() 信息 信息 信息 信息
+//	清理 udpgwMap/tcpConnMap，关闭 SSH client；AutoSSH 的 client.Wait() 随即返回进入重连。
 func triggerSSHReconnect() {
 	mu.Lock()
 	client := sshClient
@@ -645,7 +178,6 @@ func triggerSSHReconnect() {
 
 	zlog.Warnf("%s [AutoSSH] 🔥 SSH connection lost during UDPGW tunnel establishment, forcing reconnect...", TAG)
 
-	// 信息 udpgw 信息 （信息 SSH 信息 信息 信息 信息 信息 信息）
 	udpgwMap.Range(func(key, value interface{}) bool {
 		if conn, ok := value.(net.Conn); ok {
 			conn.Close()
@@ -654,510 +186,7 @@ func triggerSSHReconnect() {
 		return true
 	})
 
-	// 信息 TCP 信息
 	killActiveProxyConnections()
 
-	// 信息 SSH 信息 信息  AutoSSH 信息  client.Wait() 信息 信息 信息 信息
 	client.Close()
-}
-
-func maintainKeepAlive(ctx context.Context, client *ssh.Client) {
-	//  info  18  info
-	ticker := time.NewTicker(18 * time.Second)
-	defer ticker.Stop()
-
-	type keepAliveResult struct {
-		err      error
-		duration time.Duration
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			// Close 掉 client 才能解除内层 goroutine 阻塞在 SendRequest 上的
-			// 等待，否则引擎停止时该 goroutine 会一直挂到 TCP 层超时。
-			client.Close()
-			return
-		case <-ticker.C:
-			resCh := make(chan keepAliveResult, 1)
-
-			go func() {
-				start := time.Now() // 🌟  info
-				// send SSH  info
-				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-				duration := time.Since(start) // 🌟  info
-
-				resCh <- keepAliveResult{
-					err:      err,
-					duration: duration,
-				}
-			}()
-
-			select {
-			case <-ctx.Done():
-				client.Close()
-				return
-
-			case res := <-resCh:
-				if res.err != nil {
-					zlog.Warnf("%s [AutoSSH] ⚠️ Failed to send heartbeat: %v (Preparing to disconnect and rebuild)", TAG, res.err)
-					client.Close()
-					return
-				}
-				zlog.Infof("%s [AutoSSH] 💓 Heartbeat normal | Latency: %dms", TAG, res.duration.Milliseconds())
-
-			case <-time.After(8 * time.Second):
-				zlog.Warnf("%s [AutoSSH] ⚠️ Heartbeat response timed out severely (suspected network freeze), forcibly cutting off and rebuilding", TAG)
-				client.Close()
-				return
-			}
-		}
-	}
-}
-
-// checkSSHHostKey 实现 SSH 主机密钥校验的三档语义：
-//
-//  1. VerifySSHFingerprint=true：指纹必须与配置一致（MD5 或 SHA256）；
-//  2. VerifySSHFingerprint=false 但已记录过指纹（TOFU pin 非空）：指纹必须
-//     与首连时一致，防止已知主机被静默替换——这是默认开启的中间人防线；
-//  3. 首连（pin 为空）：放行并告警，宿主应在连接成功后回写指纹完成 pin。
-//     重置信任 = 清空配置中的指纹字段。
-func checkSSHHostKey(cfg ProxyConfig, key ssh.PublicKey) error {
-	fpSHA256 := ssh.FingerprintSHA256(key)
-	fpMD5 := ssh.FingerprintLegacyMD5(key)
-
-	if cfg.VerifySSHFingerprint {
-		if !(fpMD5 == cfg.ServerSSHFingerprint || fpSHA256 == cfg.ServerSSHFingerprint) {
-			return fmt.Errorf("host key [%s,%s] mismatch: %s", fpMD5, fpSHA256, cfg.ServerSSHFingerprint)
-		}
-		return nil
-	}
-
-	pinned := strings.TrimSpace(cfg.ServerSSHFingerprint)
-	if pinned == "" {
-		zlog.Warnf("%s [SSH-Handshake] ⚠️ Host key verification is DISABLED — accepted %s on first sight (TOFU). Pin this fingerprint via the profile's fingerprint field to detect MITM.", TAG, fpSHA256)
-		return nil
-	}
-	if !(fpMD5 == pinned || fpSHA256 == pinned) {
-		return fmt.Errorf("host key CHANGED since first connection (pinned %s, got [%s,%s]) — possible MITM; if the server was rebuilt, clear the stored fingerprint to re-trust", pinned, fpMD5, fpSHA256)
-	}
-	return nil
-}
-
-// isPermanentConfigError 判定拨号错误是否为配置类永久错误（类型不存在、
-// 必填字段缺失、参数非法）——这类错误重连永远不会成功，AutoSSH 应终止
-// 而不是无限循环重试刷日志。
-func isPermanentConfigError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	for _, marker := range []string{
-		"unsupported tunnel type",
-		" is required",
-		"must be ",
-		"must contain ",
-		"requires a ",
-		"not valid for",
-		"invalid ",
-	} {
-		if strings.Contains(msg, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// startSshTProxy  info  AutoSSH mode info ： info  DNS  info 、SOCKS5  info ，
-//
-//	info  SSH tunnel info 。 info  0  info Started successfully， info  0  info 。
-func startSshTProxy(configJson string) int {
-	stopSshTProxy()
-
-	PrintAndroidUserInfo()
-
-	var cfg ProxyConfig
-	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
-		zlog.Errorf("%s [Core] ❌ Failed to parse config JSON: %v", TAG, err)
-		emitError(-1, "config parse failed: "+err.Error())
-		emitState(StateError, err.Error())
-		return -1
-	}
-
-	var ctx context.Context
-	ctx, engineCancel = context.WithCancel(context.Background())
-	engineCtxHolder.Store(&ctx)
-
-	emitState(StateStarting, "")
-	zlog.Infof("%s [Core] ==================== Starting proxy engine (AutoSSH mode) ====================", TAG)
-
-	//  info  DNS  info
-	NewLocalDnsServer(cfg.UdpgwAddr, cfg.UdpgwVersion)
-
-	//  info  DNS  info
-	if lds := localDnsServer.Load(); lds != nil {
-		lds.Start(cfg.DnsAddr)
-	}
-
-	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
-	if err != nil {
-		zlog.Errorf("%s [SOCKS5] ❌ Failed to create SOCKS5 server instance: %v", TAG, err)
-		emitError(-4, err.Error())
-		emitState(StateError, err.Error())
-		return -4
-	}
-
-	mu.Lock()
-	socksServer = srv
-	mu.Unlock()
-
-	handler := &SshProxyHandler{
-		UdpgwAddr:    cfg.UdpgwAddr, //  info config info ， info disable UDPGW
-		UdpgwVersion: cfg.UdpgwVersion,
-	}
-
-	taskTrack()
-	go func() {
-		defer taskRelease()
-		zlog.Infof("%s [SOCKS5] 🚀 SOCKS5 proxy service started: %s", TAG, cfg.LocalAddr)
-		if err := srv.ListenAndServe(handler); err != nil && !strings.Contains(err.Error(), "closed network connection") {
-			zlog.Errorf("%s [SOCKS5] ❌ Service exited abnormally: %v", TAG, err)
-		}
-		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 service has completely stopped", TAG)
-	}()
-
-	taskTrack()
-	go func() {
-		defer taskRelease()
-
-		for {
-			select {
-			case <-ctx.Done():
-				zlog.Infof("%s [AutoSSH] Received global stop signal, daemon exiting", TAG)
-				return
-			default:
-			}
-
-			zlog.Infof("%s [AutoSSH] 🔄 Attempting to establish tunnel and SSH connection...", TAG)
-			emitState(StateConnecting, cfg.SshAddr)
-			emitNodeEvent(cfg.SshAddr, NodeEventConnecting, "")
-			client, _, err := DialNode(ctx, cfg, false)
-			if err != nil {
-				zlog.Errorf("%s [AutoSSH] ❌ Connection failed: %v", TAG, err)
-				emitState(StateReconnecting, err.Error())
-				emitNodeEvent(cfg.SshAddr, NodeEventFailed, err.Error())
-				// 配置类永久错误（类型不存在/必填缺失/参数非法）重连永远不会
-				// 成功：报错误并终止重连循环，而不是每 3 秒刷一次失败。
-				if isPermanentConfigError(err) {
-					zlog.Errorf("%s [AutoSSH] 🛑 Permanent configuration error, giving up reconnects", TAG)
-					emitError(-2, "permanent config error: "+err.Error())
-					emitState(StateError, err.Error())
-					mu.Lock()
-					sshClient = nil
-					mu.Unlock()
-					return
-				}
-				time.Sleep(3 * time.Second)
-				continue
-			}
-
-			mu.Lock()
-			sshClient = client
-			mu.Unlock()
-			zlog.Infof("%s [AutoSSH] ✅ SSH tunnel established successfully, global traffic taken over!", TAG)
-			emitState(StateConnected, cfg.SshAddr)
-			emitNodeEvent(cfg.SshAddr, NodeEventConnected, "")
-
-			// keepalive 属于长生命周期后台任务，纳入 taskTrack 计数，
-			// 保证 wgWait 能等到它退出（ctx 取消 / client 关闭后即返回）。
-			taskTrack()
-			go func() {
-				defer taskRelease()
-				maintainKeepAlive(ctx, client)
-			}()
-
-			err = client.Wait()
-			zlog.Warnf("%s [AutoSSH] ⚠️ Tunnel disconnected (%v), preparing to reconnect automatically...", TAG, err)
-			emitState(StateReconnecting, err.Error())
-
-			mu.Lock()
-			sshClient = nil
-			mu.Unlock()
-
-			killActiveProxyConnections()
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}()
-
-	return 0
-}
-
-// stopSshTProxy  info ， info cleanup info  SSH/ info 、DNS  info  SOCKS5  info 。
-func stopSshTProxy() {
-	// 持锁只做「取快照 + 置空」，把 DNS Stop / SOCKS Shutdown / 遍历关闭
-	// 连接等 I/O 全部移到锁外。旧实现全程持 mu：期间所有新建 TCP 连接都
-	// 会阻塞在 TCPHandle 的 mu.Lock() 上，而关闭操作本身可能阻塞。
-	mu.Lock()
-	cancel := engineCancel
-	engineCancel = nil
-	b := context.Background()
-	engineCtxHolder.Store(&b)
-	lds := localDnsServer.Load()
-	localDnsServer.Store(nil)
-	srv := socksServer
-	socksServer = nil
-	client := sshClient
-	sshClient = nil
-	mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-
-	zlog.Infof("%s [Core] Stopping resources...", TAG)
-	emitState(StateStopped, "")
-
-	if lds != nil {
-		lds.Stop()
-	}
-	if srv != nil {
-		srv.Shutdown()
-	}
-	closeQuicConnCache()
-	if client != nil {
-		client.Close()
-	}
-
-	killActiveProxyConnections()
-
-	udpSessionCount := 0
-	udpNatMap.Range(func(key, value interface{}) bool {
-		//  info ： info  value.(*net.UDPConn)， info  TrackedConn
-		if conn, ok := value.(net.Conn); ok {
-			conn.Close()
-			udpSessionCount++
-		}
-		udpNatMap.Delete(key)
-		return true
-	})
-	if udpSessionCount > 0 {
-		zlog.Infof("%s [Core] Forcibly disconnected %d active UDP sessions", TAG, udpSessionCount)
-	}
-
-	udpgwSessionCount := 0
-	udpgwMap.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(net.Conn); ok {
-			conn.Close()
-			udpgwSessionCount++
-		}
-		udpgwMap.Delete(key)
-		return true
-	})
-	if udpgwSessionCount > 0 {
-		zlog.Infof("%s [Core] Forcibly disconnected %d UDPGW proxy sessions", TAG, udpgwSessionCount)
-	}
-
-	zlog.Infof("%s [Core] All active SSH/Proxy connections destroyed", TAG)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SSH 握手信息（供 UI 展示服务器标识）
-//
-// 两类 banner 语义不同，切勿混为一谈：
-//   ServerVersion —— RFC 4253 版本标识行（如 SSH-2.0-OpenSSH_9.6），版本交换阶段即确定；
-//   Banner        —— SSH_MSG_USERAUTH_BANNER 认证阶段文本（服务端自定义提示 / MOTD），可能为空。
-// ─────────────────────────────────────────────────────────────────────────────
-
-// SSHHandshakeInfo 一次真实 SSH 握手中可对外展示的信息。
-type SSHHandshakeInfo struct {
-	Address       string `json:"address"`
-	ClientVersion string `json:"client_version"`
-	ServerVersion string `json:"server_version"`
-	Banner        string `json:"banner"`
-	UpdatedAt     int64  `json:"updated_at"`
-}
-
-var (
-	sshHandshakeMu    sync.Mutex
-	sshHandshakeCache = make(map[string]*SSHHandshakeInfo)
-	sshHandshakeLast  *SSHHandshakeInfo
-)
-
-// sshHandshakeCacheMax 限制按 addr 索引的握手缓存条目数。节点地址集合会随
-// 多节点切换 / 动态端口变化而增长，旧实现只增不删 → 无界增长。
-const sshHandshakeCacheMax = 64
-
-// ensureHandshakeCacheBudget 在缓存达到上限时整表重置。必须在持有
-// sshHandshakeMu 时调用。重置不影响"最近一次握手"展示：sshHandshakeLast
-// 仍指向已捕获的条目。
-func ensureHandshakeCacheBudget() {
-	if len(sshHandshakeCache) >= sshHandshakeCacheMax {
-		sshHandshakeCache = make(map[string]*SSHHandshakeInfo)
-	}
-}
-
-// recordSSHHandshakeVersion 记录握手中的版本标识行（认证成功后才可达）。
-func recordSSHHandshakeVersion(addr, clientVersion, serverVersion string) {
-	sshHandshakeMu.Lock()
-	defer sshHandshakeMu.Unlock()
-	ensureHandshakeCacheBudget()
-	info := sshHandshakeCache[addr]
-	if info == nil {
-		info = &SSHHandshakeInfo{Address: addr}
-		sshHandshakeCache[addr] = info
-	}
-	info.ClientVersion = clientVersion
-	info.ServerVersion = serverVersion
-	info.UpdatedAt = time.Now().UnixMilli()
-	sshHandshakeLast = info
-}
-
-// recordSSHHandshakeBanner 记录认证阶段 banner（服务端未配置时为空，此时保留旧值）。
-func recordSSHHandshakeBanner(addr, banner string) {
-	banner = strings.TrimSpace(banner)
-	if banner == "" {
-		return
-	}
-	sshHandshakeMu.Lock()
-	defer sshHandshakeMu.Unlock()
-	ensureHandshakeCacheBudget()
-	info := sshHandshakeCache[addr]
-	if info == nil {
-		info = &SSHHandshakeInfo{Address: addr}
-		sshHandshakeCache[addr] = info
-	}
-	info.Banner = banner
-	info.UpdatedAt = time.Now().UnixMilli()
-	sshHandshakeLast = info
-}
-
-// getSSHHandshakeInfoJSON 返回 addr 最近一次真实握手的 JSON；
-// addr 无记录时回退到最近一次握手，保证节点切换后仍能展示当前连接的信息；全无记录返回 ""。
-func getSSHHandshakeInfoJSON(addr string) string {
-	sshHandshakeMu.Lock()
-	info := sshHandshakeCache[addr]
-	if info == nil {
-		info = sshHandshakeLast
-	}
-	var snapshot SSHHandshakeInfo
-	if info != nil {
-		snapshot = *info
-	}
-	sshHandshakeMu.Unlock()
-
-	if info == nil {
-		return ""
-	}
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (*ssh.Client, error) {
-	var sshAuthMethod []ssh.AuthMethod
-	if cfg.AuthType == "password" {
-		sshAuthMethod = []ssh.AuthMethod{
-			ssh.Password(cfg.Pass),
-		}
-	} else {
-		signer, err := parsePrivateKeySshSigner([]byte(cfg.PrivateKey), []byte(cfg.PrivateKeyPassphrase))
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse private key: %v", err)
-		}
-		sshAuthMethod = []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
-		}
-	}
-
-	var hostKeyCallback ssh.HostKeyCallback
-	if isPing {
-		hostKeyCallback = ssh.InsecureIgnoreHostKey()
-	} else {
-		hostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			fpSHA256 := ssh.FingerprintSHA256(key)
-			fpMD5 := ssh.FingerprintLegacyMD5(key)
-			algo := key.Type()
-			pubKey := string(ssh.MarshalAuthorizedKey(key))
-			zlog.Debugf("%s [SSH-Handshake] ==== SSH Host Key Info ====", TAG)
-			zlog.Debugf("%s [SSH-Handshake] Host: %s", TAG, hostname)
-			zlog.Debugf("%s [SSH-Handshake] Remote: %s", TAG, remote.String())
-			zlog.Debugf("%s [SSH-Handshake] Algorithm: %s", TAG, algo)
-			zlog.Debugf("%s [SSH-Handshake] Fingerprint (SHA256): %s", TAG, fpSHA256)
-			zlog.Debugf("%s [SSH-Handshake] Fingerprint (MD5): %s", TAG, fpMD5)
-			zlog.Debugf("%s [SSH-Handshake] PublicKey: %s", TAG, pubKey)
-			zlog.Debugf("%s [SSH-Handshake] ===========================", TAG)
-			return checkSSHHostKey(cfg, key)
-		}
-	}
-
-	timeout := 15 * time.Second
-	if isPing {
-		if d, ok := ctx.Deadline(); ok {
-			timeout = time.Until(d)
-		} else {
-			timeout = 5 * time.Second
-		}
-	}
-
-	sshConfig := &ssh.ClientConfig{
-		User: cfg.User,
-		Auth: sshAuthMethod,
-		BannerCallback: func(message string) error {
-			// 认证阶段 banner（服务端自定义提示 / MOTD）：捕获供 UI 展示，探测路径同样记录
-			recordSSHHandshakeBanner(cfg.SshAddr, message)
-			if !isPing {
-				zlog.Warnf("===== SSH Banner START =====\n%s\n===== SSH Banner END =====", message)
-			}
-			return nil
-		},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         timeout,
-		Config: ssh.Config{
-			KeyExchanges: []string{
-				"curve25519-sha256",
-				"curve25519-sha256@libssh.org",
-				"ecdh-sha2-nistp256",
-			},
-			Ciphers: []string{
-				"aes128-gcm@openssh.com",
-				"chacha20-poly1305@openssh.com",
-				"aes256-gcm@openssh.com",
-			},
-			MACs: []string{
-				"hmac-sha2-256-etm@openssh.com",
-				"hmac-sha2-512-etm@openssh.com",
-			},
-		},
-		HostKeyAlgorithms: []string{
-			"ssh-ed25519",
-			"ecdsa-sha2-nistp256",
-			"rsa-sha2-512",
-			"rsa-sha2-256",
-		},
-	}
-
-	scc, chans, reqs, err := ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	cv := string(scc.ClientVersion())
-	sv := string(scc.ServerVersion())
-	// 版本标识行：认证已通过，记入缓存供连接详情面板展示
-	recordSSHHandshakeVersion(cfg.SshAddr, cv, sv)
-
-	if !isPing {
-		zlog.Warnf("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
-		zlog.Warnf("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
-	}
-
-	client := ssh.NewClient(scc, chans, reqs)
-	return client, nil
 }

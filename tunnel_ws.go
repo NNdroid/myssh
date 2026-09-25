@@ -84,7 +84,7 @@ func init() {
 		// Header
 		header := http.Header{}
 		header.Set("Host", cfg.CustomHost)
-		header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.50 Mobile Safari/537.36")
+		header.Set("User-Agent", spoofChromeMobileUA)
 		header.Set("Sec-WebSocket-Protocol", "binary")
 
 		//  info
@@ -133,7 +133,7 @@ func init() {
 			return nil, err
 		}
 		if isWSS && !cfg.VerifyCertificateFingerprint {
-			zlog.Warnf("%s [Tunnel] ⚠️ Certificate verification is DISABLED (no fingerprint pinned) — the TLS server's identity is not checked; pin a fingerprint to detect MITM", TAG)
+			warnCertVerificationDisabled()
 		}
 
 		zlog.Infof("%s [Tunnel] ✅ WebSocket handshake successful (Status: %d), Negotiated protocol: %s", TAG, resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))

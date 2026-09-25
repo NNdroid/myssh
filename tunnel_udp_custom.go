@@ -198,10 +198,5 @@ func emitUDPCEvent(ev udpclient.ClientEvent) {
 }
 
 func init() {
-	RegisterTunnel("udp_custom", "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
-		return dialUDPCustomSDK(ctx, cfg)
-	})
+	registerSelfDial("udp_custom", dialUDPCustomSDK)
 }

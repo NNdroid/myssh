@@ -99,10 +99,5 @@ func emitICMPEvent(ev icmpclient.ClientEvent) {
 
 func init() {
 	// ICMP 载体由 SDK 自行开 socket（raw/ping socket），无需底层拨号。
-	RegisterTunnel("icmp_custom", "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
-		return dialICMPCustomSDK(ctx, cfg)
-	})
+	registerSelfDial("icmp_custom", dialICMPCustomSDK)
 }

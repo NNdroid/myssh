@@ -121,10 +121,7 @@ func emitXhttpEvent(ev xhttptunnel.Event) {
 
 func init() {
 	// xhttp：TLS 由配置开关决定（明文 xhttp 与 TLS xhttp 同一类型）。
-	RegisterTunnel("xhttp", "custom", func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
+	registerSelfDial("xhttp", func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		return dialXHTTPSDK(ctx, cfg, cfg.TunnelTLSEnabled)
 	})
 }

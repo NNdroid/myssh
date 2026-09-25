@@ -10,12 +10,35 @@
 
 package myssh
 
+import (
+	"strings"
+
+	"go.uber.org/zap/zapcore"
+)
+
 // SyncLogger 在程序退出前把缓冲区日志刷盘（对文件 core 触发 fsync）。
 // 平台中立：两个平台都将 zlog 初始化为 *zap.SugaredLogger（未初始化时为 Nop），
 // 因此这里只需判空后 Sync 即可，无需分平台实现。
 func SyncLogger() {
 	if zlog != nil {
 		_ = zlog.Sync()
+	}
+}
+
+// parseLogLevel 把配置面的日志级别字符串解析为 zapcore.Level，
+// 未识别取值回落 Info。两个平台实现共用，避免 switch 漂移。
+func parseLogLevel(logLevelStr string) zapcore.Level {
+	switch strings.ToUpper(strings.TrimSpace(logLevelStr)) {
+	case "DEBUG":
+		return zapcore.DebugLevel
+	case "INFO":
+		return zapcore.InfoLevel
+	case "WARN", "WARNING":
+		return zapcore.WarnLevel
+	case "ERROR":
+		return zapcore.ErrorLevel
+	default:
+		return zapcore.InfoLevel
 	}
 }
 
