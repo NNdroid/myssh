@@ -167,7 +167,7 @@ func classifyPingError(err error) string {
 		return "tls"
 	case strings.Contains(msg, "no such host"), strings.Contains(msg, "lookup"), strings.Contains(msg, "dns"):
 		return "dns"
-	case strings.HasPrefix(msg, "status "), strings.Contains(msg, "status "):
+	case strings.Contains(msg, "status "):
 		return "http"
 	default:
 		return "other"

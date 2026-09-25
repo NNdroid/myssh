@@ -13,15 +13,15 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// info  ConID  info  ( info  1  info )
+// 全局 ConID 分配器 (从 1 开始自增)
 var globalConID atomic.Uint32
 
-// info  ConID
+// nextConID 分配下一个 ConID
 func nextConID() uint16 {
-	//  info ， info
+	// 原子自增，线程安全
 	id := globalConID.Add(1)
 
-	//  info ， info  0  info  conid
+	// 跳过 0 值，避免 0 号 conid（保留值）
 	res := uint16(id % 65536)
 	if res == 0 {
 		id = globalConID.Add(1)
@@ -30,7 +30,7 @@ func nextConID() uint16 {
 	return res
 }
 
-// Badvpn UDPGW  info  ( info  udpgw.c  info )
+// Badvpn UDPGW 协议常量 (对照 udpgw.c 源码)
 const (
 	UDPGW_CLIENT_FLAG_KEEPALIVE = 0x01
 	UDPGW_CLIENT_FLAG_REBIND    = 0x02
@@ -52,7 +52,7 @@ type BadvpnUdpgwConn struct {
 	closeOnce sync.Once
 }
 
-// DialBadvpnUdpgw  info  SSH tunnel info  Badvpn-UDPGW  info
+// DialBadvpnUdpgw 经 SSH tunnel 建立 Badvpn-UDPGW 连接
 func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
 	if sshClient == nil {
 		return nil, fmt.Errorf("ssh client is not initialized")
@@ -62,7 +62,7 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		zlog.Debugf("%s [UDPGW-Dial] 📞 Dialing target: %s -> Server: %s\n", TAG, remoteTarget, udpgwServerAddr)
 	}
 
-	// udpgw.c  info ， info  IP
+	// 按 udpgw.c 语义，目标地址需先解析为 IP
 	addr, err := net.ResolveUDPAddr("udp", remoteTarget)
 	if err != nil {
 		zlog.Errorf("%s [UDPGW-Dial] ❌ Failed to resolve target address (%s): %v", TAG, remoteTarget, err)
@@ -78,7 +78,7 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		return nil, fmt.Errorf("ssh dial udpgw server (%s) failed: %w", udpgwServerAddr, err)
 	}
 
-	//  info  conID
+	// 分配唯一 conID
 	uniqueID := nextConID()
 
 	c := &BadvpnUdpgwConn{
@@ -86,7 +86,7 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		targetIP:   addr.IP,
 		targetPort: uint16(addr.Port),
 		isIPv6:     addr.IP.To4() == nil,
-		conID:      uniqueID, //  info  ID
+		conID:      uniqueID, // 唯一连接 ID
 		closed:     make(chan struct{}),
 	}
 	c.lastActive.Store(time.Now().Unix())
@@ -111,7 +111,7 @@ func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 	}
 
 	var lenBuf [2]byte
-	// Badvpn PacketProto  info  2 bytes info
+	// Badvpn PacketProto 帧长前缀为 2 bytes 小端
 	binary.LittleEndian.PutUint16(lenBuf[:], uint16(length))
 
 	if Debug {
@@ -141,21 +141,21 @@ func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 }
 
 func (c *BadvpnUdpgwConn) keepAliveLoop() {
-	// 1.  info  badvpn  info : Flags(1) + ConID(2  info )
+	// 1. 组装 badvpn 心跳帧: Flags(1) + ConID(2 字节小端)
 	hb := make([]byte, 3)
 	hb[0] = UDPGW_CLIENT_FLAG_KEEPALIVE
 	binary.LittleEndian.PutUint16(hb[1:], c.conID)
 
 	// ==========================================
-	//  info “ info retry” info
-	//  info  SSH  info ， info retry 3  info
+	// 初始"握手 retry"阶段
+	// SSH 通道刚建立，这里 retry 3 次
 	// ==========================================
 	var initialErr error
 	for i := 0; i < 3; i++ {
-		time.Sleep(time.Duration(i+1) * time.Millisecond * 100) //  info
+		time.Sleep(time.Duration(i+1) * time.Millisecond * 100) // 递增退避
 		initialErr = c.writeFrame(hb)
 		if initialErr == nil {
-			break // successfullysend， info retry info
+			break // 发送成功，结束 retry 循环
 		}
 		if Debug {
 			zlog.Warnf("%s [UDPGW-keepAliveLoop] ⚠️ Initial Keepalive attempt %d failed: %v", TAG, i+1, initialErr)
@@ -164,7 +164,7 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 
 	if initialErr != nil {
 		zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Failed to send initial Keepalive after retries: %v", TAG, initialErr)
-		c.Close() //  info ， info
+		c.Close() // 彻底失败，关闭连接
 		return
 	}
 
@@ -173,7 +173,7 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 	}
 
 	// ==========================================
-	//  info  15  info
+	// 之后每 15 秒发一次心跳
 	// ==========================================
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -182,14 +182,14 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 		select {
 		case <-ticker.C:
 		case <-c.closed:
-			return //  info closed info ， info
+			return // 收到 closed 信号，正常退出
 		}
 
-		//  info bidirectionaltimeout info  (45 info ， info )
+		// 双向超时检测 (45 秒无活动即判死)
 		last := c.lastActive.Load()
 		if time.Now().Unix()-last > 45 {
 			zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Server heartbeat timeout (45s), connection dead", TAG)
-			c.Close() //  info
+			c.Close() // 判死关闭
 			return
 		}
 
@@ -198,7 +198,7 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 		}
 
 		if err := c.writeFrame(hb); err != nil {
-			//  info 。 info channel info closed info ， info 。
+			// 写失败。先检查 channel 是否已 closed，避免把主动关闭误报为错误。
 			select {
 			case <-c.closed:
 				return
@@ -206,13 +206,13 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 			}
 
 			zlog.Errorf("%s [UDPGW-keepAliveLoop] ❌ Failed to write Keepalive: %v\n", TAG, err)
-			c.Close() //  info abnormal info ， info closed info
+			c.Close() // 心跳 abnormal，关闭并广播 closed 信号
 			return
 		}
 	}
 }
 
-// Write  info send info 。 info ： info ，writeFrame  info 。
+// Write 组装 UDPGW 上行帧并发送。注意：目标地址在 Dial 时已固定，writeFrame 内部加锁串行化写入。
 func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 	addrLen := 4
 	var flags byte = 0x00
@@ -223,16 +223,16 @@ func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 		ipData = c.targetIP.To16()
 	}
 
-	//  info : Flags(1) + ConID(2) + IPAddr(N) + Port(2) + Payload
+	// 帧结构: Flags(1) + ConID(2) + IPAddr(N) + Port(2) + Payload
 	packet := make([]byte, 3+addrLen+2+len(b))
 
-	// 1. Header: Flags  info  ConID (ConID  info )
+	// 1. Header: Flags 与 ConID (ConID 小端)
 	packet[0] = flags
 	binary.LittleEndian.PutUint16(packet[1:3], c.conID)
 
-	copy(packet[3:], ipData) // IP address info bytes
+	copy(packet[3:], ipData) // IP 地址 N 字节
 
-	// port info  udpgw.c  info bytes info  (BigEndian)
+	// port 字段按 udpgw.c 约定用大端 (BigEndian)
 	binary.BigEndian.PutUint16(packet[3+addrLen:], c.targetPort)
 
 	copy(packet[3+addrLen+2:], b)
@@ -260,9 +260,9 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 
 	for {
 		var lenBuf [2]byte
-		//  info  2 bytes info
+		// 先读 2 bytes 帧长前缀
 		if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
-			//  info closed， info ， info
+			// 若已主动 closed，静默返回 EOF，不当作错误
 			select {
 			case <-c.closed:
 				return 0, io.EOF
@@ -274,20 +274,20 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 
 		pLen := int(binary.LittleEndian.Uint16(lenBuf[:]))
 
-		//  info （ info ， info  OOM）
+		// 帧长合法性检查（防异常包导致 OOM）
 		if pLen > 0xFFFF || pLen > len(bodyBuf) {
 			err := fmt.Errorf("invalid packet length: %d", pLen)
 			zlog.Errorf("%s [UDPGW-Read] ❌ Intercepted malformed packet: %v", TAG, err)
 			return 0, err
 		}
 
-		//  info
+		// 读取包体
 		body := bodyBuf[:pLen]
 		if _, err := io.ReadFull(c.Conn, body); err != nil {
 			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet payload (Expected length: %d): %v", TAG, pLen, err)
 			return 0, err
 		}
-		//  info （ info server info ）， info
+		// 刷新活跃时间（收到 server 回包），供超时判定使用
 		c.lastActive.Store(time.Now().Unix())
 
 		if Debug {

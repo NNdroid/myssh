@@ -31,6 +31,9 @@ type SpeedTestResult struct {
 	Error      string  `json:"error"`
 }
 
+// speedTestUserAgent 是测速请求的伪装 UA。
+const speedTestUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/SpeedTest"
+
 // speedTest 经节点链路测真实带宽：下行 GET downUrl，上行 POST upUrl（body=upBytes 随机字节）。
 // 与 pingNodes 同理走 DialNode 建立 SSH 隧道，再 sshClient.Dial("tcp", addr) 把 HTTP 流量导进隧道，
 // 因此测到的是“本机→节点→出口”的隧道吞吐，而不是直连本机网卡。
@@ -89,93 +92,118 @@ func speedTestWithProgress(configJson, downUrl, upUrl string, upBytes int64, tim
 	res := SpeedTestResult{}
 
 	// ── 下行 ──
-	if !strings.HasPrefix(downUrl, "http://") && !strings.HasPrefix(downUrl, "https://") {
-		downUrl = "http://" + downUrl
-	}
-	{
-		phaseCtx, phaseCancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-		defer phaseCancel()
-		req, err := http.NewRequestWithContext(phaseCtx, "GET", downUrl, nil)
-		if err != nil {
-			return marshalPartialSpeedError(res, totalStart, "down req: "+err.Error())
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/SpeedTest")
-		start := time.Now()
-		reportProgress(progress, "download", 0, start)
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			zlog.Errorf("[SpeedTest] down http failed: %v", err)
-			return marshalPartialSpeedError(res, totalStart, "down http: "+err.Error())
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			return marshalPartialSpeedError(res, totalStart, "down status: "+resp.Status)
-		}
-		counter := &speedProgressWriter{phase: "download", start: start, callback: progress}
-		n, err := io.Copy(counter, resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			zlog.Errorf("[SpeedTest] down read failed: %v", err)
-			return marshalPartialSpeedError(res, totalStart, "down read: "+err.Error())
-		}
-		d := time.Since(start).Seconds()
-		if d <= 0 {
-			d = 1e-6
-		}
-		res.BytesDown = n
-		res.DownBps = float64(n) / d
-		res.DownMbps = res.DownBps * 8 / 1e6
-		reportProgress(progress, "download_done", n, start)
-		zlog.Infof("[SpeedTest] down done: %d bytes in %.2fs -> %.2f Mbps", n, d, res.DownMbps)
+	if msg := runDownloadPhase(&res, httpClient, downUrl, timeoutMs, progress); msg != "" {
+		return marshalPartialSpeedError(res, totalStart, msg)
 	}
 
 	// ── 上行 ──
-	if !strings.HasPrefix(upUrl, "http://") && !strings.HasPrefix(upUrl, "https://") {
-		upUrl = "http://" + upUrl
-	}
-	{
-		phaseCtx, phaseCancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-		defer phaseCancel()
-		body := make([]byte, upBytes)
-		if _, err := rand.Read(body); err != nil {
-			// 退化：零填充也足以测吞吐
-			zlog.Warnf("[SpeedTest] rand.Read failed, fall back to zero body: %v", err)
-		}
-		start := time.Now()
-		counter := &speedProgressReader{reader: bytes.NewReader(body), phase: "upload", start: start, callback: progress}
-		req, err := http.NewRequestWithContext(phaseCtx, "POST", upUrl, counter)
-		if err != nil {
-			return marshalPartialSpeedError(res, totalStart, "up req: "+err.Error())
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/SpeedTest")
-		req.ContentLength = upBytes
-		reportProgress(progress, "upload", 0, start)
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			zlog.Errorf("[SpeedTest] up http failed: %v", err)
-			return marshalPartialSpeedError(res, totalStart, "up http: "+err.Error())
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			resp.Body.Close()
-			return marshalPartialSpeedError(res, totalStart, "up status: "+resp.Status)
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		d := time.Since(start).Seconds()
-		if d <= 0 {
-			d = 1e-6
-		}
-		res.BytesUp = counter.transferred
-		res.UpBps = float64(counter.transferred) / d
-		res.UpMbps = res.UpBps * 8 / 1e6
-		reportProgress(progress, "upload_done", counter.transferred, start)
-		zlog.Infof("[SpeedTest] up done: %d bytes in %.2fs -> %.2f Mbps", counter.transferred, d, res.UpMbps)
+	if msg := runUploadPhase(&res, httpClient, upUrl, upBytes, timeoutMs, progress); msg != "" {
+		return marshalPartialSpeedError(res, totalStart, msg)
 	}
 
 	res.Ok = true
 	res.DurationMs = time.Since(totalStart).Milliseconds()
 	out, _ := json.Marshal(res)
 	return string(out)
+}
+
+// ensureHTTPScheme 为缺少 scheme 的测速 URL 补 http://。
+func ensureHTTPScheme(rawURL string) string {
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return "http://" + rawURL
+	}
+	return rawURL
+}
+
+// fillSpeedStats 由传输字节数与起始时间计算 bps/Mbps。
+func fillSpeedStats(n int64, start time.Time) (bps, mbps float64) {
+	d := time.Since(start).Seconds()
+	if d <= 0 {
+		d = 1e-6
+	}
+	bps = float64(n) / d
+	return bps, bps * 8 / 1e6
+}
+
+// runDownloadPhase 执行下行测速：GET url 并把响应体写入计数器。
+// 返回空串表示成功；否则为错误描述（由调用方并入部分结果 JSON）。
+func runDownloadPhase(res *SpeedTestResult, httpClient *http.Client, downUrl string, timeoutMs int, progress SpeedTestProgressCallback) string {
+	downUrl = ensureHTTPScheme(downUrl)
+	phaseCtx, phaseCancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	defer phaseCancel()
+
+	req, err := http.NewRequestWithContext(phaseCtx, "GET", downUrl, nil)
+	if err != nil {
+		return "down req: " + err.Error()
+	}
+	req.Header.Set("User-Agent", speedTestUserAgent)
+
+	start := time.Now()
+	reportProgress(progress, "download", 0, start)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		zlog.Errorf("[SpeedTest] down http failed: %v", err)
+		return "down http: " + err.Error()
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return "down status: " + resp.Status
+	}
+	counter := &speedProgressWriter{phase: "download", start: start, callback: progress}
+	n, err := io.Copy(counter, resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		zlog.Errorf("[SpeedTest] down read failed: %v", err)
+		return "down read: " + err.Error()
+	}
+
+	res.BytesDown = n
+	res.DownBps, res.DownMbps = fillSpeedStats(n, start)
+	reportProgress(progress, "download_done", n, start)
+	zlog.Infof("[SpeedTest] down done: %d bytes in %.2fs -> %.2f Mbps", n, time.Since(start).Seconds(), res.DownMbps)
+	return ""
+}
+
+// runUploadPhase 执行上行测速：以随机字节为 body、经计数 reader POST 上传。
+// 返回空串表示成功；否则为错误描述（由调用方并入部分结果 JSON）。
+func runUploadPhase(res *SpeedTestResult, httpClient *http.Client, upUrl string, upBytes int64, timeoutMs int, progress SpeedTestProgressCallback) string {
+	upUrl = ensureHTTPScheme(upUrl)
+	phaseCtx, phaseCancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	defer phaseCancel()
+
+	body := make([]byte, upBytes)
+	if _, err := rand.Read(body); err != nil {
+		// 退化：零填充也足以测吞吐
+		zlog.Warnf("[SpeedTest] rand.Read failed, fall back to zero body: %v", err)
+	}
+
+	start := time.Now()
+	counter := &speedProgressReader{reader: bytes.NewReader(body), phase: "upload", start: start, callback: progress}
+	req, err := http.NewRequestWithContext(phaseCtx, "POST", upUrl, counter)
+	if err != nil {
+		return "up req: " + err.Error()
+	}
+	req.Header.Set("User-Agent", speedTestUserAgent)
+	req.ContentLength = upBytes
+	reportProgress(progress, "upload", 0, start)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		zlog.Errorf("[SpeedTest] up http failed: %v", err)
+		return "up http: " + err.Error()
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return "up status: " + resp.Status
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	res.BytesUp = counter.transferred
+	res.UpBps, res.UpMbps = fillSpeedStats(counter.transferred, start)
+	reportProgress(progress, "upload_done", counter.transferred, start)
+	zlog.Infof("[SpeedTest] up done: %d bytes in %.2fs -> %.2f Mbps", counter.transferred, time.Since(start).Seconds(), res.UpMbps)
+	return ""
 }
 
 type speedProgressWriter struct {

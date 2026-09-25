@@ -1,47 +1,46 @@
 package myssh
 
-// SshTProxy  info 。
+// SshTProxy 是面向 gomobile 的导出门面。
 //
-//	info ： info （ info  socksServer/sshClient/engineCancel  info ），
-//	info  SshTProxy  info ；NewSshTProxy  info 。
-//	info “ info ” info  Android  info 、 info ，
-//	info 。 info tunnel，
-//	info （ info ， info ）。
+//	注意：所有引擎状态（socksServer/sshClient/engineCancel 等包级变量）
+//	都是全局共享的；SshTProxy 自身不持有状态，NewSshTProxy 每次返回等价
+//	的空壳实例。Android 侧重复创建多个实例、跨实例调用均安全。
+//	所有 tunnel 的注册表也挂在包级，重复 Start 前会先隐式 Stop。
 type SshTProxy struct{}
 
-// NewSshTProxy  info 。
+// NewSshTProxy 创建门面实例。
 func NewSshTProxy() *SshTProxy {
 	return &SshTProxy{}
 }
 
-// SetEngineCallback  info （ info  registerEngineCallback）。
+// SetEngineCallback 注册引擎状态回调（内部转 registerEngineCallback）。
 func (p *SshTProxy) SetEngineCallback(cb EngineCallback) {
 	registerEngineCallback(cb)
 }
 
-// Start  info ， info  ProxyConfig  info  JSON。 info ：0 successfully，<0 failed info 。
+// Start 启动代理引擎，入参为 ProxyConfig 对应的 JSON。返回值：0 成功，<0 失败码。
 func (p *SshTProxy) Start(configJson string) int {
 	return startSshTProxy(configJson)
 }
 
-// Stop  info cleanup info 。
+// Stop 停止引擎并执行 cleanup 清理。
 func (p *SshTProxy) Stop() {
 	stopSshTProxy()
 }
 
-// LoadGlobalConfig  info config（DNS/Geo  info ）， info  GlobalConfig  info  JSON。
+// LoadGlobalConfig 加载全局配置（DNS/Geo 分流），入参为 GlobalConfig 对应的 JSON。
 func (p *SshTProxy) LoadGlobalConfig(configJson string) int {
 	return loadGlobalConfigFromJson(configJson)
 }
 
-// PingNodes  info ， info  JSON  info （ info  PingResult）。
+// PingNodes 批量测延迟，返回 JSON 数组（元素结构见 PingResult）。
 func (p *SshTProxy) PingNodes(profilesJson, targetUrl string, timeoutMs int) string {
 	return pingNodes(profilesJson, targetUrl, timeoutMs)
 }
 
-// SpeedTest  info  info  info （ info  SpeedTestResult）：
-// info  configJson  info  ProxyConfig  info （ info  pingNodes  info ），
-// info  downUrl/upUrl  info  Cloudflare speed  info 。
+// SpeedTest 执行上下行吞吐测速（返回 JSON，结构见 SpeedTestResult）：
+// 入参 configJson 为 ProxyConfig 对应的 JSON（语义同 pingNodes 的入参），
+// downUrl/upUrl 为 Cloudflare speed 测速端点。
 func (p *SshTProxy) SpeedTest(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int) string {
 	return speedTest(configJson, downUrl, upUrl, upBytes, timeoutMs)
 }
@@ -51,7 +50,7 @@ func (p *SshTProxy) SpeedTestWithProgress(configJson, downUrl, upUrl string, upB
 	return speedTestWithProgress(configJson, downUrl, upUrl, upBytes, timeoutMs, cb)
 }
 
-// WgWait  info  goroutine  info （ info  Android  info ）。
+// WgWait 等待所有后台 goroutine 退出（供 Android 优雅退出时调用）。
 func (p *SshTProxy) WgWait() {
 	wgWait()
 }

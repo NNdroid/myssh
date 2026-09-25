@@ -91,8 +91,8 @@ func init() {
 		if cfg.ProxyAuthRequired {
 			auth := cfg.ProxyAuthUser + ":" + cfg.ProxyAuthPass
 			encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
-			//  info  WS  info ， info  Proxy-Authorization  info  Authorization
-			//  info  CDN  info server（ info  Nginx, Cloudflare） info
+			// 对 WS 载体而言，鉴权头沿用 Proxy-Authorization 而非 Authorization：
+			// CDN 与反代 server（例如 Nginx, Cloudflare）会先消费前者。
 			header.Set("Proxy-Authorization", "Basic "+encodedAuth)
 			zlog.Infof("%s [Tunnel] Injected authentication info for WS handshake (User: %s)", TAG, cfg.ProxyAuthUser)
 		}

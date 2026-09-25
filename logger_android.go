@@ -10,9 +10,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// ---  info  ---
+// --- 日志接收器 ---
 
-// LogReceiver  info  Android  info
+// LogReceiver 由 Android 宿主（Kotlin）实现，接收 Go 侧转发的日志。
 type LogReceiver interface {
 	Receive(level int, tag, msg string)
 }
@@ -43,7 +43,7 @@ func GetLogLevel() string {
 	return atomicLogLevel.Level().String()
 }
 
-// ---  info  ---
+// --- Android 日志级别映射 ---
 
 const (
 	AndroidLogDebug = 0
@@ -79,7 +79,7 @@ type logItem struct {
 	msg   string
 }
 
-// ---  info  ---
+// --- 日志投递 ---
 
 // SetLogReceiver 注册 Android 宿主的日志接收器（gomobile 由 Kotlin 实现）。
 // 可重复调用以更换接收器；转发 goroutine 由首次调用触发，仅启动一次。
@@ -115,7 +115,7 @@ func (c *stunCore) With(fields []zapcore.Field) zapcore.Core {
 		encoder:      c.encoder.Clone(),
 		tag:          c.tag,
 	}
-	//  info  With  info  encoder， info  Write  info
+	// With 返回的 clone 拥有独立 encoder，避免与 Write 并发竞争
 	for i := range fields {
 		fields[i].AddTo(clone.encoder)
 	}
@@ -130,14 +130,14 @@ func (c *stunCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.C
 }
 
 func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
-	// 1.  info
+	// 1. 追加公共字段
 	additionalFields := []zapcore.Field{
-		zap.Int("pid", os.Getpid()), //  info ID， info
+		zap.Int("pid", os.Getpid()), // 进程 ID，便于排查
 		zap.Int("uid", os.Getuid()),
 		zap.String("version", Version),
 	}
 
-	//  info  fields
+	// 2. 合并调用方 fields
 	allFields := append(fields, additionalFields...)
 
 	// 2.  info
@@ -154,14 +154,14 @@ func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		msg:   buf.String(),
 	}:
 	default:
-		//  info discarded
+		// 缓冲已满，丢弃本条日志
 	}
 	buf.Free()
 	return nil
 }
 func (c *stunCore) Sync() error { return nil }
 
-// ---  info  ---
+// --- 初始化 ---
 
 func InitLogger(logPath string, logLevelStr string) int {
 	SetLogLevel(logLevelStr)
@@ -182,17 +182,20 @@ func InitLogger(logPath string, logLevelStr string) int {
 	consoleEncoder := zapcore.NewConsoleEncoder(zapEncoderConfig)
 	jsonEncoder := zapcore.NewJSONEncoder(zapEncoderConfig)
 
-	//  info
+	// 文件用 O_TRUNC：Android 宿主在每次引擎 Start 时都会调用 InitLogger，
+	// 若追加写入会随多次启停无限累积占满应用存储；每次启动截断重写，
+	// 单文件大小天然有界。桌面 CLI 进程一次性启动，logger_generic.go
+	// 用 O_APPEND 便于 tail -f 跟踪，属有意差异。
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
 	if err != nil {
 		return -1
 	}
 	fileCore := zapcore.NewCore(consoleEncoder.Clone(), zapcore.AddSync(file), atomicLogLevel)
 
-	//  info  UI  info
+	// 转发给 UI 的 core
 	androidCoreInstance := &stunCore{
 		LevelEnabler: atomicLogLevel,
-		encoder:      jsonEncoder.Clone(), // info json info
+		encoder:      jsonEncoder.Clone(), // 克隆 json 编码器
 		tag:          "Stun-Go",
 	}
 

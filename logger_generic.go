@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	//  info  SugarLogger，default info  Nop  info  Panic
+	// 全局 SugarLogger，未调用 InitLogger 前默认为 Nop，避免空指针 Panic
 	zlog           *zap.SugaredLogger = zap.NewNop().Sugar()
 	atomicLogLevel                    = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
@@ -29,13 +29,13 @@ func GetLogLevel() string {
 	return atomicLogLevel.Level().String()
 }
 
-// InitLogger  info
-// logPath:  info ， info  ""， info
-// logLevelStr:  info  (DEBUG, INFO, WARN, ERROR)
+// InitLogger 初始化桌面平台日志（stdout 彩色 console + 可选文件）。
+// logPath: 日志文件路径；传 "" 则不写文件。
+// logLevelStr: 日志级别 (DEBUG, INFO, WARN, ERROR)。
 func InitLogger(logPath string, logLevelStr string) int {
 	SetLogLevel(logLevelStr)
 
-	//  info config
+	// 基础 encoder config
 	encoderConfig := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
@@ -51,37 +51,38 @@ func InitLogger(logPath string, logLevelStr string) int {
 
 	var cores []zapcore.Core
 
-	// 1.  info config ( info ， info  Linux  info )
+	// 1. console encoder config（彩色级别，适合交互式 Linux 终端）
 	consoleEncoderConfig := encoderConfig
 	consoleEncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	consoleEncoder := zapcore.NewConsoleEncoder(consoleEncoderConfig)
 
-	//  info  (Stdout)，Systemd  info
+	// 输出到 Stdout（Systemd 下同样适用）
 	consoleCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), atomicLogLevel)
 	cores = append(cores, consoleCore)
 
-	// 2.  info config ( info )
+	// 2. file encoder config（纯文本）
 	if logPath != "" {
-		//  info ， info  tail/cat  info
+		// 纯文本格式，方便 tail/cat 查看
 		fileEncoderConfig := encoderConfig
 		fileEncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
-		//  info  Console  info ， info  JSON  info  NewJSONEncoder
+		// 与 Console 同构，非 JSON，故仍用 NewJSONEncoder 对应的 NewConsoleEncoder
 		fileEncoder := zapcore.NewConsoleEncoder(fileEncoderConfig)
 
-		//  info  O_APPEND  info mode， info  O_TRUNC  info mode， info
+		// 用 O_APPEND 追加模式（桌面 CLI 单次启动；Android 侧用 O_TRUNC，
+		// 差异为有意设计，理由见 logger_android.go InitLogger 注释）
 		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
 		if err != nil {
-			//  info failed info
+			// 文件打开失败
 			return -1
 		}
 		fileCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(file), atomicLogLevel)
 		cores = append(cores, fileCore)
 	}
 
-	//  info
+	// 组合 core
 	combinedCore := zapcore.NewTee(cores...)
 
-	//  info  logger， info
+	// 构造全局 logger，替换 zap 全局实例
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zap.ReplaceGlobals(logger)
 	zlog = logger.Sugar()

@@ -1,27 +1,21 @@
 package myssh
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"log/slog"
 	"sync"
-
-	"go.uber.org/zap"
 )
 
 // ==========================================
-// SDK 日志/事件桥接
+// SDK 事件桥接
 //
-// 四个客户端 SDK（h2tunnel/xhttptunnel/udp_custom/dns_custom）各自提供
-// 原生日志接口与事件回调。这里把它们归一化并入本程序：
+// 各客户端 SDK（h2tunnel/xhttptunnel/udp_custom/dns_custom/icmp_custom）
+// 各自提供事件回调。这里把 SDK 生命周期事件归一化为 TunnelEvent 统一转发：
 //
-//	日志：SDK 输出统一桥接到 zlog，级别跟随全局 atomicLogLevel
-//	     （InitLogger/调试开关切换后，新建连接即生效）。
-//	事件：SDK 生命周期事件归一化为 TunnelEvent 统一转发——
-//	     1) 按级别写入 zlog，SDK 关键状态与本程序日志一致输出；
-//	     2) 转发给宿主注册的 TunnelEventCallback（Android/gomobile 可据此
-//	        驱动连接状态 UI、断线提示等）。
+//	1) 按级别写入 zlog，SDK 关键状态与本程序日志一致输出；
+//	2) 转发给宿主注册的 TunnelEventCallback（Android/gomobile 可据此
+//	   驱动连接状态 UI、断线提示等）。
+//
+// 日志桥接适配器见 sdk_log.go。
 //
 // 事件派发是通知语义：SDK 内部已做 panic 隔离与异步派发，宿主回调必须
 // 快速返回；SDK 在过载时会丢事件（各自有 dropped 计数），可靠性要求高的
@@ -48,7 +42,7 @@ const (
 // TunnelEvent 归一化的隧道生命周期事件。
 type TunnelEvent struct {
 	Type    TunnelEventType // 事件类型
-	Source  string          // 来源 SDK："h2"/"xhttp"/"udp_custom"/"dns_custom"
+	Source  string          // 来源隧道类型："h2"/"grpc"/"h3"/"masque"/"webtransport"/"xhttp"/"udp_custom"/"icmp_custom"/"dns_custom"
 	Session string          // SDK 侧会话标识（格式随 SDK 而异，可为空）
 	Detail  string          // 人类可读上下文（原因/目标等）
 	Attempt int             // 重连/重试序号（1 起；仅重试类事件有意义）
@@ -139,88 +133,4 @@ func joinSpace(a, b string) string {
 		return b
 	}
 	return a + " " + b
-}
-
-// ---- 日志适配器 ----
-
-// sdkSugared 返回命名子 logger（SugaredLogger 形态），供 dns_custom 注入。
-// 从全局 zap.L() 派生，跟随 InitLogger 的重建与级别切换。
-func sdkSugared(name string) *zap.SugaredLogger {
-	return zap.L().Named(name).Sugar()
-}
-
-// sdkZap 返回命名子 logger（原生 *zap.Logger），供 xhttptunnel 注入。
-func sdkZap(name string) *zap.Logger {
-	// SDK 日志的 caller 会指向桥接层，无信息量，关闭。
-	return zap.L().Named(name).WithOptions(zap.WithCaller(false))
-}
-
-// sdkLogAdapter 把 zap SugaredLogger 适配为 udp_custom 要求的四方法
-// Logger 接口。
-type sdkLogAdapter struct {
-	log *zap.SugaredLogger
-}
-
-func (a sdkLogAdapter) Debugf(format string, args ...any) { a.log.Debugf(format, args...) }
-func (a sdkLogAdapter) Infof(format string, args ...any)  { a.log.Infof(format, args...) }
-func (a sdkLogAdapter) Warnf(format string, args ...any)  { a.log.Warnf(format, args...) }
-func (a sdkLogAdapter) Errorf(format string, args ...any) { a.log.Errorf(format, args...) }
-
-// sdkUDPLogger 供 udp_custom 注入。
-func sdkUDPLogger(name string) sdkLogAdapter {
-	return sdkLogAdapter{log: sdkSugared(name)}
-}
-
-// zapSlogHandler 把 slog 记录桥接到 zap，供 h2tunnel 注入
-// (*slog.Logger)。级别由 zap core 裁决：SDK 的调试日志只在全局 debug
-// 级别可见。
-type zapSlogHandler struct {
-	zap   *zap.Logger
-	attrs []slog.Attr
-}
-
-func (h zapSlogHandler) Enabled(context.Context, slog.Level) bool {
-	return true // 交给 zap core 裁决
-}
-
-func (h zapSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	buf := bytes.NewBuffer(nil)
-	for _, a := range h.attrs {
-		appendSlogAttr(buf, a)
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		appendSlogAttr(buf, a)
-		return true
-	})
-	msg := r.Message
-	if buf.Len() > 0 {
-		msg += " " + buf.String()
-	}
-	switch r.Level {
-	case slog.LevelDebug:
-		h.zap.Debug(msg)
-	case slog.LevelWarn:
-		h.zap.Warn(msg)
-	case slog.LevelError:
-		h.zap.Error(msg)
-	default:
-		h.zap.Info(msg)
-	}
-	return nil
-}
-
-func (h zapSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return zapSlogHandler{zap: h.zap, attrs: append(append([]slog.Attr{}, h.attrs...), attrs...)}
-}
-
-func (h zapSlogHandler) WithGroup(string) slog.Handler { return h } // 组扁平化
-
-func appendSlogAttr(buf *bytes.Buffer, a slog.Attr) {
-	a.Value = a.Value.Resolve()
-	fmt.Fprintf(buf, " %s=%s", a.Key, a.Value.String())
-}
-
-// sdkSlog 供 h2tunnel 注入。
-func sdkSlog(name string) *slog.Logger {
-	return slog.New(zapSlogHandler{zap: sdkZap(name)})
 }

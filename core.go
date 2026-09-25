@@ -18,34 +18,34 @@ var (
 	Version  = "dev"
 	DebugStr = "false"
 	Debug    = false
-	//  info  TCP io.CopyBuffer  info  64KB  info
+	// TCP 中转 io.CopyBuffer 使用的缓冲池，缓冲区 64KB+1KB
 	tcpBufPool = sync.Pool{
 		New: func() interface{} {
 			buf := make([]byte, 64*1024+1024)
 			return &buf
 		},
 	}
-	//  info  UDP  info  64KB  info  ( info / info )
+	// UDP 中转使用的大缓冲池，缓冲区 64KB+1KB（读满/写满）
 	udpBufPool = sync.Pool{
 		New: func() interface{} {
 			buf := make([]byte, 64*1024+1024)
 			return &buf
 		},
 	}
-	//  info  MTU UDP  info  (<=1500bytes)  info  2KB  info ， info  GC  info
+	// 常规 MTU 的 UDP 小缓冲池（<=1500bytes 取 2KB），降低分配与 GC 压力
 	udpSmallBufPool = sync.Pool{
 		New: func() interface{} {
 			buf := make([]byte, 2048)
 			return &buf
 		},
 	}
-	//  info  bytes.Buffer  info ， info
+	// 复用的 bytes.Buffer 池，减少临时分配
 	bytesBufPool = sync.Pool{
 		New: func() interface{} {
 			return new(bytes.Buffer)
 		},
 	}
-	//  info
+	// 填充数据池
 	padPool    []byte
 	padPoolLen = 64 * 1024
 	// tcp: 逐连接套接字缓冲。
@@ -60,7 +60,7 @@ func init() {
 	if DebugStr == "true" {
 		Debug = true
 	}
-	//  info
+	// 初始化填充池
 	padPool = make([]byte, padPoolLen)
 	// 填充数据仅用于流量混淆；crypto/rand 失败时退化的问题必须留痕便于排查
 	// （init 阶段 zlog 尚未初始化，日志会进入 Nop，但保留检查使失败可被发现）。
@@ -75,15 +75,15 @@ func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
 
 	defer tcpBufPool.Put(bufPtr)
 
-	//  info  CopyBuffer， info
-	//  info  src  info  EOF  info
+	// 中转基于 io.CopyBuffer，使用池化缓冲
+	// 依赖 src 读到 EOF 时 CopyBuffer 自行结束
 	return io.CopyBuffer(dst, src, buf)
 }
 
-// relayStream  info ：
+// relayStream 双向中继一条 TCP 流：
 //
-//	info  Linux/Android  info  splice(2)  info ；
-//	info support info  Socket  info ， info  tcpRelay  info 。
+//	Linux/Android 优先尝试 splice(2) 零拷贝；
+//	对不支持 splice 的 Socket 类型，回退 tcpRelay 纯用户态拷贝。
 func relayStream(dst, src net.Conn) (int64, error) {
 	if n, err := trySplice(dst, src); err == nil {
 		return n, nil
@@ -91,7 +91,7 @@ func relayStream(dst, src net.Conn) (int64, error) {
 	return tcpRelay(dst, src)
 }
 
-// formatSHA256Fingerprint  info  SHA-256  info  (XX:XX:XX:...)
+// formatSHA256Fingerprint 格式化 SHA-256 指纹为冒号分隔的大写十六进制 (XX:XX:XX:...)
 func formatSHA256Fingerprint(raw []byte) string {
 	sha256Sum := sha256.Sum256(raw)
 	var fpBuilder strings.Builder
@@ -104,7 +104,7 @@ func formatSHA256Fingerprint(raw []byte) string {
 	return fpBuilder.String()
 }
 
-// ensureHostPort  info address info port， info defaultport
+// ensureHostPort 为无端口的地址补上默认端口
 func ensureHostPort(addr, defaultPort string) string {
 	addr = strings.TrimSpace(addr)
 	if _, _, err := net.SplitHostPort(addr); err != nil {
@@ -113,26 +113,27 @@ func ensureHostPort(addr, defaultPort string) string {
 	return addr
 }
 
-// MakePeerCertVerifier  info
+// MakePeerCertVerifier 构造 TLS 证书指纹校验回调
 func MakePeerCertVerifier(verifyFingerprint bool, expectedFingerprint string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("no certificates presented by peer")
 		}
 
-		//  info ， info ， info
+		// 无条件先算出实际指纹，无论是否校验都输出日志，
+		// 便于用户比对后补配 pin
 		actualFingerprint := formatSHA256Fingerprint(rawCerts[0])
 
-		//  info ， info  TLS/QUIC  info  INFO  info
+		// 输出实际指纹，供 TLS/QUIC 通道的 INFO 日志比对
 		zlog.Debugf("%s [Tunnel] Actual certificate fingerprint: %s", TAG, actualFingerprint)
 
 		if !verifyFingerprint {
-			return nil //  info ， info
+			return nil // 未启用校验，直接放行
 		}
 
 		zlog.Infof("%s [Tunnel] Expected certificate fingerprint: %s", TAG, expectedFingerprint)
 
-		//  info ： info
+		// 归一化后比对：去冒号、去空格、统一大写
 		cleanExpected := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(expectedFingerprint, ":", ""), " ", ""))
 		cleanActual := strings.ReplaceAll(actualFingerprint, ":", "")
 

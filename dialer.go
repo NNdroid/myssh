@@ -26,33 +26,32 @@ func dialProtected(ctx context.Context, cfg ProxyConfig, network, address string
 	return newProtectedDialer(cfg, timeout).DialContext(ctx, network, address)
 }
 
-// info  TCP  info  Socket  info
-// info  Nagle  info  (SetNoDelay)  info  ( info  SSH/ info )
-// info  4MB， info  BDP ( info )  info
-// info keepalive  info 15s
+// applyOptimiseForTcpConnection 对 TCP 连接应用套接字层优化：
+// 关闭 Nagle（SetNoDelay，降低 SSH/交互流量的首包延迟）、
+// 收发缓冲各设 256KB（覆盖高 BDP 长肥管道）、keepalive 15s。
 func applyOptimiseForTcpConnection(conn net.Conn) {
-	//  info  net.Conn  info  *net.TCPConn
+	// 底层 net.Conn 不一定是 *net.TCPConn
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		//  info  Nagle  info
+		// 关闭 Nagle 算法
 		if err := tcpConn.SetNoDelay(true); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to set NoDelay: %v", TAG, err)
 		}
 
-		//  info
+		// 读缓冲
 		if err := tcpConn.SetReadBuffer(tcpOptimizeBufferSize); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to set ReadBuffer: %v", TAG, err)
 		}
 
-		//  info
+		// 写缓冲
 		if err := tcpConn.SetWriteBuffer(tcpOptimizeBufferSize); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to set WriteBuffer: %v", TAG, err)
 		}
 
-		//  info  TCP Keep-Alive
+		// 启用 TCP Keep-Alive
 		if err := tcpConn.SetKeepAlive(true); err != nil {
 			zlog.Warnf("%s [TCP Tune] Failed to enable KeepAlive: %v", TAG, err)
 		} else {
-			//  info  KeepAlive  info  15  info
+			// keepalive 探测间隔 15 秒
 			if err := tcpConn.SetKeepAlivePeriod(time.Duration(tcpKeepaliveIntervalSec) * time.Second); err != nil {
 				zlog.Warnf("%s [TCP Tune] Failed to set KeepAlive period: %v", TAG, err)
 			}
@@ -168,7 +167,7 @@ func watchEngineCtx(ctx context.Context, conn net.Conn) net.Conn {
 	return c
 }
 
-// dialTunnel  info tunnel info ， info
+// dialTunnel 按 tunnel 类型查注册表，先建立底层连接再交给对应 handler 完成协议握手。
 func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	tunnelType := strings.ToLower(cfg.TunnelType)
 	if tunnelType == "" {
@@ -204,12 +203,12 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		baseConn = nil
 	}
 
-	//  info Failed to establish， info ， info  Handler
+	// 底层连接建立失败时直接报错，不再交给 Handler
 	if err != nil {
 		return nil, err
 	}
 
-	//  info  baseConn  info tunnel info  ( info  HTTP/3, WebSocket, Base SSH  info )
+	// 把 baseConn 交给对应 tunnel handler 完成协议握手 (例如 HTTP/3, WebSocket, Base SSH 等场景)
 	targetConn, err := proto.Handler(ctx, cfg, baseConn)
 	if err == nil {
 		//if Debug {

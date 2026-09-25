@@ -11,7 +11,7 @@ import (
 	h2tunnel "github.com/NNdroid/h2tunnel"
 )
 
-func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transport, tlsEnabled bool) (net.Conn, error) {
+func dialH2SDK(ctx context.Context, cfg ProxyConfig, source string, transport h2tunnel.Transport, tlsEnabled bool) (net.Conn, error) {
 	scheme := "http"
 	if tlsEnabled {
 		scheme = "https"
@@ -54,7 +54,7 @@ func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transpor
 				MinRecordBytes: resolveH2PaddingMin(cfg.PaddingMinBytes),
 			},
 		},
-		EventHandler: emitH2Event,
+		EventHandler: emitH2EventAs(source),
 		Logger:       sdkSlog("h2tunnel"),
 		Dialer:       sdkTCPDialer(cfg),
 	}
@@ -94,7 +94,7 @@ func dialH2SDK(ctx context.Context, cfg ProxyConfig, transport h2tunnel.Transpor
 
 func registerH2SDK(name string, transport h2tunnel.Transport, tlsEnabled bool) {
 	registerSelfDial(name, func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
-		return dialH2SDK(ctx, cfg, transport, tlsEnabled)
+		return dialH2SDK(ctx, cfg, name, transport, tlsEnabled)
 	})
 }
 
@@ -154,31 +154,34 @@ func normalizeMasqueALPN(value string) string {
 	}
 }
 
-// emitH2Event 将 h2tunnel 事件归一化后转发。
-func emitH2Event(ev h2tunnel.ClientEvent) {
-	e := TunnelEvent{Source: "h2", Detail: ev.Reason, Attempt: ev.Attempt}
-	if ev.Err != nil {
-		e.ErrText = ev.Err.Error()
+// emitH2EventAs 将 h2tunnel 事件归一化后转发；source 携带注册时的隧道名
+// （h2/grpc/h3/masque/webtransport），避免宿主侧所有事件都显示为 "h2"。
+func emitH2EventAs(source string) func(ev h2tunnel.ClientEvent) {
+	return func(ev h2tunnel.ClientEvent) {
+		e := TunnelEvent{Source: source, Detail: ev.Reason, Attempt: ev.Attempt}
+		if ev.Err != nil {
+			e.ErrText = ev.Err.Error()
+		}
+		switch ev.Kind {
+		case h2tunnel.EventTunnelEstablished:
+			e.Type = TunnelEventEstablished
+		case h2tunnel.EventTunnelDied:
+			e.Type = TunnelEventDied
+		case h2tunnel.EventReconnecting:
+			e.Type = TunnelEventReconnecting
+		case h2tunnel.EventTargetDenied:
+			e.Type = TunnelEventTargetDenied
+		default:
+			return
+		}
+		emitTunnelEvent(e)
 	}
-	switch ev.Kind {
-	case h2tunnel.EventTunnelEstablished:
-		e.Type = TunnelEventEstablished
-	case h2tunnel.EventTunnelDied:
-		e.Type = TunnelEventDied
-	case h2tunnel.EventReconnecting:
-		e.Type = TunnelEventReconnecting
-	case h2tunnel.EventTargetDenied:
-		e.Type = TunnelEventTargetDenied
-	default:
-		return
-	}
-	emitTunnelEvent(e)
 }
 
 // registerH2SDKToggle 注册 TLS 由配置开关决定的 h2tunnel 隧道（grpc）。
 func registerH2SDKToggle(name string, transport h2tunnel.Transport) {
 	registerSelfDial(name, func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
-		return dialH2SDK(ctx, cfg, transport, cfg.TunnelTLSEnabled)
+		return dialH2SDK(ctx, cfg, name, transport, cfg.TunnelTLSEnabled)
 	})
 }
 
@@ -186,9 +189,9 @@ func init() {
 	// h2：合并型——开关决定 TransportH2(TLS) / TransportH2C(明文)。
 	registerSelfDial("h2", func(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		if cfg.TunnelTLSEnabled {
-			return dialH2SDK(ctx, cfg, h2tunnel.TransportH2, true)
+			return dialH2SDK(ctx, cfg, "h2", h2tunnel.TransportH2, true)
 		}
-		return dialH2SDK(ctx, cfg, h2tunnel.TransportH2C, false)
+		return dialH2SDK(ctx, cfg, "h2", h2tunnel.TransportH2C, false)
 	})
 	registerH2SDKToggle("grpc", h2tunnel.TransportGRPC)
 }

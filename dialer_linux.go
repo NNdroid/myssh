@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// bindDevice  info  Linux  info  SO_BINDTODEVICE  info  Socket  info
+// bindDevice 用 SO_BINDTODEVICE 把出站 Socket 绑定到指定网卡（仅 root/CAP_NET_RAW）。
 func bindDevice(dialer *net.Dialer, ifaceName string) {
 	if ifaceName == "" {
 		return
@@ -16,7 +16,7 @@ func bindDevice(dialer *net.Dialer, ifaceName string) {
 	dialer.Control = func(network, address string, c syscall.RawConn) error {
 		var operr error
 		err := c.Control(func(fd uintptr) {
-			//  info  Socket  info
+			// 将 Socket 绑定到指定网络接口
 			operr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, ifaceName)
 		})
 		if err != nil {

@@ -9,12 +9,12 @@ import (
 	"time"
 )
 
-// TestBadvpnUdpgwConn_WriteRead  info  BadvpnUdpgwConn  info / info
+// TestBadvpnUdpgwConn_WriteRead 验证 BadvpnUdpgwConn 的上行组帧 / 下行解帧
 func TestBadvpnUdpgwConn_WriteRead(t *testing.T) {
-	// 1.  info
+	// 1. 建立内存管道
 	clientPipe, serverPipe := net.Pipe()
 
-	// 2.  info client (BadvpnUdpgwConn)
+	// 2. 模拟 client (BadvpnUdpgwConn)
 	targetIP := net.ParseIP("1.2.3.4")
 	targetPort := uint16(8080)
 	conID := uint16(12345)
@@ -29,7 +29,7 @@ func TestBadvpnUdpgwConn_WriteRead(t *testing.T) {
 	}
 	defer badvpnConn.Close()
 
-	// ---  info  Write ---
+	// --- 测试 Write ---
 	go func() {
 		payload := []byte("hello")
 		n, err := badvpnConn.Write(payload)
@@ -41,21 +41,21 @@ func TestBadvpnUdpgwConn_WriteRead(t *testing.T) {
 		}
 	}()
 
-	// 3.  info ， info received info
-	//  info  2 bytes info
+	// 3. 服务端侧，校验收到的帧
+	// 先读 2 bytes 帧长前缀
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(serverPipe, lenBuf); err != nil {
 		t.Fatalf("Server failed to read length prefix: %v", err)
 	}
 	frameLen := binary.LittleEndian.Uint16(lenBuf)
 
-	//  info
+	// 读取帧体
 	frameBuf := make([]byte, frameLen)
 	if _, err := io.ReadFull(serverPipe, frameBuf); err != nil {
 		t.Fatalf("Server failed to read frame body: %v", err)
 	}
 
-	//  info
+	// 校验帧结构
 	// Flags(1) + ConID(2) + IP(4) + Port(2) + Payload
 	expectedHeaderLen := 1 + 2 + 4 + 2
 	if len(frameBuf) < expectedHeaderLen {
@@ -87,9 +87,9 @@ func TestBadvpnUdpgwConn_WriteRead(t *testing.T) {
 		t.Errorf("Expected payload 'hello', got '%s'", receivedPayload)
 	}
 
-	// ---  info  Read ---
+	// --- 测试 Read ---
 	go func() {
-		//  info send info
+		// 服务端 send 回包
 		respPayload := []byte("world")
 		respPacket := make([]byte, 3+4+2+len(respPayload))
 		respPacket[0] = 0 // flags
@@ -98,7 +98,7 @@ func TestBadvpnUdpgwConn_WriteRead(t *testing.T) {
 		binary.BigEndian.PutUint16(respPacket[7:9], targetPort)
 		copy(respPacket[9:], respPayload)
 
-		//  info  Badvpn  info
+		// 按 Badvpn 帧格式加长度前缀
 		respLenBuf := make([]byte, 2)
 		binary.LittleEndian.PutUint16(respLenBuf, uint16(len(respPacket)))
 
@@ -107,7 +107,7 @@ func TestBadvpnUdpgwConn_WriteRead(t *testing.T) {
 	}()
 
 	readBuf := make([]byte, 1024)
-	badvpnConn.SetReadDeadline(time.Now().Add(2 * time.Second)) //  info timeout
+	badvpnConn.SetReadDeadline(time.Now().Add(2 * time.Second)) // 2 秒超时兜底
 	n, err := badvpnConn.Read(readBuf)
 	if err != nil {
 		t.Fatalf("BadvpnUdpgwConn.Read() error = %v", err)

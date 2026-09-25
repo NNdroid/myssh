@@ -33,12 +33,13 @@ func TestTunnelEventBridgeMapping(t *testing.T) {
 		wantType TunnelEventType
 		wantSrc  string
 	}{
-		{"h2-established", func() { emitH2Event(h2tunnel.ClientEvent{Kind: h2tunnel.EventTunnelEstablished}) }, TunnelEventEstablished, "h2"},
+		{"h2-established", func() { emitH2EventAs("h2")(h2tunnel.ClientEvent{Kind: h2tunnel.EventTunnelEstablished}) }, TunnelEventEstablished, "h2"},
 		{"h2-died", func() {
-			emitH2Event(h2tunnel.ClientEvent{Kind: h2tunnel.EventTunnelDied, Reason: h2tunnel.TunnelDeathMaxRetries, Err: errors.New("boom")})
+			emitH2EventAs("h2")(h2tunnel.ClientEvent{Kind: h2tunnel.EventTunnelDied, Reason: h2tunnel.TunnelDeathMaxRetries, Err: errors.New("boom")})
 		}, TunnelEventDied, "h2"},
-		{"h2-reconnecting", func() { emitH2Event(h2tunnel.ClientEvent{Kind: h2tunnel.EventReconnecting, Attempt: 2}) }, TunnelEventReconnecting, "h2"},
-		{"h2-denied", func() { emitH2Event(h2tunnel.ClientEvent{Kind: h2tunnel.EventTargetDenied}) }, TunnelEventTargetDenied, "h2"},
+		{"h2-reconnecting", func() { emitH2EventAs("h2")(h2tunnel.ClientEvent{Kind: h2tunnel.EventReconnecting, Attempt: 2}) }, TunnelEventReconnecting, "h2"},
+		{"h2-denied", func() { emitH2EventAs("h2")(h2tunnel.ClientEvent{Kind: h2tunnel.EventTargetDenied}) }, TunnelEventTargetDenied, "h2"},
+		{"h3-source-attributed", func() { emitH2EventAs("h3")(h2tunnel.ClientEvent{Kind: h2tunnel.EventTunnelEstablished}) }, TunnelEventEstablished, "h3"},
 
 		{"xhttp-established", func() { emitXhttpEvent(xhttptunnel.TunnelEstablished{SessionID: "s1"}) }, TunnelEventEstablished, "xhttp"},
 		{"xhttp-died", func() { emitXhttpEvent(xhttptunnel.TunnelDied{SessionID: "s1", Reason: "idle timeout"}) }, TunnelEventDied, "xhttp"},

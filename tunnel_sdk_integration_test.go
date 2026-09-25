@@ -81,7 +81,7 @@ func TestH2CSDKAdapterEndToEnd(t *testing.T) {
 		SshAddr:           target,
 		ProxyAuthRequired: true,
 		ProxyAuthToken:    "sdk-token",
-	}, h2tunnel.TransportH2C, false)
+	}, "h2", h2tunnel.TransportH2C, false)
 	if err != nil {
 		t.Fatal(err)
 	}

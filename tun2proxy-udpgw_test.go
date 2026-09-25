@@ -9,12 +9,12 @@ import (
 	"time"
 )
 
-// TestTun2proxyUdpgwConn_WriteRead  info  UdpgwConn  info / info
+// TestTun2proxyUdpgwConn_WriteRead 验证 UdpgwConn 的上行组帧 / 下行解帧
 func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
-	// 1.  info
+	// 1. 建立内存管道
 	clientPipe, serverPipe := net.Pipe()
 
-	// 2.  info client (UdpgwConn)
+	// 2. 模拟 client (UdpgwConn)
 	targetIP := net.ParseIP("1.2.3.4")
 	targetPort := uint16(8080)
 	portBytes := make([]byte, 2)
@@ -29,7 +29,7 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 	}
 	defer udpgwConn.Close()
 
-	// ---  info  Write ---
+	// --- 测试 Write ---
 	go func() {
 		payload := []byte("hello")
 		n, err := udpgwConn.Write(payload)
@@ -41,8 +41,8 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 		}
 	}()
 
-	// 3.  info ， info received info
-	//  info  2 bytes info  ( info )
+	// 3. 服务端侧，校验收到的帧
+	// 先读 2 bytes 帧长前缀 (大端)
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(serverPipe, lenBuf); err != nil {
 		t.Fatalf("Server failed to read length prefix: %v", err)
@@ -92,11 +92,11 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 		t.Errorf("Expected payload 'hello', got '%s'", receivedPayload)
 	}
 
-	// ---  info  Read ---
+	// --- 测试 Read ---
 	go func() {
-		//  info send info
+		// 服务端 send 回包
 		respPayload := []byte("world")
-		//  info : Flag(1) + ConnID(2) + ATYP(1) + Addr(4) + Port(2) + Payload
+		// 帧结构: Flag(1) + ConnID(2) + ATYP(1) + Addr(4) + Port(2) + Payload
 		respPacket := make([]byte, 1+2+1+4+2+len(respPayload))
 		respPacket[0] = UdpgwFlagData
 		binary.BigEndian.PutUint16(respPacket[1:3], 1) // ConnID
@@ -105,7 +105,7 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 		binary.BigEndian.PutUint16(respPacket[8:10], targetPort)
 		copy(respPacket[10:], respPayload)
 
-		//  info  tun2proxy  info
+		// 按 tun2proxy 帧格式加长度前缀
 		respLenBuf := make([]byte, 2)
 		binary.BigEndian.PutUint16(respLenBuf, uint16(len(respPacket)))
 
@@ -114,7 +114,7 @@ func TestTun2proxyUdpgwConn_WriteRead(t *testing.T) {
 	}()
 
 	readBuf := make([]byte, 1024)
-	udpgwConn.SetReadDeadline(time.Now().Add(2 * time.Second)) //  info timeout
+	udpgwConn.SetReadDeadline(time.Now().Add(2 * time.Second)) // 2 秒超时兜底
 	n, err := udpgwConn.Read(readBuf)
 	if err != nil {
 		t.Fatalf("UdpgwConn.Read() error = %v", err)

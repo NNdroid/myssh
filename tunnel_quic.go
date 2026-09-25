@@ -11,7 +11,7 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// info  QUIC  info ， info  (Multiplexing)
+// 按 ProxyAddr 缓存 QUIC 连接，实现多流复用 (Multiplexing)
 var quicConnCache sync.Map
 
 // closeQuicConnCache closes all cached QUIC connections.
@@ -38,10 +38,10 @@ func (q *quicNetConn) LocalAddr() net.Addr  { return q.localAddr }
 func (q *quicNetConn) RemoteAddr() net.Addr { return q.remoteAddr }
 
 func (q *quicNetConn) Close() error {
-	//  info  QUIC Stream  info channel， info
-	q.CancelRead(0)         //  info
-	return q.Stream.Close() //  info  FIN  info
-	//  info  q.conn.CloseWithError()， info  Stream  info ！
+	// 只关闭当前 QUIC Stream，不影响复用的 connection
+	q.CancelRead(0)         // 中止本端读
+	return q.Stream.Close() // 发送 FIN 正常关闭流
+	// 切勿调用 q.conn.CloseWithError()，那会断开整个复用的连接！
 }
 
 func init() {
@@ -55,17 +55,17 @@ func init() {
 		}
 
 		// ==========================================
-		//  info ， info  QUIC  info
+		// 命中缓存，直接复用已有 QUIC 连接
 		// ==========================================
 		if cachedVal, ok := quicConnCache.Load(cfg.ProxyAddr); ok {
 			conn := cachedVal.(*quic.Conn)
 
-			//  info  QUIC  info  Stream
+			// 在既有 QUIC 连接上开新 Stream
 			stream, err := conn.OpenStreamSync(parentCtx)
 			if err == nil {
-				//  info successfully！
-				//  info  UDP channel， info 「 info 」udpConn  info
-				//  info ， info  UDP Port / FD ( info )  info ！
+				// 复用成功！
+				// 关闭多余的 UDP 通道，保留「共享」的 udpConn 之外
+				// 重复创建的 UDP Port / FD（如有）即可！
 				udpConn.Close()
 
 				zlog.Infof("%s [Tunnel] ⚡ Reused cached QUIC connection, instantly opened new Stream", TAG)
@@ -76,13 +76,13 @@ func init() {
 				}, nil
 			}
 
-			//  info  ( info )， info ， info
+			// 连接已死 (可能超时)，删除缓存，走重拨
 			quicConnCache.Delete(cfg.ProxyAddr)
 			zlog.Warnf("%s [Tunnel] ⚠️ Cached QUIC connection dead (%v), redialing...", TAG, err)
 		}
 
 		// ==========================================
-		//  info ， info  QUIC  info
+		// 未命中，新建 QUIC 连接
 		// ==========================================
 		udpAddr, err := net.ResolveUDPAddr("udp", cfg.ProxyAddr)
 		if err != nil {
@@ -93,14 +93,14 @@ func init() {
 		tlsConf := &tls.Config{
 			ServerName:            cfg.ServerName,
 			InsecureSkipVerify:    true,
-			NextProtos:            []string{"h3"}, // ALPN  info  HTTP/3  info
+			NextProtos:            []string{"h3"}, // ALPN 固定为 HTTP/3 协议
 			VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 		}
 
 		quicConfig := &quic.Config{
 			HandshakeIdleTimeout: 10 * time.Second,
 			MaxIdleTimeout:       30 * time.Second,
-			KeepAlivePeriod:      15 * time.Second, //  info  KeepAlive  info  UDP  info  NAT  info
+			KeepAlivePeriod:      15 * time.Second, // 周期 KeepAlive 防止 UDP 运营商 NAT 老化
 		}
 
 		dialCtx, cancel := context.WithTimeout(parentCtx, 10*time.Second)
@@ -108,12 +108,12 @@ func init() {
 
 		conn, err := quic.DialEarly(dialCtx, udpConn, udpAddr, tlsConf, quicConfig)
 		if err != nil {
-			udpConn.Close() //  info ，cleanup info  Socket
+			udpConn.Close() // 失败时 cleanup 掉 Socket
 			zlog.Errorf("%s [Tunnel] ❌ QUIC connection failed: %v", TAG, err)
 			return nil, err
 		}
 
-		// successfully info ， info  QUIC  info ， info
+		// 握手成功后，把连接放入 QUIC 缓存，供后续复用
 		quicConnCache.Store(cfg.ProxyAddr, conn)
 		zlog.Infof("%s [Tunnel] ✅ QUIC handshake successful, preparing to open Stream", TAG)
 

@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// startRawEchoServer  info 「 info  TCP tunnel」 info ：
-//   - info client info （ info ）， info  onHandshake  info ；
-//   - info  rejectStatus>0  info ， info  200  info bytes info 。
+// startRawEchoServer 模拟「纯回显 TCP tunnel」服务端：
+//   - 收到 client 握手请求（完整头）后回调 onHandshake 供断言；
+//   - 若 rejectStatus>0 则回该状态码，否则回 200 并进入字节回显。
 func startRawEchoServer(t *testing.T, rejectStatus int, onHandshake func([]byte)) (addr string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -29,7 +29,7 @@ func startRawEchoServer(t *testing.T, rejectStatus int, onHandshake func([]byte)
 				defer c.Close()
 				br := bufio.NewReader(c)
 				var req []byte
-				//  info 。
+				// 读取完整请求头。
 				for {
 					line, rerr := br.ReadString('\n')
 					if rerr != nil {
@@ -48,7 +48,7 @@ func startRawEchoServer(t *testing.T, rejectStatus int, onHandshake func([]byte)
 					return
 				}
 				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
-				//  info ： info 。
+				// 回显阶段：原样返回后续字节。
 				_, _ = io.Copy(c, c)
 			}(c)
 		}
@@ -78,9 +78,9 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-// TestHTTPTunnelEchoRoundTrip  info  http  info tunnel：send HttpPayload completed info ，
+// TestHTTPTunnelEchoRoundTrip 验证 http 明文隧道：发送 HttpPayload 完成握手后，
 //
-//	info bytestunnel， info bidirectional info 。
+//	按字节流 tunnel，验证双向回显链路。
 func TestHTTPTunnelEchoRoundTrip(t *testing.T) {
 	addr, stop := startRawEchoServer(t, 0, nil)
 	defer stop()
@@ -129,9 +129,9 @@ func TestHTTPTunnelEchoRoundTrip(t *testing.T) {
 	}
 }
 
-// TestHTTPTunnelPayloadSubstitution  info  HttpPayload  info ，
+// TestHTTPTunnelPayloadSubstitution 验证 HttpPayload 占位符替换与认证注入，
 //
-//	info （[auth]） info 。
+//	含 [auth] 占位符注入路径。
 func TestHTTPTunnelPayloadSubstitution(t *testing.T) {
 	type result struct {
 		raw []byte
@@ -191,14 +191,14 @@ func TestHTTPTunnelPayloadSubstitution(t *testing.T) {
 	}
 }
 
-// TestHTTPTunnelEmptyPayload  info  HttpPayload  info closed info 。
+// TestHTTPTunnelEmptyPayload 验证 HttpPayload 为空时直接报错并关闭连接。
 func TestHTTPTunnelEmptyPayload(t *testing.T) {
 	cfg := ProxyConfig{ProxyAddr: "127.0.0.1:1"}
 	proto, err := GetTunnel("http")
 	if err != nil {
 		t.Fatalf("GetTunnel(http): %v", err)
 	}
-	// fakeConn  info ，handler  info  payload  info 。
+	// fakeConn 只是占位，handler 应在检查 payload 时就失败。
 	conn, err := proto.Handler(context.Background(), cfg, &fakeConn{})
 	if err == nil {
 		_ = conn.Close()
@@ -206,14 +206,14 @@ func TestHTTPTunnelEmptyPayload(t *testing.T) {
 	}
 }
 
-// TestHTTPTunnelNonHTTPResponse  info  HTTP  info ，handler  info 。
+// TestHTTPTunnelNonHTTPResponse 验证非 HTTP 响应，handler 返回协议错误。
 func TestHTTPTunnelNonHTTPResponse(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	go func() {
 		buf := make([]byte, 4096)
-		//  info  handler  info  HttpPayload。
+		// 先读掉 handler 发来的 HttpPayload。
 		_, _ = serverPipe.Read(buf)
-		//  info  HTTP  info 。
+		// 回写非 HTTP 响应。
 		_, _ = serverPipe.Write([]byte("GARBAGE-PROTOCOL-RESPONSE\r\n"))
 	}()
 
@@ -231,7 +231,7 @@ func TestHTTPTunnelNonHTTPResponse(t *testing.T) {
 	}
 }
 
-// TestHTTPTunnelAuthRejected  info  407  info ，handler  info Authentication failed info 。
+// TestHTTPTunnelAuthRejected 验证 407 状态码时，handler 报 Authentication failed 错误。
 func TestHTTPTunnelAuthRejected(t *testing.T) {
 	addr, stop := startRawEchoServer(t, 407, nil)
 	defer stop()

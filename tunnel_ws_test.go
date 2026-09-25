@@ -11,7 +11,7 @@ import (
 	"github.com/lxzan/gws"
 )
 
-// startWSEchoServer  info  WebSocket  info ， info  ws tunnel info bidirectional info 。
+// startWSEchoServer 启动本地 WebSocket 回显服务端，供 ws tunnel 测试双向传输。
 // 接受 testing.TB 以便普通测试与基准测试共用。
 func startWSEchoServer(t testing.TB) (addr string, stop func()) {
 	t.Helper()
@@ -29,7 +29,7 @@ func startWSEchoServer(t testing.TB) (addr string, stop func()) {
 				return
 			}
 			defer func() { _ = c.WriteClose(1000, nil) }()
-			//  info  WS  info  net.Conn  info ， info 。
+			// 用 WS 适配层 wsStream 包装 net.Conn 后回显。
 			nc := &wsStream{conn: c}
 			_, _ = io.Copy(nc, nc)
 		}),
@@ -38,7 +38,7 @@ func startWSEchoServer(t testing.TB) (addr string, stop func()) {
 	return ln.Addr().String(), func() { _ = srv.Close(); _ = ln.Close() }
 }
 
-// TestWebSocketEchoRoundTrip  info  ws（ info ）tunnel info completed info bytes。
+// TestWebSocketEchoRoundTrip 验证 ws（明文）隧道握手完成后的字节回显链路。
 func TestWebSocketEchoRoundTrip(t *testing.T) {
 	addr, stop := startWSEchoServer(t)
 	defer stop()
@@ -85,7 +85,7 @@ func TestWebSocketEchoRoundTrip(t *testing.T) {
 	}
 }
 
-// TestWebSocketAuthFailure  info  401  info ，ws tunnel info 。
+// TestWebSocketAuthFailure 验证收到 401 响应时，ws 隧道握手报错退出。
 func TestWebSocketAuthFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -93,7 +93,7 @@ func TestWebSocketAuthFailure(t *testing.T) {
 	}
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			//  info ， info client 401 Authentication failed info 。
+			// 不升级，直接给 client 回 401 Authentication failed 响应。
 			w.WriteHeader(http.StatusUnauthorized)
 		}),
 	}
@@ -130,7 +130,7 @@ func TestWebSocketAuthFailure(t *testing.T) {
 	}
 }
 
-// TestWebSocketRegistration  info  websocket  info  init  info 。
+// TestWebSocketRegistration 验证 websocket 已在 init 中按约定注册。
 func TestWebSocketRegistration(t *testing.T) {
 	proto, err := GetTunnel("websocket")
 	if err != nil {

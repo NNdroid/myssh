@@ -6,12 +6,11 @@ import (
 	"go.uber.org/goleak"
 )
 
-// TestMain  info  goleak  info  goroutine  info 。
+// TestMain 用 goleak 检测测试结束后是否残留 goroutine 泄漏。
 //
-// IgnoreCurrent()  info 「 info 」 info  goroutine（ info  init  info
-//
-//	info ： info 、DNS  info cleanup info 、GeoRouter  info ），
-//	info 「 info 」 info ， info 。
+// IgnoreCurrent() 把「长生命周期」的后台 goroutine（主要是各 init
+// 启动的：流量采样、DNS 缓存 cleanup、GeoRouter 清理等）登记为
+// 「基线」，只对增量泄漏报错，避免误报。
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m,
 		goleak.IgnoreCurrent(),
