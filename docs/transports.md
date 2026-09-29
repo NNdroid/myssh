@@ -163,6 +163,8 @@
 | `udp_custom_max_pkt` | 单条 v2 记录上线最大字节（UDP 载荷=40 头+载荷+16 tag）；窄链路上调小可免 IP 分片丢包 | `0`→1450（历史值）；`<0` 报错。MtuProbe 开启时它是探测**上限/回落值** |
 | `udp_custom_mtu_probe` | 握手后自动探测路径 MTU 阶梯并收敛 | `""`/`auto`(默认=开，遇旧服务端不应答自动回落)、`on`(强制开)、`off`(按 `udp_custom_max_pkt` 固定) |
 
+> SDK 自 9e261d7 起内置**自适应 Reed-Solomon FEC**：默认启用，仅在握手时确认服务端也通告 FEC 能力后激活（旧服务端自动保持关闭，线兼容），丢包路径下 parity 前向纠错、原 ARQ 重传仍为最终兜底；未暴露配置项，无手动开关。
+> 弱网空闲清理同步放宽：服务端空闲超时 60s→180s，客户端接收超时 75s→210s。
 
 ### 4.10 `dns_custom`（custom，无 TLS；SSH-over-DNS，Noise + PSK）
 - 读：`ssh_addr`、`dns_tunnel_domain`、`dns_tunnel_servers`、`dns_tunnel_type`、`dns_tunnel_public_key`、`dns_tunnel_edns0`、`dns_tunnel_psk`、`dns_tunnel_marker`
