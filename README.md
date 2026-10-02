@@ -17,6 +17,29 @@ High-performance, multi-protocol SSH tunneling core and proxy engine supporting 
 
 ## SDK tunnel configuration
 
+Performance and lifecycle options (JSON / web profile):
+
+- `tcp_buffer_kb` / `tcpBufferKB`: 0 leaves socket buffers to the operating
+  system; 1–16384 sets each TCP socket's receive/send buffer in KiB.
+- `udp_max_sessions` / `udpMaxSessions`: 0 defaults to 1024 concurrent direct
+  and UDPGW sessions combined; 1–65536 overrides the limit.
+- `udp_idle_timeout_sec` / `udpIdleTimeoutSec`: 0 defaults to 60 seconds;
+  1–86400 overrides it. Successful application reads or writes refresh activity;
+  transport keepalives do not. Idle sessions are swept once per second.
+
+SOCKS5 UDP ingress uses 16 FIFO workers, each with a queue of 32 packets.
+Packets beyond queue capacity are dropped before payload allocation; the
+`UdpQueueDrops` traffic snapshot counter records overload drops. Packets for
+the same client/destination use the same worker. Full-size datagrams are
+accepted; fragmented SOCKS5 UDP packets remain unsupported.
+
+TCP relays preserve half-close and cancel on engine shutdown. On Linux/Android,
+plain TCP relays use splice through Go's network poller, including tracked
+connections, while SSH/TLS/protocol wrappers retain their Read/Write semantics.
+Start/Stop serialize engine replacement and drain the previous listener and
+connection loop before starting a new engine. GOMAXPROCS follows runtime and
+environment defaults.
+
 `myssh` embeds the public client APIs from `h2tunnel`, `xhttptunnel`,
 `udp_custom`, and `dns_custom`. The main process still starts with
 `myssh -conf config.json`; the tunnel-specific JSON fields are:

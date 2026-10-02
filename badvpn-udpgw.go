@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -47,13 +48,21 @@ type BadvpnUdpgwConn struct {
 	isIPv6     bool
 	conID      uint16
 
-	writeLock sync.Mutex
-	closed    chan struct{}
-	closeOnce sync.Once
+	writeLock  sync.Mutex
+	closed     chan struct{}
+	closeOnce  sync.Once
+	headerOnce sync.Once
+	header     []byte
 }
 
 // DialBadvpnUdpgw 经 SSH tunnel 建立 Badvpn-UDPGW 连接
 func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
+	return dialBadvpnUdpgw(currentEngineCtx(), sshClient, udpgwServerAddr, remoteTarget)
+}
+
+func dialBadvpnUdpgw(ctx context.Context, sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	if sshClient == nil {
 		return nil, fmt.Errorf("ssh client is not initialized")
 	}
@@ -63,7 +72,30 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 	}
 
 	// 按 udpgw.c 语义，目标地址需先解析为 IP
-	addr, err := net.ResolveUDPAddr("udp", remoteTarget)
+	host, port, err := net.SplitHostPort(remoteTarget)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ips, resolveErr := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		for _, candidate := range ips {
+			if candidate.To4() != nil {
+				ip = candidate
+				break
+			}
+		}
+		if ip == nil && len(ips) > 0 {
+			ip = ips[0]
+		}
+		if ip == nil {
+			return nil, fmt.Errorf("no IP address for %s", host)
+		}
+	}
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip.String(), port))
 	if err != nil {
 		zlog.Errorf("%s [UDPGW-Dial] ❌ Failed to resolve target address (%s): %v", TAG, remoteTarget, err)
 		return nil, fmt.Errorf("resolve error: %w", err)
@@ -72,7 +104,7 @@ func DialBadvpnUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget
 		zlog.Debugf("%s [UDPGW-Dial] Dialed IP: %s, isIPv6 resolved: %v", TAG, addr.IP, addr.IP.To4() == nil)
 	}
 
-	underlyingConn, err := sshClient.Dial("tcp", udpgwServerAddr)
+	underlyingConn, err := sshClient.DialContext(ctx, "tcp", udpgwServerAddr)
 	if err != nil {
 		zlog.Errorf("%s [UDPGW-Dial] ❌ SSH failed to establish TCP tunnel, unable to connect to UDPGW server (%s): %v", TAG, udpgwServerAddr, err)
 		return nil, fmt.Errorf("ssh dial udpgw server (%s) failed: %w", udpgwServerAddr, err)
@@ -110,25 +142,19 @@ func (c *BadvpnUdpgwConn) writeFrame(payload []byte) error {
 		return err
 	}
 
-	var lenBuf [2]byte
+	bufPtr := getPacketBuffer(length + 2)
+	defer putPacketBuffer(bufPtr)
+	packet := (*bufPtr)[:length+2]
 	// Badvpn PacketProto 帧长前缀为 2 bytes 小端
-	binary.LittleEndian.PutUint16(lenBuf[:], uint16(length))
+	binary.LittleEndian.PutUint16(packet[:2], uint16(length))
+	copy(packet[2:], payload)
 
 	if Debug {
-		zlog.Debugf("%s [UDPGW-writeFrame] 📤 Sending frame | Length prefix: %X | Payload length: %d\n", TAG, lenBuf[:], length)
+		zlog.Debugf("%s [UDPGW-writeFrame] 📤 Sending frame | Length prefix: %X | Payload length: %d\n", TAG, packet[:2], length)
 		zlog.Debugf("%s [UDPGW-writeFrame] 📤 Frame content (Hex): %s\n", TAG, hex.EncodeToString(payload))
 	}
 
-	if _, err := c.Conn.Write(lenBuf[:]); err != nil {
-		select {
-		case <-c.closed:
-			return io.EOF
-		default:
-		}
-		zlog.Errorf("%s [UDPGW-writeFrame] ❌ Failed to write length prefix: %v", TAG, err)
-		return err
-	}
-	if _, err := c.Conn.Write(payload); err != nil {
+	if err := writeFull(c.Conn, packet); err != nil {
 		select {
 		case <-c.closed:
 			return io.EOF
@@ -214,34 +240,38 @@ func (c *BadvpnUdpgwConn) keepAliveLoop() {
 
 // Write 组装 UDPGW 上行帧并发送。注意：目标地址在 Dial 时已固定，writeFrame 内部加锁串行化写入。
 func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
-	addrLen := 4
-	var flags byte = 0x00
-	ipData := c.targetIP.To4()
-	if c.isIPv6 {
-		addrLen = 16
-		flags |= UDPGW_CLIENT_FLAG_IPV6
-		ipData = c.targetIP.To16()
+	c.headerOnce.Do(func() {
+		ip := c.targetIP.To4()
+		flags := byte(0)
+		if c.isIPv6 {
+			ip = c.targetIP.To16()
+			flags = UDPGW_CLIENT_FLAG_IPV6
+		}
+		c.header = make([]byte, 3+len(ip)+2)
+		c.header[0] = flags
+		binary.LittleEndian.PutUint16(c.header[1:3], c.conID)
+		copy(c.header[3:], ip)
+		binary.BigEndian.PutUint16(c.header[3+len(ip):], c.targetPort)
+	})
+	length := len(c.header) + len(b)
+	if length > 65535 {
+		return 0, fmt.Errorf("payload too large")
 	}
-
-	// 帧结构: Flags(1) + ConID(2) + IPAddr(N) + Port(2) + Payload
-	packet := make([]byte, 3+addrLen+2+len(b))
-
-	// 1. Header: Flags 与 ConID (ConID 小端)
-	packet[0] = flags
-	binary.LittleEndian.PutUint16(packet[1:3], c.conID)
-
-	copy(packet[3:], ipData) // IP 地址 N 字节
-
-	// port 字段按 udpgw.c 约定用大端 (BigEndian)
-	binary.BigEndian.PutUint16(packet[3+addrLen:], c.targetPort)
-
-	copy(packet[3+addrLen+2:], b)
+	bufPtr := getPacketBuffer(length + 2)
+	defer putPacketBuffer(bufPtr)
+	packet := (*bufPtr)[:length+2]
+	binary.LittleEndian.PutUint16(packet[:2], uint16(length))
+	copy(packet[2:], c.header)
+	copy(packet[2+len(c.header):], b)
 
 	if Debug {
 		zlog.Debugf("%s [UDPGW-Write] 📝 Writing data | Target: %s:%d | Length: %d\n", TAG, c.targetIP, c.targetPort, len(b))
 	}
 
-	if err := c.writeFrame(packet); err != nil {
+	c.writeLock.Lock()
+	err := writeFull(c.Conn, packet)
+	c.writeLock.Unlock()
+	if err != nil {
 		select {
 		case <-c.closed:
 			return 0, io.EOF

@@ -2,10 +2,27 @@ package myssh
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
+func validatePerformanceConfig(cfg ProxyConfig) error {
+	if cfg.TcpBufferKB < 0 || cfg.TcpBufferKB > 16384 {
+		return fmt.Errorf("tcp_buffer_kb must be between 0 and 16384")
+	}
+	if cfg.UdpMaxSessions < 0 || cfg.UdpMaxSessions > 65536 {
+		return fmt.Errorf("udp_max_sessions must be between 0 and 65536")
+	}
+	if cfg.UdpIdleTimeoutSec < 0 || cfg.UdpIdleTimeoutSec > 86400 {
+		return fmt.Errorf("udp_idle_timeout_sec must be between 0 and 86400")
+	}
+	return nil
+}
+
 type ProxyConfig struct {
+	TcpBufferKB          int    `json:"tcp_buffer_kb"`           // 0: OS defaults; positive: per-direction socket buffer KiB.
+	UdpMaxSessions       int    `json:"udp_max_sessions"`        // 0: 1024 concurrent direct + UDPGW sessions.
+	UdpIdleTimeoutSec    int    `json:"udp_idle_timeout_sec"`    // 0: 60 seconds without application traffic.
 	LocalAddr            string `json:"local_addr"`              // 本地 SOCKS5/HTTP 监听地址 host:port
 	SshAddr              string `json:"ssh_addr"`                // SSH 服务端地址 host:port（隧道最终要打通的目标）
 	User                 string `json:"user"`                    // SSH 登录用户名

@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -18,11 +19,17 @@ import (
 // UDP 关联转发（直连 NAT / UDPGW 隧道）与 DNS 劫持。
 
 type SshProxyHandler struct {
+	ctx          context.Context
+	cfg          ProxyConfig
+	sessions     atomic.Int64
 	UdpgwAddr    string
 	UdpgwVersion string
 }
 
 func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
+	if h.context().Err() != nil {
+		return context.Canceled
+	}
 	if r.Cmd == socks5.CmdUDP {
 		localAddr := c.LocalAddr().(*net.TCPAddr)
 		atyp := byte(socks5.ATYPIPv4)
@@ -48,7 +55,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		connKey := c.RemoteAddr().String() + "->" + r.Address()
 		tcpConnMap.Store(connKey, c)
-		defer tcpConnMap.Delete(connKey)
+		defer tcpConnMap.CompareAndDelete(connKey, c)
 
 		mu.Lock()
 		client := sshClient
@@ -85,9 +92,14 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 
 		if isDirect {
 			dialTarget := net.JoinHostPort(dialHost, port)
-			remote, dialErr = dialProtected(currentEngineCtx(), ProxyConfig{}, "tcp", dialTarget, 5*time.Second)
+			remote, dialErr = dialProtected(h.context(), h.cfg, "tcp", dialTarget, 5*time.Second)
+			if dialErr == nil {
+				applyTCPConfig(remote, h.cfg)
+			}
 		} else {
-			remote, dialErr = client.Dial("tcp", target)
+			dialCtx, cancel := context.WithTimeout(h.context(), 10*time.Second)
+			remote, dialErr = client.DialContext(dialCtx, "tcp", target)
+			cancel()
 		}
 
 		if dialErr != nil {
@@ -106,36 +118,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			return err
 		}
 
-		errc := make(chan error, 2)
-		go func() {
-			// Proxy -> Client (Rx for local, Tx for proxy logic if viewed from client's download)
-			// remote = direct socket or ssh channel (download data)
-			// c = local client
-			var err error
-			if isDirect {
-				_, err = relayStream(c, remote)
-			} else {
-				_, err = tcpRelay(c, remote)
-			}
-			errc <- err
-		}()
-		go func() {
-			// Client -> Proxy (Tx for local, Rx for proxy logic if viewed from client's upload)
-			// c = local client (upload data)
-			// remote = direct socket or ssh channel
-			var err error
-			if isDirect {
-				_, err = relayStream(remote, c)
-			} else {
-				_, err = tcpRelay(remote, c)
-			}
-			errc <- err
-		}()
-
-		<-errc
-		remote.Close()
-		c.Close()
-		<-errc
+		relayBidirectional(h.context(), c, remote, isDirect)
 
 		return nil
 	}
@@ -153,6 +136,12 @@ const udpHandleMaxInFlight = 1024
 var udpHandleInFlight atomic.Int32
 
 func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
+	if h.context().Err() != nil {
+		return context.Canceled
+	}
+	if d == nil || len(d.DstPort) != 2 {
+		return fmt.Errorf("invalid UDP destination")
+	}
 	// 🛡️ Panic 防护，抵御 UDP abnormal 数据导致的解析崩溃
 	defer func() {
 		if err := recover(); err != nil {
@@ -264,21 +253,27 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Debugf("%s [ROUTER-Direct] ♻️ Reusing local direct session -> %s", TAG, sessionKey)
 			}
 		} else {
-			rawConn, err := dialProtected(currentEngineCtx(), ProxyConfig{}, "udp", directTarget, 5*time.Second)
+			rawConn, err := dialProtected(h.context(), h.cfg, "udp", directTarget, 5*time.Second)
 			if err != nil {
 				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP: %v", TAG, err)
 				return err
 			}
 
 			// --- Wrap the outbound connection ---
-			uc = WrapConn(rawConn, directTarget)
+			uc, err = h.newUDPSession(WrapConn(rawConn, directTarget))
+			if err != nil {
+				return err
+			}
 			// ------------------------------------
 
 			// LoadOrStore 防止并发包为同一 target 重复建连
-			actual, loaded := udpNatMap.LoadOrStore(sessionKey, uc)
+			actual, loaded, err := h.publishSession(&udpNatMap, sessionKey, uc, nil)
+			if err != nil {
+				return err
+			}
 			if loaded {
 				uc.Close() // 输掉了竞争，关掉冗余连接
-				uc = actual.(net.Conn)
+				uc = actual
 			} else {
 				if Debug {
 					zlog.Debugf("%s [ROUTER-Direct] 🟢 Created new local direct session -> %s", TAG, sessionKey)
@@ -290,15 +285,14 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
 					defer taskRelease()
 					defer conn.Close()
-					defer udpNatMap.Delete(key)
+					defer udpNatMap.CompareAndDelete(key, conn)
 
-					bufPtr := udpSmallBufPool.Get().(*[]byte)
+					bufPtr := udpBufPool.Get().(*[]byte)
 					// 读满整个缓冲，MTU 内一次读完不浪费
 					buf := (*bufPtr)[:cap(*bufPtr)]
-					defer udpSmallBufPool.Put(bufPtr)
+					defer udpBufPool.Put(bufPtr)
 
 					for {
-						conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 						n, err := conn.Read(buf)
 						if err != nil {
 							if Debug {
@@ -325,7 +319,11 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Debugf("%s [ROUTER-Direct] 📤 Successfully wrote uplink data -> %s | Length: %d bytes", TAG, sessionKey, n)
 			}
 		}
-		return nil
+		if err != nil {
+			uc.Close()
+			udpNatMap.CompareAndDelete(sessionKey, uc)
+		}
+		return err
 	}
 
 	// ==========================================
@@ -339,6 +337,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	}
 
 	sessionKey := addr.String() + "<->" + targetAddrStr
+	mu.Lock()
+	expectedClient := sshClient
+	mu.Unlock()
 	var uConn net.Conn
 
 	if val, ok := udpgwMap.Load(sessionKey); ok {
@@ -372,25 +373,31 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				if Debug {
 					zlog.Debugf("%s [ROUTER-Proxy] 🚀 Selected Badvpn protocol to establish UDPGW tunnel", TAG)
 				}
-				dconn, derr2 = DialBadvpnUdpgw(client, h.UdpgwAddr, targetAddrStr)
+				dconn, derr2 = dialBadvpnUdpgw(h.context(), client, h.UdpgwAddr, targetAddrStr)
 			} else {
 				if Debug {
 					zlog.Debugf("%s [ROUTER-Proxy] 🚀 Selected Tun2Proxy protocol to establish UDPGW tunnel", TAG)
 				}
-				dconn, derr2 = DialTun2proxyUdpgw(client, h.UdpgwAddr, targetAddrStr)
+				dconn, derr2 = dialTun2proxyUdpgw(h.context(), client, h.UdpgwAddr, targetAddrStr)
 			}
 			if derr2 != nil {
 				return nil, derr2
 			}
 
 			// --- Wrap the UDPGW connection ---
-			dconn = WrapConn(dconn, fmt.Sprintf("UDPGW->%s", targetAddrStr))
+			dconn, derr2 = h.newUDPSession(WrapConn(dconn, fmt.Sprintf("UDPGW->%s", targetAddrStr)))
+			if derr2 != nil {
+				return nil, derr2
+			}
 			// ---------------------------------
 
-			actual, loaded := udpgwMap.LoadOrStore(sessionKey, dconn)
+			actual, loaded, publishErr := h.publishSession(&udpgwMap, sessionKey, dconn, func() bool { return sshClient == client })
+			if publishErr != nil {
+				return nil, publishErr
+			}
 			if loaded {
 				dconn.Close()
-				return actual.(net.Conn), nil
+				return actual, nil
 			}
 
 			if Debug {
@@ -402,14 +409,13 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
 				defer taskRelease()
 				defer conn.Close()
-				defer udpgwMap.Delete(key)
+				defer udpgwMap.CompareAndDelete(key, conn)
 
 				bufPtr := udpBufPool.Get().(*[]byte)
 				buf := (*bufPtr)[:cap(*bufPtr)]
 				defer udpBufPool.Put(bufPtr)
 
 				for {
-					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 					n, rerr := conn.Read(buf)
 					if rerr != nil {
 						if Debug {
@@ -430,7 +436,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			zlog.Errorf("%s [ROUTER-Proxy] ❌ Failed to establish UDPGW tunnel -> Target: %s | Error: %v", TAG, targetAddrStr, derr)
 			// channel open 意外回复说明 SSH 连接已死，触发强制重连
 			if isSSHConnectionLost(derr) {
-				triggerSSHReconnect()
+				triggerSSHReconnectFor(expectedClient)
 			}
 			return derr
 		}
@@ -444,7 +450,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			zlog.Errorf("%s [ROUTER-Proxy] ❌ Failed to write proxy data -> Session: %s | Error: %v", TAG, sessionKey, err)
 		}
 		uConn.Close()
-		udpgwMap.Delete(sessionKey)
+		udpgwMap.CompareAndDelete(sessionKey, uConn)
 	} else {
 		if Debug {
 			zlog.Debugf("%s [ROUTER-Proxy] 📤 Successfully wrote proxy data -> Session: %s | Length: %d bytes", TAG, sessionKey, n)

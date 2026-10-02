@@ -95,7 +95,7 @@ func sdkTCPDialer(cfg ProxyConfig) func(context.Context, string, string) (net.Co
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		conn, err := newProtectedDialer(cfg, 10*time.Second).DialContext(ctx, network, address)
 		if err == nil {
-			applyOptimiseForTcpConnection(conn)
+			applyTCPConfig(conn, cfg)
 		}
 		return conn, err
 	}

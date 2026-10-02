@@ -53,6 +53,10 @@ func benchTCPair(b *testing.B) (client, server net.Conn, stop func()) {
 // writer --(connA)--> tcpRelay --(connB)--> sink。
 // wrapSrc/wrapDst 用于叠加 TrackedConn 统计层，量化其开销。
 func benchmarkRelay(b *testing.B, wrapSrc, wrapDst func(net.Conn) net.Conn) {
+	benchmarkRelayUsing(b, wrapSrc, wrapDst, func(dst, src net.Conn) (int64, error) { return tcpRelay(dst, src) })
+}
+
+func benchmarkRelayUsing(b *testing.B, wrapSrc, wrapDst func(net.Conn) net.Conn, relay func(net.Conn, net.Conn) (int64, error)) {
 	b.Helper()
 	const chunk = 64 * 1024
 
@@ -77,7 +81,7 @@ func benchmarkRelay(b *testing.B, wrapSrc, wrapDst func(net.Conn) net.Conn) {
 
 	relayDone := make(chan error, 1)
 	go func() {
-		_, err := tcpRelay(d, s)
+		_, err := relay(d, s)
 		relayDone <- err
 	}()
 
@@ -114,6 +118,14 @@ func benchmarkRelay(b *testing.B, wrapSrc, wrapDst func(net.Conn) net.Conn) {
 	if got := <-sinkDone; got != total {
 		b.Fatalf("short read: got %d want %d", got, total)
 	}
+}
+
+func BenchmarkTrackedDirectRelay(b *testing.B) {
+	wrap := func(c net.Conn) net.Conn { return WrapConn(c, "direct-bench.test") }
+	b.Run("copy", func(b *testing.B) {
+		benchmarkRelayUsing(b, wrap, wrap, func(dst, src net.Conn) (int64, error) { return tcpRelay(dst, src) })
+	})
+	b.Run("splice", func(b *testing.B) { benchmarkRelayUsing(b, wrap, wrap, relayStream) })
 }
 
 func BenchmarkTCPRelay(b *testing.B) {

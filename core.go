@@ -48,11 +48,7 @@ var (
 	// 填充数据池
 	padPool    []byte
 	padPoolLen = 64 * 1024
-	// tcp: 逐连接套接字缓冲。
-	// 原值 1MB（读+写各 1MB = 每连接 2MB 内核内存）在移动端 / 大量短连接下
-	// 会显著放大内存占用，这里降到 256KB：仍足以覆盖高 BDP 长肥管道，
-	// 同时把每连接内核内存压到 512KB。
-	tcpOptimizeBufferSize   = 256 * 1024
+	// Socket buffers use OS defaults unless configured per profile.
 	tcpKeepaliveIntervalSec = 15
 )
 
@@ -85,8 +81,8 @@ func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
 //	Linux/Android 优先尝试 splice(2) 零拷贝；
 //	对不支持 splice 的 Socket 类型，回退 tcpRelay 纯用户态拷贝。
 func relayStream(dst, src net.Conn) (int64, error) {
-	if n, err := trySplice(dst, src); err == nil {
-		return n, nil
+	if n, err, handled := trySplice(dst, src); handled {
+		return n, err
 	}
 	return tcpRelay(dst, src)
 }

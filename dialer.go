@@ -23,13 +23,29 @@ func newProtectedDialer(cfg ProxyConfig, timeout time.Duration) *net.Dialer {
 }
 
 func dialProtected(ctx context.Context, cfg ProxyConfig, network, address string, timeout time.Duration) (net.Conn, error) {
-	return newProtectedDialer(cfg, timeout).DialContext(ctx, network, address)
+	dialer := newProtectedDialer(cfg, timeout)
+	matchDialerNetwork(dialer, network)
+	return dialer.DialContext(ctx, network, address)
+}
+
+// Desktop interface binding selects a local TCP address; UDP dials need the
+// matching address type. Linux/Android fd-based binding has no LocalAddr.
+func matchDialerNetwork(dialer *net.Dialer, network string) {
+	if strings.HasPrefix(network, "udp") {
+		if addr, ok := dialer.LocalAddr.(*net.TCPAddr); ok {
+			dialer.LocalAddr = &net.UDPAddr{IP: addr.IP, Port: addr.Port, Zone: addr.Zone}
+		}
+	}
 }
 
 // applyOptimiseForTcpConnection 对 TCP 连接应用套接字层优化：
 // 关闭 Nagle（SetNoDelay，降低 SSH/交互流量的首包延迟）、
-// 收发缓冲各设 256KB（覆盖高 BDP 长肥管道）、keepalive 15s。
+// 默认保留系统缓冲、keepalive 15s。
 func applyOptimiseForTcpConnection(conn net.Conn) {
+	applyTCPConfig(conn, ProxyConfig{})
+}
+
+func applyTCPConfig(conn net.Conn, cfg ProxyConfig) {
 	// 底层 net.Conn 不一定是 *net.TCPConn
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		// 关闭 Nagle 算法
@@ -38,13 +54,15 @@ func applyOptimiseForTcpConnection(conn net.Conn) {
 		}
 
 		// 读缓冲
-		if err := tcpConn.SetReadBuffer(tcpOptimizeBufferSize); err != nil {
-			zlog.Warnf("%s [TCP Tune] Failed to set ReadBuffer: %v", TAG, err)
-		}
+		if cfg.TcpBufferKB > 0 {
+			if err := tcpConn.SetReadBuffer(cfg.TcpBufferKB * 1024); err != nil {
+				zlog.Warnf("%s [TCP Tune] Failed to set ReadBuffer: %v", TAG, err)
+			}
 
-		// 写缓冲
-		if err := tcpConn.SetWriteBuffer(tcpOptimizeBufferSize); err != nil {
-			zlog.Warnf("%s [TCP Tune] Failed to set WriteBuffer: %v", TAG, err)
+			// 写缓冲
+			if err := tcpConn.SetWriteBuffer(cfg.TcpBufferKB * 1024); err != nil {
+				zlog.Warnf("%s [TCP Tune] Failed to set WriteBuffer: %v", TAG, err)
+			}
 		}
 
 		// 启用 TCP Keep-Alive
@@ -57,7 +75,7 @@ func applyOptimiseForTcpConnection(conn net.Conn) {
 			}
 		}
 
-		zlog.Debugf("%s [TCP Tune] 🚀 Successfully applied Socket optimizations (%dKB Buffer, NoDelay, KeepAlive)", TAG, tcpOptimizeBufferSize/1024)
+		zlog.Debugf("%s [TCP Tune] NoDelay, KeepAlive; configured buffer=%dKB (0=OS default)", TAG, cfg.TcpBufferKB)
 	} else {
 		zlog.Debugf("%s [TCP Tune] ⚠️ Current connection is not TCP, skipping optimization", TAG)
 	}
@@ -113,6 +131,7 @@ func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (
 
 	// Apply Android VpnService Protect.
 	safeDialer := wrapAndroidProtect(dialer)
+	matchDialerNetwork(safeDialer, network)
 
 	zlog.Debugf("%s [Dialer] 📞 Executing DialContext...", TAG)
 	conn, err := safeDialer.DialContext(ctx, network, address)
@@ -131,7 +150,7 @@ func dialTCP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	applyOptimiseForTcpConnection(tcpConn)
+	applyTCPConfig(tcpConn, cfg)
 	return tcpConn, nil
 }
 
@@ -209,7 +228,13 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	}
 
 	// 把 baseConn 交给对应 tunnel handler 完成协议握手 (例如 HTTP/3, WebSocket, Base SSH 等场景)
+	if baseConn != nil {
+		baseConn = watchEngineCtx(ctx, baseConn)
+	}
 	targetConn, err := proto.Handler(ctx, cfg, baseConn)
+	if err != nil && baseConn != nil {
+		baseConn.Close()
+	}
 	if err == nil {
 		//if Debug {
 		//	targetConn = &DumpConn{Conn: targetConn, Prefix: "Client Local - Android"}
@@ -221,6 +246,9 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 
 // DialNode is the unified function for establishing a tunnel and an SSH connection
 func DialNode(ctx context.Context, cfg ProxyConfig, isPing bool) (*ssh.Client, net.Conn, error) {
+	if err := validatePerformanceConfig(cfg); err != nil {
+		return nil, nil, err
+	}
 	conn, err := dialTunnel(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("tunnel err: %v", err)

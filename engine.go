@@ -41,7 +41,9 @@ func isPermanentConfigError(err error) bool {
 // startSshTProxy 启动 AutoSSH mode 引擎：启动 DNS 服务、SOCKS5 服务，
 // 并后台维持 SSH tunnel。返回 0 表示启动成功，非 0 表示失败。
 func startSshTProxy(configJson string) int {
-	stopSshTProxy()
+	engineLifecycleMu.Lock()
+	defer engineLifecycleMu.Unlock()
+	stopEngine()
 
 	PrintAndroidUserInfo()
 
@@ -54,8 +56,15 @@ func startSshTProxy(configJson string) int {
 	}
 
 	var ctx context.Context
+	if err := validatePerformanceConfig(cfg); err != nil {
+		emitError(-1, err.Error())
+		emitState(StateError, err.Error())
+		return -1
+	}
+	mu.Lock()
 	ctx, engineCancel = context.WithCancel(context.Background())
 	engineCtxHolder.Store(&ctx)
+	mu.Unlock()
 
 	emitState(StateStarting, "")
 	zlog.Infof("%s [Core] ==================== Starting proxy engine (AutoSSH mode) ====================", TAG)
@@ -70,6 +79,7 @@ func startSshTProxy(configJson string) int {
 
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
 	if err != nil {
+		stopEngine()
 		zlog.Errorf("%s [SOCKS5] ❌ Failed to create SOCKS5 server instance: %v", TAG, err)
 		emitError(-4, err.Error())
 		emitState(StateError, err.Error())
@@ -81,23 +91,36 @@ func startSshTProxy(configJson string) int {
 	mu.Unlock()
 
 	handler := &SshProxyHandler{
+		ctx:          ctx,
+		cfg:          cfg,
 		UdpgwAddr:    cfg.UdpgwAddr, // 按 config 配置，空串则禁用 UDPGW
 		UdpgwVersion: cfg.UdpgwVersion,
 	}
 
+	if err := prepareSocksServer(ctx, srv); err != nil {
+		stopEngine()
+		emitError(-4, err.Error())
+		return -4
+	}
+	serverDone := make(chan struct{})
+	engineServerDone = serverDone
 	taskTrack()
 	go func() {
 		defer taskRelease()
+		defer close(serverDone)
 		zlog.Infof("%s [SOCKS5] 🚀 SOCKS5 proxy service started: %s", TAG, cfg.LocalAddr)
-		if err := srv.ListenAndServe(handler); err != nil && !strings.Contains(err.Error(), "closed network connection") {
+		if err := serveSocks(ctx, srv, handler); err != nil && ctx.Err() == nil {
 			zlog.Errorf("%s [SOCKS5] ❌ Service exited abnormally: %v", TAG, err)
 		}
 		zlog.Infof("%s [SOCKS5] 🛑 SOCKS5 service has completely stopped", TAG)
 	}()
 
+	done := make(chan struct{})
+	engineDone = done
 	taskTrack()
 	go func() {
 		defer taskRelease()
+		defer close(done)
 
 		for {
 			select {
@@ -111,6 +134,12 @@ func startSshTProxy(configJson string) int {
 			emitState(StateConnecting, cfg.SshAddr)
 			emitNodeEvent(cfg.SshAddr, NodeEventConnecting, "")
 			client, _, err := DialNode(ctx, cfg, false)
+			if ctx.Err() != nil {
+				if client != nil {
+					client.Close()
+				}
+				return
+			}
 			if err != nil {
 				zlog.Errorf("%s [AutoSSH] ❌ Connection failed: %v", TAG, err)
 				emitState(StateReconnecting, err.Error())
@@ -126,11 +155,18 @@ func startSshTProxy(configJson string) int {
 					mu.Unlock()
 					return
 				}
-				time.Sleep(3 * time.Second)
+				if !waitRetry(ctx, 3*time.Second) {
+					return
+				}
 				continue
 			}
 
 			mu.Lock()
+			if ctx.Err() != nil {
+				mu.Unlock()
+				client.Close()
+				return
+			}
 			sshClient = client
 			mu.Unlock()
 			zlog.Infof("%s [AutoSSH] ✅ SSH tunnel established successfully, global traffic taken over!", TAG)
@@ -139,21 +175,36 @@ func startSshTProxy(configJson string) int {
 
 			// keepalive 属于长生命周期后台任务，纳入 taskTrack 计数，
 			// 保证 wgWait 能等到它退出（ctx 取消 / client 关闭后即返回）。
+			connectionCtx, connectionCancel := context.WithCancel(ctx)
 			taskTrack()
 			go func() {
 				defer taskRelease()
-				maintainKeepAlive(ctx, client)
+				maintainKeepAlive(connectionCtx, client)
 			}()
 
 			err = client.Wait()
+			connectionCancel()
+			if ctx.Err() != nil {
+				return
+			}
 			zlog.Warnf("%s [AutoSSH] ⚠️ Tunnel disconnected (%v), preparing to reconnect automatically...", TAG, err)
-			emitState(StateReconnecting, err.Error())
+			reason := "SSH connection closed"
+			if err != nil {
+				reason = err.Error()
+			}
+			emitState(StateReconnecting, reason)
 
 			mu.Lock()
 			sshClient = nil
 			mu.Unlock()
 
 			killActiveProxyConnections()
+			udpgwMap.Range(func(k, v any) bool {
+				if udpgwMap.CompareAndDelete(k, v) {
+					v.(net.Conn).Close()
+				}
+				return true
+			})
 
 			select {
 			case <-ctx.Done():
@@ -168,6 +219,12 @@ func startSshTProxy(configJson string) int {
 
 // stopSshTProxy 停止一切，执行 cleanup：关闭 SSH、DNS 与 SOCKS5 服务。
 func stopSshTProxy() {
+	engineLifecycleMu.Lock()
+	defer engineLifecycleMu.Unlock()
+	stopEngine()
+}
+
+func stopEngine() {
 	// 持锁只做「取快照 + 置空」，把 DNS Stop / SOCKS Shutdown / 遍历关闭
 	// 连接等 I/O 全部移到锁外。旧实现全程持 mu：期间所有新建 TCP 连接都
 	// 会阻塞在 TCPHandle 的 mu.Lock() 上，而关闭操作本身可能阻塞。
@@ -195,11 +252,15 @@ func stopSshTProxy() {
 		lds.Stop()
 	}
 	if srv != nil {
-		srv.Shutdown()
+		stopSocksServer(srv)
 	}
 	closeQuicConnCache()
 	if client != nil {
 		client.Close()
+	}
+	if engineDone != nil {
+		<-engineDone
+		engineDone = nil
 	}
 
 	killActiveProxyConnections()
@@ -211,7 +272,7 @@ func stopSshTProxy() {
 			conn.Close()
 			udpSessionCount++
 		}
-		udpNatMap.Delete(key)
+		udpNatMap.CompareAndDelete(key, value)
 		return true
 	})
 	if udpSessionCount > 0 {
@@ -224,14 +285,29 @@ func stopSshTProxy() {
 			conn.Close()
 			udpgwSessionCount++
 		}
-		udpgwMap.Delete(key)
+		udpgwMap.CompareAndDelete(key, value)
 		return true
 	})
 	if udpgwSessionCount > 0 {
 		zlog.Infof("%s [Core] Forcibly disconnected %d UDPGW proxy sessions", TAG, udpgwSessionCount)
 	}
+	if engineServerDone != nil {
+		<-engineServerDone
+		engineServerDone = nil
+	}
 
 	zlog.Infof("%s [Core] All active SSH/Proxy connections destroyed", TAG)
+}
+
+func waitRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // maintainKeepAlive 周期发送 SSH keepalive 并监视响应延迟；

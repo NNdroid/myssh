@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -46,6 +47,12 @@ type UdpgwConn struct {
 
 // DialTun2proxyUdpgw 经 SSH tunnel 建立 UDPGW 连接
 func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
+	return dialTun2proxyUdpgw(currentEngineCtx(), sshClient, udpgwServerAddr, remoteTarget)
+}
+
+func dialTun2proxyUdpgw(ctx context.Context, sshClient *ssh.Client, udpgwServerAddr string, remoteTarget string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	if sshClient == nil {
 		return nil, fmt.Errorf("ssh client is not initialized")
 	}
@@ -83,7 +90,7 @@ func DialTun2proxyUdpgw(sshClient *ssh.Client, udpgwServerAddr string, remoteTar
 		}
 	}
 
-	underlyingConn, err := sshClient.Dial("tcp", udpgwServerAddr)
+	underlyingConn, err := sshClient.DialContext(ctx, "tcp", udpgwServerAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial udpgw server failed (%s): %w", udpgwServerAddr, err)
 	}
@@ -217,7 +224,7 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	buffer := (*bufPtr)[:cap(*bufPtr)]
 	defer udpBufPool.Put(bufPtr)
 
-	if 2+totalSize > cap(buffer) {
+	if totalSize > 65535 || 2+totalSize > cap(buffer) {
 		return 0, fmt.Errorf("payload too large")
 	}
 
@@ -231,7 +238,7 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	copy(packet[6+len(c.targetAddressData):], c.targetPortData)
 	copy(packet[6+len(c.targetAddressData)+2:], payload)
 
-	if _, err := c.Conn.Write(packet); err != nil {
+	if err := writeFull(c.Conn, packet); err != nil {
 		select {
 		case <-c.closed:
 			return 0, io.EOF

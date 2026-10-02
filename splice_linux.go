@@ -3,145 +3,97 @@
 package myssh
 
 import (
-	"errors"
+	"golang.org/x/sys/unix"
 	"net"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
-const spliceDefaultChunk = 64 * 1024
-
-func getRawFd(c net.Conn) (int, error) {
-	type unwrapper interface {
-		Unwrap() net.Conn
+// Only unwrap our accounting layer over plain TCP. Never bypass TLS or SSH.
+func spliceTCP(c net.Conn) (*net.TCPConn, *TrackedConn) {
+	if tracked, ok := c.(*TrackedConn); ok {
+		tcp, _ := tracked.Conn.(*net.TCPConn)
+		return tcp, tracked
 	}
-	current := c
-	for {
-		if u, ok := current.(unwrapper); ok {
-			current = u.Unwrap()
-		} else {
-			break
-		}
-	}
-
-	sc, ok := current.(syscall.Conn)
-	if !ok {
-		return -1, errors.New("connection does not implement syscall.Conn")
-	}
-
-	rawConn, err := sc.SyscallConn()
-	if err != nil {
-		return -1, err
-	}
-
-	var fd int = -1
-	err = rawConn.Control(func(descriptor uintptr) {
-		fd = int(descriptor)
-	})
-	if err != nil {
-		return -1, err
-	}
-	if fd < 0 {
-		return -1, errors.New("invalid file descriptor")
-	}
-	return fd, nil
+	tcp, _ := c.(*net.TCPConn)
+	return tcp, nil
 }
 
-// pollFd 等待 fd 就绪（Go 网络 fd 均为非阻塞，splice 返回 EAGAIN 时必须等待后再试）。
-// 阻塞语义与 tcpRelay 的 conn.Read 一致：直到就绪、对端关闭（POLLHUP）或本连接被
-// Close（fd 关闭后 poll 返回 POLLNVAL）。
-func pollFd(fd int, events int16) error {
+func trySplice(dst, src net.Conn) (total int64, err error, handled bool) {
+	s, sr := spliceTCP(src)
+	d, dw := spliceTCP(dst)
+	if s == nil || d == nil {
+		return 0, nil, false
+	}
+	sraw, err := s.SyscallConn()
+	if err != nil {
+		return 0, err, false
+	}
+	draw, err := d.SyscallConn()
+	if err != nil {
+		return 0, err, false
+	}
+	var pipe [2]int
+	if err = unix.Pipe2(pipe[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
+		return 0, err, false
+	}
+	defer unix.Close(pipe[0])
+	defer unix.Close(pipe[1])
+	// RawConn retains fd ownership and uses Go's poller. Deadlines and Close
+	// wake blocked operations without stale-fd races or blocking OS threads.
 	for {
-		fds := []unix.PollFd{{Fd: int32(fd), Events: events}}
-		n, err := unix.Poll(fds, -1)
-		if err == unix.EINTR {
-			continue
-		}
+		var n int64
+		var opErr error
+		err = sraw.Read(func(fd uintptr) bool {
+			for {
+				n, opErr = unix.Splice(int(fd), nil, pipe[1], nil, 64*1024, unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MOVE)
+				if opErr == syscall.EINTR {
+					continue
+				}
+				return opErr != syscall.EAGAIN
+			}
+		})
 		if err != nil {
-			return err
+			return total, err, true
+		}
+		if opErr != nil {
+			if total == 0 && n == 0 && (opErr == syscall.EINVAL || opErr == syscall.ENOSYS || opErr == syscall.EOPNOTSUPP) {
+				return 0, opErr, false
+			}
+			return total, opErr, true
 		}
 		if n == 0 {
-			continue
+			return total, nil, true
 		}
-		if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 &&
-			fds[0].Revents&events == 0 {
-			return syscall.ECONNRESET
+		if sr != nil {
+			sr.recordRead(int(n))
 		}
-		return nil
-	}
-}
-
-func trySplice(dst, src net.Conn) (int64, error) {
-	srcFd, err := getRawFd(src)
-	if err != nil {
-		return 0, err
-	}
-	dstFd, err := getRawFd(dst)
-	if err != nil {
-		return 0, err
-	}
-
-	var pipeFds [2]int
-	if err := unix.Pipe2(pipeFds[:], unix.O_CLOEXEC); err != nil {
-		return 0, err
-	}
-	pRead := pipeFds[0]
-	pWrite := pipeFds[1]
-	defer func() {
-		_ = unix.Close(pRead)
-		_ = unix.Close(pWrite)
-	}()
-
-	var total int64 = 0
-
-	for {
-		nIn, errIn := unix.Splice(srcFd, nil, pWrite, nil, spliceDefaultChunk, unix.SPLICE_F_MOVE)
-		if nIn > 0 {
-			// 关键：从 src 读入管道的字节必须全部送达 dst 后才能退出，
-			// 否则 defer 关闭管道时会把残留字节连同数据流一起丢掉。
-			var nOutLeft = nIn
-			for nOutLeft > 0 {
-				nOut, errOut := unix.Splice(pRead, nil, dstFd, nil, int(nOutLeft), unix.SPLICE_F_MOVE)
-				if nOut > 0 {
-					nOutLeft -= nOut
-					total += int64(nOut)
-				}
-				if errOut != nil {
-					if errOut == unix.EINTR {
+		for n > 0 {
+			var written int64
+			err = draw.Write(func(fd uintptr) bool {
+				for {
+					written, opErr = unix.Splice(pipe[0], nil, int(fd), nil, int(n), unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MOVE)
+					if opErr == syscall.EINTR {
 						continue
 					}
-					if errOut == unix.EAGAIN {
-						// dst 发送缓冲已满（背压）：等可写后继续排空管道。
-						if werr := pollFd(dstFd, unix.POLLOUT); werr != nil {
-							return total, werr
-						}
-						continue
-					}
-					return total, errOut
+					return opErr != syscall.EAGAIN
+				}
+			})
+			if written > 0 {
+				n -= written
+				total += written
+				if dw != nil {
+					dw.recordWrite(int(written))
 				}
 			}
-		}
-
-		if errIn != nil {
-			if errIn == unix.EINTR {
-				continue
+			if err != nil {
+				return total, err, true
 			}
-			if errIn == unix.EAGAIN {
-				// src 暂时无数据：等可读后继续走 splice 路径，
-				// 而不是回退用户态拷贝（否则 splice 只能处理第一批数据）。
-				if rerr := pollFd(srcFd, unix.POLLIN); rerr != nil {
-					return total, rerr
-				}
-				continue
+			if opErr != nil {
+				return total, opErr, true
 			}
-			return total, errIn
-		}
-
-		if nIn == 0 {
-			break
+			if written == 0 {
+				return total, syscall.EIO, true
+			}
 		}
 	}
-
-	return total, nil
 }

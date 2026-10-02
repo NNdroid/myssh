@@ -192,6 +192,11 @@ type TrackedConn struct {
 
 func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 	n, err = tc.Conn.Read(b)
+	tc.recordRead(n)
+	return n, err
+}
+
+func (tc *TrackedConn) recordRead(n int) {
 	if n > 0 {
 		tc.manager.RxTotal.Add(uint64(n)) // 计入 downlink
 		tc.info.ReadBytes.Add(uint64(n))  // 计入 downlink
@@ -199,11 +204,15 @@ func (tc *TrackedConn) Read(b []byte) (n int, err error) {
 			tc.domainStat.currentRxBytes.Add(uint64(n))
 		}
 	}
-	return n, err
 }
 
 func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 	n, err = tc.Conn.Write(b)
+	tc.recordWrite(n)
+	return n, err
+}
+
+func (tc *TrackedConn) recordWrite(n int) {
 	if n > 0 {
 		tc.manager.TxTotal.Add(uint64(n)) // 计入 uplink
 		tc.info.WriteBytes.Add(uint64(n)) // 计入 uplink
@@ -211,7 +220,13 @@ func (tc *TrackedConn) Write(b []byte) (n int, err error) {
 			tc.domainStat.currentTxBytes.Add(uint64(n))
 		}
 	}
-	return n, err
+}
+
+func (tc *TrackedConn) CloseWrite() error {
+	if c, ok := tc.Conn.(interface{ CloseWrite() error }); ok {
+		return c.CloseWrite()
+	}
+	return fmt.Errorf("connection does not support half-close")
 }
 
 func (tc *TrackedConn) Close() error {
@@ -343,12 +358,13 @@ var (
 
 // TrafficStats 流量统计快照（导出）。
 type TrafficStats struct {
-	TxRate      int64
-	RxRate      int64
-	TxTotal     int64
-	RxTotal     int64
-	ActiveConns int64
-	TotalConns  int64
+	UdpQueueDrops int64
+	TxRate        int64
+	RxRate        int64
+	TxTotal       int64
+	RxTotal       int64
+	ActiveConns   int64
+	TotalConns    int64
 }
 
 // SysStats 系统资源快照。
@@ -384,12 +400,13 @@ func RegisterSysInfoCallback(cb SysInfoCallback) {
 // GetTrafficStats 返回流量统计快照。
 func GetTrafficStats() *TrafficStats {
 	return &TrafficStats{
-		TxRate:      uint64ToInt64(currentTxRate.Load()),
-		RxRate:      uint64ToInt64(currentRxRate.Load()),
-		TxTotal:     uint64ToInt64(globalTrafficManager.TxTotal.Load()),
-		RxTotal:     uint64ToInt64(globalTrafficManager.RxTotal.Load()),
-		ActiveConns: globalTrafficManager.ActiveConns.Load(),
-		TotalConns:  globalTrafficManager.TotalConns.Load(),
+		UdpQueueDrops: uint64ToInt64(udpQueueDrops.Load()),
+		TxRate:        uint64ToInt64(currentTxRate.Load()),
+		RxRate:        uint64ToInt64(currentRxRate.Load()),
+		TxTotal:       uint64ToInt64(globalTrafficManager.TxTotal.Load()),
+		RxTotal:       uint64ToInt64(globalTrafficManager.RxTotal.Load()),
+		ActiveConns:   globalTrafficManager.ActiveConns.Load(),
+		TotalConns:    globalTrafficManager.TotalConns.Load(),
 	}
 }
 

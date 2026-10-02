@@ -223,7 +223,17 @@ func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (
 		},
 	}
 
+	// NewClientConn does not use ClientConfig.Timeout. Close the transport on
+	// timeout/cancellation so stalled SSH handshakes cannot hold Stop open.
+	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	stopHandshake := context.AfterFunc(handshakeCtx, func() { conn.Close() })
 	scc, chans, reqs, err := ssh.NewClientConn(conn, cfg.SshAddr, sshConfig)
+	stopHandshake()
+	if handshakeCtx.Err() != nil {
+		conn.Close()
+		return nil, handshakeCtx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}

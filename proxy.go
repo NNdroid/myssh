@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +27,10 @@ var (
 	globalConfig atomic.Pointer[GlobalConfig]
 	globalRouter atomic.Pointer[GeoRouter]
 
-	engineCancel context.CancelFunc
+	engineCancel      context.CancelFunc
+	engineDone        chan struct{}
+	engineServerDone  chan struct{}
+	engineLifecycleMu sync.Mutex
 
 	// engineCtxHolder 存当前引擎 ctx：Stop 时置换为 Background，让新建连接
 	// 立即脱离旧引擎。用 atomic.Pointer[context.Context] 而非 atomic.Value：
@@ -60,11 +62,7 @@ func init() {
 	globalConfig.Store(&GlobalConfig{})
 }
 
-// init GOMAXPROCS 交给运行时默认（Go 1.26 已按容器/进程亲和自动设置），
-// 这里显式对齐物理核数，移动端与 gomobile 场景下保持一致行为。
-func init() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-}
+// Leave GOMAXPROCS to the runtime and the host's environment.
 
 // currentEngineCtx 返回当前引擎 ctx；引擎未启动时返回 Background。
 func currentEngineCtx() context.Context {
@@ -140,7 +138,7 @@ func killActiveProxyConnections() {
 			conn.Close()
 			count++
 		}
-		tcpConnMap.Delete(key)
+		tcpConnMap.CompareAndDelete(key, value)
 		return true
 	})
 	if count > 0 {
@@ -166,6 +164,17 @@ func isSSHConnectionLost(err error) bool {
 // 触发 AutoSSH 重连循环接管。
 //
 //	清理 udpgwMap/tcpConnMap，关闭 SSH client；AutoSSH 的 client.Wait() 随即返回进入重连。
+func triggerSSHReconnectFor(expected *ssh.Client) {
+	mu.Lock()
+	if expected == nil || sshClient != expected {
+		mu.Unlock()
+		return
+	}
+	mu.Unlock()
+	// The owning AutoSSH loop cleans up before publishing a replacement.
+	expected.Close()
+}
+
 func triggerSSHReconnect() {
 	mu.Lock()
 	client := sshClient
@@ -182,7 +191,7 @@ func triggerSSHReconnect() {
 		if conn, ok := value.(net.Conn); ok {
 			conn.Close()
 		}
-		udpgwMap.Delete(key)
+		udpgwMap.CompareAndDelete(key, value)
 		return true
 	})
 
