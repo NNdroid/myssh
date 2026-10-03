@@ -83,7 +83,7 @@ type ProxyConfig struct {
 	UdpCustomPublicKey  string `json:"udp_custom_public_key"`  // Noise 服务端公钥（hex/base64），可空
 	UdpCustomPaths      int    `json:"udp_custom_paths"`       // UDP Custom multipath path count (client-selected random ports); 0 => 32
 	UdpCustomSockets    int    `json:"udp_custom_sockets"`     // local UDP sockets; 0 => 1
-	UdpCustomSendWindow int    `json:"udp_custom_send_window"` // in-flight frames; 0 => SDK default 256
+	UdpCustomSendWindow int    `json:"udp_custom_send_window"` // in-flight frames cap; 0 = adaptive (grows 64→512 with recovery, legacy fixed 256)
 	UdpCustomMaxPkt     int    `json:"udp_custom_max_pkt"`     // largest v2 record on the wire (UDP payload bytes); 0 => SDK default 1450; probe ceiling when MtuProbe on
 	UdpCustomMtuProbe   string `json:"udp_custom_mtu_probe"`   // auto path-MTU probing: ""/auto (default: enabled), "on" (force enable), "off" (pin MaxPkt verbatim)
 

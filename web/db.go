@@ -165,7 +165,7 @@ func InitDB(dbPath string) error {
 		kcpNoComp BOOLEAN DEFAULT 0, kcpSmuxVer INTEGER DEFAULT 2, kcpKeepAlive INTEGER DEFAULT 10,
 		udpCustomPsk TEXT DEFAULT '', udpCustomMagic TEXT DEFAULT 'UDPC',
 		udpCustomPublicKey TEXT DEFAULT '', udpCustomPaths INTEGER DEFAULT 32,
-		udpCustomSockets INTEGER DEFAULT 1, udpCustomSendWindow INTEGER DEFAULT 256,
+		udpCustomSockets INTEGER DEFAULT 1, udpCustomSendWindow INTEGER DEFAULT 0,
 		dnsTunnelPublicKey TEXT DEFAULT '', dnsTunnelEDNS0 BOOLEAN DEFAULT 0,
 		xhttpChunkSizeKB INTEGER DEFAULT 256, xhttpStreamMode TEXT DEFAULT '', heartbeatIntervalMs INTEGER DEFAULT 25000,
 		icmpCustomPsk TEXT DEFAULT '', icmpCustomMagic TEXT DEFAULT '', icmpCustomPublicKey TEXT DEFAULT '',
@@ -210,7 +210,6 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelType TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN kcpPassword TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN kcpCrypt TEXT DEFAULT 'aes';",
-		"ALTER TABLE profiles ADD COLUMN kcpNoDelay BOOLEAN DEFAULT 1;",
 		"ALTER TABLE profiles ADD COLUMN kcpMode TEXT DEFAULT 'fast';",
 		"ALTER TABLE profiles ADD COLUMN kcpSndWnd INTEGER DEFAULT 128;",
 		"ALTER TABLE profiles ADD COLUMN kcpRcvWnd INTEGER DEFAULT 512;",
@@ -225,7 +224,10 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE profiles ADD COLUMN udpCustomPublicKey TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN udpCustomPaths INTEGER DEFAULT 32;",
 		"ALTER TABLE profiles ADD COLUMN udpCustomSockets INTEGER DEFAULT 1;",
-		"ALTER TABLE profiles ADD COLUMN udpCustomSendWindow INTEGER DEFAULT 256;",
+		"ALTER TABLE profiles ADD COLUMN udpCustomSendWindow INTEGER DEFAULT 0;",
+		// udp_custom 7625787 起 SendWindow=0 表示自适应窗口（协商 recovery 时 64 起步、
+		// 可扩到 512），不再等价于旧的固定 256；旧的 256 只出现在历史库的默认值里。
+		"UPDATE profiles SET udpCustomSendWindow = 0 WHERE udpCustomSendWindow = 256;",
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelPublicKey TEXT DEFAULT '';",
 		"ALTER TABLE profiles ADD COLUMN dnsTunnelEDNS0 BOOLEAN DEFAULT 0;",
 		"ALTER TABLE profiles ADD COLUMN xhttpChunkSizeKB INTEGER DEFAULT 256;",

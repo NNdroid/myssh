@@ -159,11 +159,13 @@
 | `udp_custom_public_key` | 服务端 Noise 静态公钥 | hex(64) / base64；空=仅 PSK |
 | `udp_custom_paths` | 多路（随机源端口）数量 | `0`→32 |
 | `udp_custom_sockets` | 本地 UDP socket 数 | `0`→1 |
-| `udp_custom_send_window` | 在途帧数 | `0`→256（SDK 默认） |
+| `udp_custom_send_window` | 在途帧数上限 | `0`→自适应（协商 recovery 时从 64 起步、最多扩到 512，丢包收缩；对端无 recovery 或关闭时为固定 256）；正数→按值封顶（仍受 512 上限约束） |
 | `udp_custom_max_pkt` | 单条 v2 记录上线最大字节（UDP 载荷=40 头+载荷+16 tag）；窄链路上调小可免 IP 分片丢包 | `0`→1450（历史值）；`<0` 报错。MtuProbe 开启时它是探测**上限/回落值** |
 | `udp_custom_mtu_probe` | 握手后自动探测路径 MTU 阶梯并收敛 | `""`/`auto`(默认=开，遇旧服务端不应答自动回落)、`on`(强制开)、`off`(按 `udp_custom_max_pkt` 固定) |
 
 > SDK 自 9e261d7 起内置**自适应 Reed-Solomon FEC**：默认启用，仅在握手时确认服务端也通告 FEC 能力后激活（旧服务端自动保持关闭，线兼容），丢包路径下 parity 前向纠错、原 ARQ 重传仍为最终兜底；未暴露配置项，无手动开关。
+>
+> 自 7625787 起内置 **recovery**（选择性 SACK + 接收端信用回传 + 自适应发送窗口 + RTT  pacing）：默认开启，同样只在对端通告 `FLAG_RECOVERY_CAPABLE` 后激活，旧服务端保持累计 ACK + 固定窗口，线兼容；SDK 侧有 `recovery:false` 开关，myssh 未暴露（保持默认开启）。
 > 弱网空闲清理同步放宽：服务端空闲超时 60s→180s，客户端接收超时 75s→210s。
 
 ### 4.10 `dns_custom`（custom，无 TLS；SSH-over-DNS，Noise + PSK）
@@ -216,7 +218,7 @@
 
 **回填默认（0/空时）：**
 - kcptun：`mode`→fast、`data_shards`10、`parity_shards`3、`sndwnd`128、`rcvwnd`512、`mtu`1350、`smuxver`2、`keepalive`10
-- udp_custom：`paths`32、`sockets`1、`send_window`256、`max_pkt`→1450、`mtu_probe` 空→开、`magic`→`UDPC`
+- udp_custom：`paths`32、`sockets`1、`send_window` 0=自适应(64→512)、`max_pkt`→1450、`mtu_probe` 空→开、`magic`→`UDPC`
 - icmp_custom：`mtu_mode`→probe、`max_payload`/`pace_ms`→SDK 默认、`magic`→SDK `MagicDefault`（地址族非可配项，SDK 按对端自动选族）
 - xhttp：`chunk_size_kb` 0→256、`stream_mode` 空→auto
 - h2 家族：`heartbeat_interval_ms` 0→25000ms、`padding_min_bytes` 0→1420（负数关闭；上限 SDK 自动 min+25%）、`masque_alpn` 空→auto

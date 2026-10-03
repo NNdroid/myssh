@@ -118,17 +118,12 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	if sockets <= 0 {
 		sockets = 1
 	}
-	sendWindow := cfg.UdpCustomSendWindow
-	if sendWindow <= 0 {
-		sendWindow = 256
-	}
 	clientCfg := udpclient.ClientConfig{
 		ServerAddr: serverAddr,
 		Passwords:  []string{psk},
 		Magic:      magic,
 		Sockets:    sockets,
 		Paths:      paths,
-		SendWindow: sendWindow,
 		Logger:     sdkUDPLogger("udp_custom"),
 		ListenUDP: func(network string, laddr *net.UDPAddr) (*net.UDPConn, error) {
 			pc, err := rangeListenConfig(cfg).ListenPacket(ctx, network, laddr.String())
@@ -159,6 +154,13 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		return nil, err
 	} else if probe != nil {
 		clientCfg.MtuProbe = probe // nil 走 SDK 默认（开启）
+	}
+	// udp_custom 7625787 起 SendWindow=0 表示“自适应窗口”（协商 recovery 时从 64
+	// 起步可扩到 512，丢包收缩），不再等于旧的固定 256。所以这里只在显式配置
+	// 正数时下发展开上限，0 留给 SDK 取新的自适应默认——否则 myssh 会把这条新
+	// 增吞吐能力静默压掉。
+	if v := cfg.UdpCustomSendWindow; v > 0 {
+		clientCfg.SendWindow = v
 	}
 
 	client, err := udpclient.NewClient(clientCfg)
