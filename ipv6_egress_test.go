@@ -83,6 +83,23 @@ func TestIPv6EgressProbeRunsTargetsConcurrently(t *testing.T) {
 	}
 }
 
+func TestIPv6EgressProbeUsesOneSharedDeadline(t *testing.T) {
+	oldProbe := ipv6EgressProbeDial
+	ipv6EgressProbeDial = func(ctx context.Context, client *ssh.Client, target string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	defer func() { ipv6EgressProbeDial = oldProbe }()
+
+	started := time.Now()
+	require.False(t, probeIPv6Egress(&ssh.Client{}))
+	elapsed := time.Since(started)
+
+	// Three sequential 1.5 s probes would take roughly 4.5 s. Parallel probes
+	// share one 1.5 s deadline, with generous CI scheduling headroom here.
+	require.Less(t, elapsed, 3*time.Second)
+}
+
 func TestIPv6EgressForcedModesReturnImmediately(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
 
