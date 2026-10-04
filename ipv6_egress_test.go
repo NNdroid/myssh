@@ -35,6 +35,10 @@ func TestNormalizeIPv6EgressMode(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestIPv6EgressProbeTargetsIncludeAliDNS(t *testing.T) {
+	require.Contains(t, ipv6EgressProbeTargets, "[2400:3200::1]:443")
+}
+
 func TestIPv6EgressForcedModesReturnImmediately(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
 
