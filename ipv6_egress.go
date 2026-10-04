@@ -159,7 +159,7 @@ func startIPv6EgressProbe(client *ssh.Client) {
 			zlog.Infof("%s [IPv6-Egress] ✅ remote SSH exit has IPv6 connectivity", TAG)
 		} else {
 			remoteIPv6Egress.state = ipv6EgressUnavailable
-			zlog.Warnf("%s [IPv6-Egress] ⚠️ remote SSH exit is IPv4-only; proxied AAAA answers will be suppressed", TAG)
+			zlog.Warnf("%s [IPv6-Egress] ⚠️ remote SSH exit is IPv4-only; proxied AAAA answers and IPv6 literal CONNECTs will be suppressed", TAG)
 		}
 		if !remoteIPv6Egress.doneClosed {
 			close(remoteIPv6Egress.done)
@@ -270,6 +270,25 @@ func proxyIPv6EgressAvailable() bool {
 	return remoteIPv6Egress.state == ipv6EgressAvailable
 }
 
+func proxyIPv6EgressUnavailable() bool {
+	remoteIPv6Egress.mu.Lock()
+	defer remoteIPv6Egress.mu.Unlock()
+	return remoteIPv6Egress.state == ipv6EgressUnavailable
+}
+
+func isIPv6Literal(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
+		host = host[:zone]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
+}
+
+func shouldRejectProxyIPv6Literal(host string, isDirect bool) bool {
+	return !isDirect && isIPv6Literal(host) && proxyIPv6EgressUnavailable()
+}
+
 func shouldSuppressProxyAAAA(req *dns.Msg) bool {
 	if req == nil || len(req.Question) == 0 || req.Question[0].Qtype != dns.TypeAAAA {
 		return false
@@ -293,11 +312,38 @@ func makeAAAANoDataReply(req *dns.Msg) ([]byte, error) {
 }
 
 // egressAwareSocksHandler decorates the existing handler without changing its
-// mature TCP/UDP forwarding implementation. The only interception is an AAAA
-// DNS query that would otherwise hand an unusable IPv6 literal to an IPv4-only
-// SSH exit.
+// mature TCP/UDP forwarding implementation. It suppresses unusable proxied
+// AAAA answers and fail-fast rejects proxied IPv6 literal CONNECTs once the
+// remote SSH exit is known to have no IPv6 egress.
 type egressAwareSocksHandler struct {
 	*SshProxyHandler
+}
+
+func (h *egressAwareSocksHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
+	if r != nil && r.Cmd == socks5.CmdConnect {
+		target := r.Address()
+		host := target
+		if splitHost, _, err := net.SplitHostPort(target); err == nil {
+			host = splitHost
+		}
+
+		isDirect := false
+		if gr := globalRouter.Load(); gr != nil {
+			isDirect = gr.ShouldDirect(host).IsDirect
+		}
+
+		if shouldRejectProxyIPv6Literal(host, isDirect) {
+			if Debug {
+				zlog.Debugf("%s [IPv6-Egress] rejecting proxied IPv6 literal on IPv4-only exit: %s", TAG, target)
+			}
+			rep := socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
+			if c != nil {
+				_, _ = rep.WriteTo(c)
+			}
+			return fmt.Errorf("remote SSH exit has no IPv6 egress for literal target %s", target)
+		}
+	}
+	return h.SshProxyHandler.TCPHandle(s, c, r)
 }
 
 func (h *egressAwareSocksHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
