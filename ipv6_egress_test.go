@@ -92,5 +92,5 @@ func TestAutoProbePublishesAvailableState(t *testing.T) {
 	defer func() { ipv6EgressProbeDial = oldProbe }()
 
 	startIPv6EgressProbe(&ssh.Client{})
-	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(int((250*time.Millisecond).Milliseconds())))
+	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(int((250 * time.Millisecond).Milliseconds())))
 }
