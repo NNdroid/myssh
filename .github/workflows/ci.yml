@@ -73,11 +73,17 @@ jobs:
         run: go build ./...
 
       - name: Android ARM compile smoke
-        # x/sys 在不同 Android/Linux ABI 上的 syscall 签名可能不同；宿主 amd64
-        # 编译无法发现这类问题。用无链接运行的 cross-build 在 myssh PR 内提前拦截。
+        # 使用 runner 自带 Android NDK 的实际 clang + CGO 做 armv7/arm64
+        # 交叉编译，避免宿主 amd64 编译漏掉 x/sys syscall ABI 差异。
         run: |
-          env GOOS=android GOARCH=arm GOARM=7 CGO_ENABLED=0 go build ./...
-          env GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...
+          set -euo pipefail
+          NDK=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "Using Android NDK: $NDK"
+          env GOOS=android GOARCH=arm GOARM=7 CGO_ENABLED=1 \
+            CC="$TOOLCHAIN/armv7a-linux-androideabi28-clang" go build ./...
+          env GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
+            CC="$TOOLCHAIN/aarch64-linux-android28-clang" go build ./...
 
       - name: Test (race, CGO)
         # 数据竞争检测 (-race) 依赖 CGO，本机若缺少 C 编译器无法运行；
