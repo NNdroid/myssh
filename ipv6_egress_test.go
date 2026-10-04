@@ -180,4 +180,7 @@ func TestAutoProbePublishesAvailableDiagnosticState(t *testing.T) {
 
 	startIPv6EgressProbe(&ssh.Client{})
 	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(250))
+	// startIPv6EgressProbe also starts the local diagnostic probe. Wait for it
+	// before this test returns so a later test can safely replace its fake dialer.
+	require.Equal(t, ipv6EgressAvailable, waitLocalDirectIPv6Ms(250))
 }
