@@ -33,6 +33,17 @@ func (p *SshTProxy) LoadGlobalConfig(configJson string) int {
 	return loadGlobalConfigFromJson(configJson)
 }
 
+// WaitIPv6Egress waits for the current SSH exit capability probe.
+// Return values: 1 = IPv6 available, 0 = IPv4-only, -1 = unknown/timeout.
+func (p *SshTProxy) WaitIPv6Egress(timeoutMs int) int {
+	return waitIPv6EgressMs(timeoutMs)
+}
+
+// GetIPv6EgressState returns available, unavailable, or unknown.
+func (p *SshTProxy) GetIPv6EgressState() string {
+	return ipv6EgressStateName()
+}
+
 // PingNodes 批量测延迟，返回 JSON 数组（元素结构见 PingResult）。
 func (p *SshTProxy) PingNodes(profilesJson, targetUrl string, timeoutMs int) string {
 	return pingNodes(profilesJson, targetUrl, timeoutMs)
