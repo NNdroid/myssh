@@ -11,8 +11,7 @@ import (
 )
 
 // Keep package tests hermetic: production uses dialProtected(), while unit
-// tests default to an immediately successful local probe unless a test installs
-// a more specific fake.
+// tests default to an immediately successful local diagnostic probe.
 func init() {
 	localDirectIPv6ProbeDial = func(ctx context.Context, target string) error {
 		return nil
@@ -85,49 +84,39 @@ func TestLocalDirectIPv6ProbeUsesOneSharedDeadline(t *testing.T) {
 
 	started := time.Now()
 	require.False(t, probeLocalDirectIPv6())
-	elapsed := time.Since(started)
-	require.Less(t, elapsed, 3*time.Second)
+	require.Less(t, time.Since(started), 3*time.Second)
 }
 
-func TestLocalAndRemoteIPv6LiteralPoliciesAreIndependent(t *testing.T) {
+func TestLocalProbeFailureDoesNotGateDirectTraffic(t *testing.T) {
 	defer resetLocalDirectIPv6State()
 	defer restoreIPv6EgressAuto(t)
 
-	// Remote can use IPv6 while the device DIRECT path cannot.
-	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"dual-stack"}`))
 	setLocalDirectIPv6StateForTest(ipv6EgressUnavailable)
-	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", false), "proxy IPv6 follows remote capability")
-	require.True(t, shouldRejectProxyIPv6Literal("2001:db8::1", true), "DIRECT IPv6 follows local capability")
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", true), "DIRECT literal decisions must use the target dial, not a public probe")
 
-	// The inverse must also remain independent.
-	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv4-only"}`))
-	setLocalDirectIPv6StateForTest(ipv6EgressAvailable)
-	require.True(t, shouldRejectProxyIPv6Literal("2001:db8::1", false))
-	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", true))
-}
-
-func TestDirectAAAAUsesLocalIPv6Capability(t *testing.T) {
 	oldRouter := globalRouter.Load()
 	r := newGeoRouter()
 	r.fullDomains["direct.example"] = struct{}{}
 	globalRouter.Store(r)
 	defer globalRouter.Store(oldRouter)
-	defer resetLocalDirectIPv6State()
 
 	req := new(dns.Msg)
 	req.SetQuestion("direct.example.", dns.TypeAAAA)
-
-	setLocalDirectIPv6StateForTest(ipv6EgressUnavailable)
-	require.True(t, shouldSuppressProxyAAAA(req), "DIRECT AAAA must be NODATA when the local path has no IPv6")
-
-	setLocalDirectIPv6StateForTest(ipv6EgressAvailable)
-	require.False(t, shouldSuppressProxyAAAA(req), "DIRECT AAAA must pass when the local path has IPv6")
-
-	setLocalDirectIPv6StateForTest(ipv6EgressUnknown)
-	require.False(t, shouldSuppressProxyAAAA(req), "unknown local state must not be treated as confirmed IPv4-only")
+	require.False(t, shouldSuppressDNSFamily(req), "DIRECT AAAA must not be globally suppressed by a diagnostic probe")
 }
 
-func TestStartRemoteProbeRefreshesLocalDirectIPv6State(t *testing.T) {
+func TestRemoteForcedPolicyDoesNotLeakIntoDirect(t *testing.T) {
+	defer resetLocalDirectIPv6State()
+	defer restoreIPv6EgressAuto(t)
+
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv4-only"}`))
+	setLocalDirectIPv6StateForTest(ipv6EgressUnavailable)
+
+	require.True(t, shouldRejectProxyIPv6Literal("2001:db8::1", false), "explicit proxy policy still applies to PROXY")
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", true), "DIRECT remains target-driven")
+}
+
+func TestStartRemoteProbeRefreshesLocalDiagnosticState(t *testing.T) {
 	defer resetLocalDirectIPv6State()
 	defer restoreIPv6EgressAuto(t)
 
