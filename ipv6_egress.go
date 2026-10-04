@@ -312,9 +312,34 @@ func makeAAAANoDataReply(req *dns.Msg) ([]byte, error) {
 	return reply.Pack()
 }
 
+// interceptedDNSReply handles client-originated SOCKS/TUN/TPROXY UDP DNS before
+// the legacy UDP forwarding path. All inbound port-53 queries must pass through
+// LocalDnsServer so the unified outbound has one authoritative A/AAAA cache for
+// later IP->domain recovery. LocalDnsServer's own upstream dials do not re-enter
+// this SOCKS handler, so configured DNS endpoints cannot recurse here.
+func interceptedDNSReply(payload []byte) (reply []byte, handled bool, err error) {
+	req := new(dns.Msg)
+	if err := req.Unpack(payload); err != nil {
+		// It is still a port-53 client packet. Do not leak malformed DNS into the
+		// generic UDP path merely because parsing failed.
+		return nil, true, err
+	}
+	if shouldSuppressDNSFamily(req) {
+		reply, err := makeAAAANoDataReply(req)
+		return reply, true, err
+	}
+	if lds := localDnsServer.Load(); lds != nil {
+		reply, err := lds.HandleDNSRequestPacked(req)
+		return reply, true, err
+	}
+	// During the tiny startup/teardown window where the DNS engine is absent,
+	// preserve the old UDP behavior instead of blackholing otherwise valid DNS.
+	return nil, false, nil
+}
+
 // egressAwareSocksHandler is now the unified TCP outbound entry point. UDP keeps
-// the existing mature single-path implementation; only explicit family policy
-// may synthesize NODATA for DNS.
+// the existing mature single-path implementation; DNS is intercepted first so
+// all client A/AAAA answers populate the same cache used by TCP domain recovery.
 type egressAwareSocksHandler struct {
 	*SshProxyHandler
 }
@@ -328,14 +353,16 @@ func (h *egressAwareSocksHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r 
 
 func (h *egressAwareSocksHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
 	if d != nil && len(d.DstPort) == 2 && binary.BigEndian.Uint16(d.DstPort) == 53 {
-		req := new(dns.Msg)
-		if err := req.Unpack(d.Data); err == nil && shouldSuppressDNSFamily(req) {
-			replyData, err := makeAAAANoDataReply(req)
+		replyData, handled, err := interceptedDNSReply(d.Data)
+		if handled {
 			if err != nil {
 				return err
 			}
-			if Debug && len(req.Question) > 0 {
-				zlog.Debugf("%s [Outbound] explicit family policy suppressing DNS %s for %s", TAG, dns.TypeToString[req.Question[0].Qtype], req.Question[0].Name)
+			if Debug {
+				req := new(dns.Msg)
+				if req.Unpack(d.Data) == nil && len(req.Question) > 0 {
+					zlog.Debugf("%s [Outbound-DNS] intercepted %s for %s", TAG, dns.TypeToString[req.Question[0].Qtype], req.Question[0].Name)
+				}
 			}
 			h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
 			return nil
