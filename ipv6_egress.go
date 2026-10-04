@@ -44,11 +44,13 @@ var remoteIPv6Egress = ipv6EgressTracker{
 }
 
 // These are literal IPv6 addresses on purpose: the capability probe must not
-// depend on DNS, which is one of the consumers of this result.  TCP/443 is
-// used because it is far less likely to be filtered than arbitrary ports.
+// depend on DNS, which is one of the consumers of this result. TCP/443 is used
+// because it is far less likely to be filtered than arbitrary ports. The list
+// spans three independent operators/regions to reduce false IPv4-only verdicts.
 var ipv6EgressProbeTargets = []string{
 	"[2606:4700:4700::1111]:443", // Cloudflare DNS
 	"[2001:4860:4860::8888]:443", // Google Public DNS
+	"[2400:3200::1]:443",         // AliDNS DoH (dns.alidns.com)
 }
 
 // Indirection keeps the state machine unit-testable without external network
