@@ -72,6 +72,13 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Android ARM compile smoke
+        # x/sys 在不同 Android/Linux ABI 上的 syscall 签名可能不同；宿主 amd64
+        # 编译无法发现这类问题。用无链接运行的 cross-build 在 myssh PR 内提前拦截。
+        run: |
+          env GOOS=android GOARCH=arm GOARM=7 CGO_ENABLED=0 go build ./...
+          env GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...
+
       - name: Test (race, CGO)
         # 数据竞争检测 (-race) 依赖 CGO，本机若缺少 C 编译器无法运行；
         # 在 GitHub 的 Linux runner 上开启 CGO_ENABLED=1 后即可进行竞争检测。
