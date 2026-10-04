@@ -23,6 +23,8 @@ const (
 	ipv6EgressUnknown     = -1
 	ipv6EgressUnavailable = 0
 	ipv6EgressAvailable   = 1
+
+	ipv6EgressProbeTimeout = 1500 * time.Millisecond
 )
 
 // ipv6EgressTracker describes the forwarding capability of the *remote SSH
@@ -166,18 +168,54 @@ func startIPv6EgressProbe(client *ssh.Client) {
 	}()
 }
 
+type ipv6EgressProbeResult struct {
+	target string
+	err    error
+}
+
+// probeIPv6Egress races all independent probe targets in parallel. A single
+// successful SSH direct-tcpip connection proves IPv6 egress immediately. The
+// shared deadline bounds the whole probe generation, so three unreachable
+// targets still cost about one timeout instead of three sequential timeouts.
 func probeIPv6Egress(client *ssh.Client) bool {
+	if client == nil || len(ipv6EgressProbeTargets) == 0 {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(currentEngineCtx(), ipv6EgressProbeTimeout)
+	defer cancel()
+
+	results := make(chan ipv6EgressProbeResult, len(ipv6EgressProbeTargets))
 	for _, target := range ipv6EgressProbeTargets {
-		ctx, cancel := context.WithTimeout(currentEngineCtx(), 1500*time.Millisecond)
-		err := ipv6EgressProbeDial(ctx, client, target)
-		cancel()
-		if err == nil {
-			return true
-		}
-		if Debug {
-			zlog.Debugf("%s [IPv6-Egress] probe failed target=%s err=%v", TAG, target, err)
+		target := target
+		taskTrack()
+		go func() {
+			defer taskRelease()
+			err := ipv6EgressProbeDial(ctx, client, target)
+			select {
+			case results <- ipv6EgressProbeResult{target: target, err: err}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	remaining := len(ipv6EgressProbeTargets)
+	for remaining > 0 {
+		select {
+		case result := <-results:
+			remaining--
+			if result.err == nil {
+				cancel() // abort slower probes as soon as one target succeeds
+				return true
+			}
+			if Debug {
+				zlog.Debugf("%s [IPv6-Egress] probe failed target=%s err=%v", TAG, result.target, result.err)
+			}
+		case <-ctx.Done():
+			return false
 		}
 	}
+
 	return false
 }
 
