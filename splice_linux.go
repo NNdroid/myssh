@@ -3,9 +3,10 @@
 package myssh
 
 import (
-	"golang.org/x/sys/unix"
 	"net"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Only unwrap our accounting layer over plain TCP. Never bypass TLS or SSH.
@@ -45,7 +46,12 @@ func trySplice(dst, src net.Conn) (total int64, err error, handled bool) {
 		var opErr error
 		err = sraw.Read(func(fd uintptr) bool {
 			for {
-				n, opErr = unix.Splice(int(fd), nil, pipe[1], nil, 64*1024, unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MOVE)
+				// unix.Splice's byte-count type differs across Linux/Android
+				// architectures in x/sys. Keep the inferred native return type at
+				// the call site, then normalize to int64 for accounting/looping.
+				spliced, spliceErr := unix.Splice(int(fd), nil, pipe[1], nil, 64*1024, unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MOVE)
+				n = int64(spliced)
+				opErr = spliceErr
 				if opErr == syscall.EINTR {
 					continue
 				}
@@ -71,7 +77,9 @@ func trySplice(dst, src net.Conn) (total int64, err error, handled bool) {
 			var written int64
 			err = draw.Write(func(fd uintptr) bool {
 				for {
-					written, opErr = unix.Splice(pipe[0], nil, int(fd), nil, int(n), unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MOVE)
+					spliced, spliceErr := unix.Splice(pipe[0], nil, int(fd), nil, int(n), unix.SPLICE_F_NONBLOCK|unix.SPLICE_F_MOVE)
+					written = int64(spliced)
+					opErr = spliceErr
 					if opErr == syscall.EINTR {
 						continue
 					}
