@@ -109,6 +109,25 @@ func TestOrderTCPHostsHonorsForcedProxyFamilies(t *testing.T) {
 	require.Equal(t, []string{"192.0.2.1", "2001:db8::1"}, orderTCPHosts(ips, "192.0.2.1", true))
 }
 
+func TestFilterDirectCandidatesKeepsOnlyGeoIPMatches(t *testing.T) {
+	oldRouter := globalRouter.Load()
+	r := newGeoRouter()
+	r.ipTrie.Insert(net.IPv4(192, 0, 2, 0).To4(), 24)
+	globalRouter.Store(r)
+	defer globalRouter.Store(oldRouter)
+
+	ips := []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("203.0.113.10"), net.ParseIP("2001:db8::10")}
+	got := filterDirectCandidates(ips, outboundRoute{isDirect: true})
+	require.Len(t, got, 1)
+	require.Equal(t, "192.0.2.10", got[0].String())
+}
+
+func TestFilterDirectCandidatesKeepsAllForDomainDirect(t *testing.T) {
+	ips := []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("203.0.113.10"), net.ParseIP("2001:db8::10")}
+	got := filterDirectCandidates(ips, outboundRoute{isDirect: true, domainDirect: true})
+	require.Equal(t, ips, got)
+}
+
 func TestRaceTCPDialAcceleratesAfterHardFailure(t *testing.T) {
 	secondStarted := make(chan struct{}, 1)
 	dial := func(ctx context.Context, target string) (net.Conn, error) {
