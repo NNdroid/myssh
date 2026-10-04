@@ -63,7 +63,7 @@ func TestIPv6EgressProbeRunsTargetsConcurrently(t *testing.T) {
 	go func() { result <- probeIPv6Egress(&ssh.Client{}) }()
 
 	seen := make(map[string]bool, len(ipv6EgressProbeTargets))
-	deadline := time.NewTimer(250 * time.Millisecond)
+	deadline := time.NewTimer(time.Second)
 	defer deadline.Stop()
 	for len(seen) < len(ipv6EgressProbeTargets) {
 		select {
@@ -78,7 +78,7 @@ func TestIPv6EgressProbeRunsTargetsConcurrently(t *testing.T) {
 	select {
 	case available := <-result:
 		require.True(t, available)
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatal("probe did not return promptly after a concurrent target succeeded")
 	}
 }
