@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,23 +12,6 @@ import (
 	"github.com/txthinking/socks5"
 	"golang.org/x/crypto/ssh"
 )
-
-// Unified outbound design
-//
-// SOCKS DOMAIN requests already carry the strongest possible target identity and
-// go directly into the domain-aware dial path. Transparent/TUN frontends may
-// instead hand us an IP literal; in that case recoverDomainFromDNSCache() uses
-// only DNS answers that this process actually observed. Ambiguous shared-IP
-// mappings are deliberately rejected rather than guessed.
-//
-// Once a domain is known, DIRECT and PROXY share exactly the same candidate
-// scheduler. Only the final dial primitive differs:
-//   DIRECT -> dialProtected()
-//   PROXY  -> ssh.Client.DialContext() (SSH direct-tcpip)
-//
-// UDP intentionally does not use this TCP race. A UDP connect/write cannot prove
-// end-to-end reachability, and duplicating arbitrary UDP application payloads
-// across address families is unsafe.
 
 const (
 	happyEyeballsDelay         = 250 * time.Millisecond
@@ -65,11 +47,9 @@ func parseIPLiteral(host string) (net.IP, bool) {
 	return ip, ip != nil
 }
 
-// recoverDomainFromDNSCache is the TPROXY/TUN fallback for flows whose frontend
-// only retained an IP literal. It scans the authoritative in-process DNS cache
-// on the first lookup for an IP and memoizes the result briefly. Only one unique
-// domain may own the IP during its still-valid DNS TTL window; CDN/shared-IP
-// ambiguity intentionally falls back to literal dialing.
+// recoverDomainFromDNSCache is the transparent-proxy fallback for frontends
+// that only retain an IP literal. Only one unique, still-valid DNS owner is
+// accepted. Shared CDN IPs remain literals instead of being guessed.
 func recoverDomainFromDNSCache(host string) (string, bool) {
 	ip, ok := parseIPLiteral(host)
 	if !ok {
@@ -107,9 +87,6 @@ func recoverDomainFromDNSCache(host string) (string, bool) {
 		if !matched {
 			continue
 		}
-
-		// Cache keys are FQDN + "-" + numeric qtype. Splitting from the end is
-		// safe for ordinary DNS names, including labels containing '-'.
 		sep := strings.LastIndexByte(cacheKey, '-')
 		if sep <= 0 {
 			continue
@@ -149,18 +126,15 @@ func proxyFamilyMode() string {
 }
 
 func outboundAllowedFamilies(isDirect bool) (allow4, allow6 bool) {
-	// DIRECT is intentionally auto. Public probe results are diagnostics only;
-	// they cannot prove that an internal/private address family is unavailable.
 	if isDirect {
 		return true, true
 	}
-
 	switch proxyFamilyMode() {
 	case IPv6EgressModeIPv4Only:
 		return true, false
 	case IPv6EgressModeIPv6Only:
 		return false, true
-	default: // auto and dual-stack
+	default:
 		return true, true
 	}
 }
@@ -176,9 +150,6 @@ func ipFamilyAllowed(ip net.IP, isDirect bool) bool {
 	return allow6
 }
 
-// resolveAllOutboundIPs asks the existing routed DNS engine for both families
-// concurrently. That preserves the app's local-vs-remote DNS policy and its DNS
-// cache while giving the outbound scheduler all candidates rather than only one.
 func resolveAllOutboundIPs(host string, isDirect bool) []net.IP {
 	lds := localDnsServer.Load()
 	if lds == nil || host == "" {
@@ -186,22 +157,17 @@ func resolveAllOutboundIPs(host string, isDirect bool) []net.IP {
 	}
 
 	allow4, allow6 := outboundAllowedFamilies(isDirect)
-	types := make([]uint16, 0, 2)
+	qtypes := make([]uint16, 0, 2)
 	if allow4 {
-		types = append(types, dns.TypeA)
+		qtypes = append(qtypes, dns.TypeA)
 	}
 	if allow6 {
-		types = append(types, dns.TypeAAAA)
-	}
-	if len(types) == 0 {
-		return nil
+		qtypes = append(qtypes, dns.TypeAAAA)
 	}
 
-	type familyResult struct {
-		ips []net.IP
-	}
-	results := make(chan familyResult, len(types))
-	for _, qtype := range types {
+	type familyResult struct{ ips []net.IP }
+	results := make(chan familyResult, len(qtypes))
+	for _, qtype := range qtypes {
 		qtype := qtype
 		taskTrack()
 		go func() {
@@ -213,9 +179,8 @@ func resolveAllOutboundIPs(host string, isDirect bool) []net.IP {
 				results <- familyResult{}
 				return
 			}
-			ips := extractAnswerIPs(reply)
-			filtered := ips[:0]
-			for _, ip := range ips {
+			var ips []net.IP
+			for _, ip := range extractAnswerIPs(reply) {
 				if ip == nil {
 					continue
 				}
@@ -225,15 +190,15 @@ func resolveAllOutboundIPs(host string, isDirect bool) []net.IP {
 				if qtype == dns.TypeAAAA && ip.To4() != nil {
 					continue
 				}
-				filtered = append(filtered, ip)
+				ips = append(ips, ip)
 			}
-			results <- familyResult{ips: filtered}
+			results <- familyResult{ips: ips}
 		}()
 	}
 
 	seen := make(map[string]struct{})
 	var out []net.IP
-	for range types {
+	for range qtypes {
 		for _, ip := range (<-results).ips {
 			key := ip.String()
 			if _, exists := seen[key]; exists {
@@ -257,10 +222,6 @@ func appendUniqueHost(dst []string, seen map[string]struct{}, host string) []str
 	return append(dst, host)
 }
 
-// orderTCPHosts preserves an original literal chosen by the application as the
-// first candidate (when policy allows it), then interleaves the opposite family.
-// SOCKS DOMAIN requests have no original literal, so IPv6 gets the first slot
-// and IPv4 starts after the Happy-Eyeballs delay.
 func orderTCPHosts(ips []net.IP, originalHost string, isDirect bool) []string {
 	var v4, v6 []string
 	seenIP := make(map[string]struct{})
@@ -283,27 +244,25 @@ func orderTCPHosts(ips []net.IP, originalHost string, isDirect bool) []string {
 	var ordered []string
 	seen := make(map[string]struct{})
 	originalIP, originalIsIP := parseIPLiteral(originalHost)
-	originalFamily6 := false
+	originalIsV6 := false
 	if originalIsIP && ipFamilyAllowed(originalIP, isDirect) {
-		originalFamily6 = originalIP.To4() == nil
+		originalIsV6 = originalIP.To4() == nil
 		ordered = appendUniqueHost(ordered, seen, originalIP.String())
 	}
 
-	// Strip the already-preferred original from family queues.
-	filter := func(in []string) []string {
+	filterSeen := func(in []string) []string {
 		out := in[:0]
 		for _, host := range in {
 			if _, exists := seen[host]; !exists {
 				out = append(out, host)
 			}
+		}
 		return out
 	}
-	v4 = filter(v4)
-	v6 = filter(v6)
+	v4 = filterSeen(v4)
+	v6 = filterSeen(v6)
 
-	// Alternate families. After an original literal, start with the opposite
-	// family. Without an original target, prefer IPv6 but race IPv4 shortly after.
-	preferV6 := !originalIsIP || !originalFamily6
+	preferV6 := !originalIsIP || !originalIsV6
 	for (len(v4) > 0 || len(v6) > 0) && len(ordered) < happyEyeballsMaxCandidates {
 		if preferV6 {
 			if len(v6) > 0 {
@@ -324,9 +283,6 @@ func orderTCPHosts(ips []net.IP, originalHost string, isDirect bool) []string {
 		}
 		preferV6 = !preferV6
 	}
-	if len(ordered) > happyEyeballsMaxCandidates {
-		ordered = ordered[:happyEyeballsMaxCandidates]
-	}
 	return ordered
 }
 
@@ -338,9 +294,6 @@ type tcpRaceResult struct {
 
 type tcpDialFunc func(context.Context, string) (net.Conn, error)
 
-// raceTCPDial is a bounded Happy-Eyeballs scheduler. The first candidate starts
-// immediately, later candidates are staggered by 250 ms, and a hard failure
-// accelerates the next candidate when no other attempt is still running.
 func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.Conn, string, error) {
 	if len(targets) == 0 {
 		return nil, "", fmt.Errorf("no outbound candidates")
@@ -353,9 +306,9 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 	raceCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan tcpRaceResult, len(targets))
-
 	next := 0
 	active := 0
+
 	launch := func(target string) {
 		active++
 		taskTrack()
@@ -376,11 +329,8 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 
 	var timer *time.Timer
 	var timerC <-chan time.Time
-	resetTimer := func() {
+	armTimer := func() {
 		if next >= len(targets) {
-			if timer != nil {
-				timer.Stop()
-			}
 			timerC = nil
 			return
 		}
@@ -397,7 +347,7 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 		}
 		timerC = timer.C
 	}
-	resetTimer()
+	armTimer()
 	defer func() {
 		if timer != nil {
 			timer.Stop()
@@ -416,21 +366,17 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 				return result.conn, result.target, nil
 			}
 			lastErr = result.err
-			// Nothing else is currently testing reachability: don't pay the full
-			// delay after an immediate ENETUNREACH/SSH channel-open failure.
 			if active == 0 && next < len(targets) {
 				launch(targets[next])
 				next++
-				resetTimer()
+				armTimer()
 			}
 		case <-timerC:
-			// Keep at most two connection attempts live at once. This captures the
-			// useful v4/v6 race without opening a burst of SSH channels.
 			if next < len(targets) && active < 2 {
 				launch(targets[next])
 				next++
 			}
-			resetTimer()
+			armTimer()
 		}
 	}
 	if lastErr == nil {
@@ -439,12 +385,50 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 	return nil, "", lastErr
 }
 
+type outboundRoute struct {
+	isDirect          bool
+	domainDirect      bool
+	geoIPDirectTarget string
+}
+
+func classifyOutboundRoute(host string) outboundRoute {
+	gr := globalRouter.Load()
+	if gr == nil {
+		return outboundRoute{}
+	}
+	if _, literal := parseIPLiteral(host); !literal && gr.MatchDomain(host) {
+		return outboundRoute{isDirect: true, domainDirect: true}
+	}
+	result := gr.ShouldDirect(host)
+	return outboundRoute{
+		isDirect:          result.IsDirect,
+		geoIPDirectTarget: result.DialHost,
+	}
+}
+
+func filterDirectCandidates(ips []net.IP, route outboundRoute) []net.IP {
+	if !route.isDirect || route.domainDirect {
+		return ips
+	}
+	gr := globalRouter.Load()
+	if gr == nil {
+		return nil
+	}
+	out := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if ip != nil && gr.MatchIP(ip) {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
 func unifiedTCPDial(
 	ctx context.Context,
 	cfg ProxyConfig,
 	client *ssh.Client,
 	host, port string,
-	isDirect bool,
+	route outboundRoute,
 	originalHost string,
 ) (net.Conn, string, error) {
 	if port == "" {
@@ -452,32 +436,39 @@ func unifiedTCPDial(
 	}
 
 	ip, isLiteral := parseIPLiteral(host)
-	if isLiteral && !ipFamilyAllowed(ip, isDirect) {
+	if isLiteral && !ipFamilyAllowed(ip, route.isDirect) {
 		return nil, "", fmt.Errorf("destination family disabled by outbound policy: %s", host)
 	}
 
 	var targets []string
-	if !isLiteral {
-		ips := resolveAllOutboundIPs(host, isDirect)
-		for _, candidateHost := range orderTCPHosts(ips, originalHost, isDirect) {
+	if isLiteral {
+		targets = []string{net.JoinHostPort(ip.String(), port)}
+	} else {
+		ips := resolveAllOutboundIPs(host, route.isDirect)
+		ips = filterDirectCandidates(ips, route)
+		for _, candidateHost := range orderTCPHosts(ips, originalHost, route.isDirect) {
 			targets = append(targets, net.JoinHostPort(candidateHost, port))
 		}
-		// DNS can be intentionally split or temporarily unavailable. Falling back
-		// to the domain preserves the old behavior (local resolver for DIRECT,
-		// remote SSH resolver for PROXY) instead of turning a DNS-side failure into
-		// an artificial connection failure.
-		if len(targets) == 0 {
+
+		if len(targets) == 0 && route.isDirect && route.geoIPDirectTarget != "" && route.geoIPDirectTarget != host {
+			if candidateIP, ok := parseIPLiteral(route.geoIPDirectTarget); ok && ipFamilyAllowed(candidateIP, true) {
+				targets = append(targets, net.JoinHostPort(candidateIP.String(), port))
+			}
+		}
+		if len(targets) == 0 && (!route.isDirect || route.domainDirect) {
 			targets = append(targets, net.JoinHostPort(host, port))
 		}
-	} else {
-		targets = append(targets, net.JoinHostPort(ip.String(), port))
+	}
+
+	if len(targets) == 0 {
+		return nil, "", fmt.Errorf("no eligible outbound candidates for %s", host)
 	}
 
 	overallCtx, cancel := context.WithTimeout(ctx, outboundDialTimeout)
 	defer cancel()
 
 	var dial tcpDialFunc
-	if isDirect {
+	if route.isDirect {
 		dial = func(dialCtx context.Context, target string) (net.Conn, error) {
 			return dialProtected(dialCtx, cfg, "tcp", target, 5*time.Second)
 		}
@@ -494,16 +485,12 @@ func unifiedTCPDial(
 	if err != nil {
 		return nil, "", err
 	}
-	if isDirect {
+	if route.isDirect {
 		applyTCPConfig(conn, cfg)
 	}
 	return conn, winner, nil
 }
 
-// handleUnifiedTCPConnect owns CONNECT from route decision through candidate
-// selection and relay. Keeping this in the handler decorator lets UDP retain its
-// mature single-path implementation while both VPN/TUN and root TPROXY feed the
-// same TCP outbound architecture.
 func (h *egressAwareSocksHandler) handleUnifiedTCPConnect(c *net.TCPConn, r *socks5.Request) error {
 	if h.context().Err() != nil {
 		return context.Canceled
@@ -526,7 +513,6 @@ func (h *egressAwareSocksHandler) handleUnifiedTCPConnect(c *net.TCPConn, r *soc
 	}
 	originalHost := host
 	effectiveHost := host
-
 	if _, literal := parseIPLiteral(host); literal {
 		if domain, ok := recoverDomainFromDNSCache(host); ok {
 			effectiveHost = domain
@@ -536,33 +522,28 @@ func (h *egressAwareSocksHandler) handleUnifiedTCPConnect(c *net.TCPConn, r *soc
 		}
 	}
 
-	isDirect := false
-	if gr := globalRouter.Load(); gr != nil {
-		isDirect = gr.ShouldDirect(effectiveHost).IsDirect
-	}
-
+	route := classifyOutboundRoute(effectiveHost)
 	mu.Lock()
 	client := sshClient
 	mu.Unlock()
-	if !isDirect && client == nil {
+	if !route.isDirect && client == nil {
 		rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 		_, _ = rep.WriteTo(c)
 		return fmt.Errorf("ssh client is currently reconnecting")
 	}
 
-	remote, winner, dialErr := unifiedTCPDial(h.context(), h.cfg, client, effectiveHost, port, isDirect, originalHost)
+	remote, winner, dialErr := unifiedTCPDial(h.context(), h.cfg, client, effectiveHost, port, route, originalHost)
 	if dialErr != nil {
 		rep := socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 		_, _ = rep.WriteTo(c)
 		return dialErr
 	}
-
 	if Debug {
-		route := "PROXY"
-		if isDirect {
-			route = "DIRECT"
+		routeName := "PROXY"
+		if route.isDirect {
+			routeName = "DIRECT"
 		}
-		zlog.Debugf("%s [Outbound] %s target=%s effective=%s winner=%s", TAG, route, target, effectiveHost, winner)
+		zlog.Debugf("%s [Outbound] %s target=%s effective=%s winner=%s", TAG, routeName, target, effectiveHost, winner)
 	}
 
 	remote = WrapConn(remote, target)
@@ -572,11 +553,6 @@ func (h *egressAwareSocksHandler) handleUnifiedTCPConnect(c *net.TCPConn, r *soc
 	if _, err := rep.WriteTo(c); err != nil {
 		return err
 	}
-	relayBidirectional(h.context(), c, remote, isDirect)
+	relayBidirectional(h.context(), c, remote, route.isDirect)
 	return nil
 }
-
-// Keep strconv referenced here intentionally: several downstream forks build
-// this file with additional UDP-domain helpers behind tags. A compile-time use
-// also documents that ports are treated as numeric SOCKS values before joining.
-var _ = strconv.Itoa
