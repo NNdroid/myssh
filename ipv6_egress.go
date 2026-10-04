@@ -1,0 +1,275 @@
+package myssh
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"net"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/miekg/dns"
+	"github.com/txthinking/socks5"
+	"golang.org/x/crypto/ssh"
+)
+
+const (
+	IPv6EgressModeAuto      = "auto"
+	IPv6EgressModeIPv4Only  = "ipv4-only"
+	IPv6EgressModeDualStack = "dual-stack"
+
+	ipv6EgressUnknown     = -1
+	ipv6EgressUnavailable = 0
+	ipv6EgressAvailable   = 1
+)
+
+// ipv6EgressTracker describes the forwarding capability of the *remote SSH
+// exit*, not the address family used to reach the SSH server itself.  An SSH
+// server may be reached over IPv4 and still have perfectly good IPv6 egress.
+type ipv6EgressTracker struct {
+	mu         sync.Mutex
+	mode       string
+	state      int
+	client     *ssh.Client
+	done       chan struct{}
+	doneClosed bool
+}
+
+var remoteIPv6Egress = ipv6EgressTracker{
+	mode:  IPv6EgressModeAuto,
+	state: ipv6EgressUnknown,
+	done:  make(chan struct{}),
+}
+
+// These are literal IPv6 addresses on purpose: the capability probe must not
+// depend on DNS, which is one of the consumers of this result.  TCP/443 is
+// used because it is far less likely to be filtered than arbitrary ports.
+var ipv6EgressProbeTargets = []string{
+	"[2606:4700:4700::1111]:443", // Cloudflare DNS
+	"[2001:4860:4860::8888]:443", // Google Public DNS
+}
+
+// Indirection keeps the state machine unit-testable without external network
+// access. Tests may replace this function temporarily; production always uses
+// SSH direct-tcpip through the currently connected server.
+var ipv6EgressProbeDial = func(ctx context.Context, client *ssh.Client, target string) error {
+	conn, err := client.DialContext(ctx, "tcp", target)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+type ipv6EgressJSONConfig struct {
+	Mode string `json:"ipv6_egress_mode"`
+}
+
+func normalizeIPv6EgressMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return IPv6EgressModeAuto, nil
+	case "ipv4", "ipv4-only", "ipv4_only", "v4":
+		return IPv6EgressModeIPv4Only, nil
+	case "dual", "dual-stack", "dual_stack", "dualstack", "ipv6", "v6":
+		return IPv6EgressModeDualStack, nil
+	default:
+		return "", fmt.Errorf("invalid ipv6_egress_mode %q: expected auto, ipv4-only, or dual-stack", mode)
+	}
+}
+
+// configureIPv6EgressFromJSON intentionally parses the mode separately from
+// ProxyConfig. This keeps the existing public ProxyConfig ABI stable while the
+// JSON configuration remains forward-compatible for gomobile callers.
+func configureIPv6EgressFromJSON(configJSON string) error {
+	var cfg ipv6EgressJSONConfig
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return err
+	}
+	mode, err := normalizeIPv6EgressMode(cfg.Mode)
+	if err != nil {
+		return err
+	}
+
+	remoteIPv6Egress.mu.Lock()
+	defer remoteIPv6Egress.mu.Unlock()
+	remoteIPv6Egress.mode = mode
+	remoteIPv6Egress.client = nil
+	remoteIPv6Egress.done = make(chan struct{})
+	remoteIPv6Egress.doneClosed = false
+
+	switch mode {
+	case IPv6EgressModeIPv4Only:
+		remoteIPv6Egress.state = ipv6EgressUnavailable
+		close(remoteIPv6Egress.done)
+		remoteIPv6Egress.doneClosed = true
+	case IPv6EgressModeDualStack:
+		remoteIPv6Egress.state = ipv6EgressAvailable
+		close(remoteIPv6Egress.done)
+		remoteIPv6Egress.doneClosed = true
+	default:
+		remoteIPv6Egress.state = ipv6EgressUnknown
+	}
+
+	zlog.Infof("%s [IPv6-Egress] policy=%s", TAG, mode)
+	return nil
+}
+
+func startIPv6EgressProbe(client *ssh.Client) {
+	if client == nil {
+		return
+	}
+
+	remoteIPv6Egress.mu.Lock()
+	if remoteIPv6Egress.mode != IPv6EgressModeAuto {
+		remoteIPv6Egress.mu.Unlock()
+		return
+	}
+
+	// The initial auto configuration already created an open done channel so a
+	// WaitIPv6Egress call made immediately after Start can wait across the SSH
+	// handshake. On later reconnects the previous result is complete, therefore
+	// start a fresh generation.
+	if remoteIPv6Egress.state != ipv6EgressUnknown || remoteIPv6Egress.doneClosed {
+		remoteIPv6Egress.done = make(chan struct{})
+		remoteIPv6Egress.doneClosed = false
+	}
+	remoteIPv6Egress.state = ipv6EgressUnknown
+	remoteIPv6Egress.client = client
+	remoteIPv6Egress.mu.Unlock()
+
+	taskTrack()
+	go func() {
+		defer taskRelease()
+		available := probeIPv6Egress(client)
+
+		remoteIPv6Egress.mu.Lock()
+		defer remoteIPv6Egress.mu.Unlock()
+		// Ignore a late result from an SSH client that has already been replaced.
+		if remoteIPv6Egress.mode != IPv6EgressModeAuto || remoteIPv6Egress.client != client {
+			return
+		}
+		if available {
+			remoteIPv6Egress.state = ipv6EgressAvailable
+			zlog.Infof("%s [IPv6-Egress] ✅ remote SSH exit has IPv6 connectivity", TAG)
+		} else {
+			remoteIPv6Egress.state = ipv6EgressUnavailable
+			zlog.Warnf("%s [IPv6-Egress] ⚠️ remote SSH exit is IPv4-only; proxied AAAA answers will be suppressed", TAG)
+		}
+		if !remoteIPv6Egress.doneClosed {
+			close(remoteIPv6Egress.done)
+			remoteIPv6Egress.doneClosed = true
+		}
+	}()
+}
+
+func probeIPv6Egress(client *ssh.Client) bool {
+	for _, target := range ipv6EgressProbeTargets {
+		ctx, cancel := context.WithTimeout(currentEngineCtx(), 1500*time.Millisecond)
+		err := ipv6EgressProbeDial(ctx, client, target)
+		cancel()
+		if err == nil {
+			return true
+		}
+		if Debug {
+			zlog.Debugf("%s [IPv6-Egress] probe failed target=%s err=%v", TAG, target, err)
+		}
+	}
+	return false
+}
+
+// waitIPv6EgressMs returns 1 for available, 0 for unavailable, and -1 when no
+// result became available before the timeout. Forced modes return immediately.
+func waitIPv6EgressMs(timeoutMs int) int {
+	remoteIPv6Egress.mu.Lock()
+	state := remoteIPv6Egress.state
+	done := remoteIPv6Egress.done
+	remoteIPv6Egress.mu.Unlock()
+
+	if state != ipv6EgressUnknown {
+		return state
+	}
+	if timeoutMs <= 0 {
+		return ipv6EgressUnknown
+	}
+
+	timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+		remoteIPv6Egress.mu.Lock()
+		state = remoteIPv6Egress.state
+		remoteIPv6Egress.mu.Unlock()
+		return state
+	case <-timer.C:
+		return ipv6EgressUnknown
+	}
+}
+
+func ipv6EgressStateName() string {
+	remoteIPv6Egress.mu.Lock()
+	defer remoteIPv6Egress.mu.Unlock()
+	switch remoteIPv6Egress.state {
+	case ipv6EgressAvailable:
+		return "available"
+	case ipv6EgressUnavailable:
+		return "unavailable"
+	default:
+		return "unknown"
+	}
+}
+
+func proxyIPv6EgressAvailable() bool {
+	remoteIPv6Egress.mu.Lock()
+	defer remoteIPv6Egress.mu.Unlock()
+	return remoteIPv6Egress.state == ipv6EgressAvailable
+}
+
+func shouldSuppressProxyAAAA(req *dns.Msg) bool {
+	if req == nil || len(req.Question) == 0 || req.Question[0].Qtype != dns.TypeAAAA {
+		return false
+	}
+
+	domain := strings.TrimSuffix(req.Question[0].Name, ".")
+	// Direct domains leave through the Android/device network and are unrelated
+	// to the remote SSH server's address-family capability.
+	if gr := globalRouter.Load(); gr != nil && gr.MatchDomain(domain) {
+		return false
+	}
+	return !proxyIPv6EgressAvailable()
+}
+
+func makeAAAANoDataReply(req *dns.Msg) ([]byte, error) {
+	reply := new(dns.Msg)
+	reply.SetReply(req)
+	reply.Rcode = dns.RcodeSuccess // NOERROR + empty Answer = NODATA, not NXDOMAIN.
+	reply.RecursionAvailable = true
+	return reply.Pack()
+}
+
+// egressAwareSocksHandler decorates the existing handler without changing its
+// mature TCP/UDP forwarding implementation. The only interception is an AAAA
+// DNS query that would otherwise hand an unusable IPv6 literal to an IPv4-only
+// SSH exit.
+type egressAwareSocksHandler struct {
+	*SshProxyHandler
+}
+
+func (h *egressAwareSocksHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
+	if d != nil && len(d.DstPort) == 2 && binary.BigEndian.Uint16(d.DstPort) == 53 {
+		req := new(dns.Msg)
+		if err := req.Unpack(d.Data); err == nil && shouldSuppressProxyAAAA(req) {
+			replyData, err := makeAAAANoDataReply(req)
+			if err != nil {
+				return err
+			}
+			if Debug && len(req.Question) > 0 {
+				zlog.Debugf("%s [IPv6-Egress] suppressing proxied AAAA for %s", TAG, req.Question[0].Name)
+			}
+			h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
+			return nil
+		}
+	}
+	return h.SshProxyHandler.UDPHandle(s, addr, d)
+}
