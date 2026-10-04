@@ -219,6 +219,12 @@ func (l *LocalDnsServer) tryGetPooledConn(pool *dnsConnPool) (*dns.Conn, bool) {
 }
 
 func (l *LocalDnsServer) calculateOptimalTTL(reply *dns.Msg) uint32 {
+	// lookupDNS 调用本函数时已持有 cacheMu 写锁，并会在释放该锁前
+	// 写入新的 cache entry。此处先使 IP->domain memo 失效，后续透明
+	// 连接若要恢复域名，会在获取 cacheMu 读锁后看到完整的新缓存状态。
+	// 这样共享 CDN IP 从“唯一”变为“歧义”时不会保留 30 秒旧结论。
+	resetReverseDNSMemo()
+
 	minTTL := uint32(DefaultMaxTTL)
 	for _, ans := range reply.Answer {
 		ttl := ans.Header().Ttl
@@ -287,6 +293,8 @@ func (l *LocalDnsServer) cleanupExpiredCache() {
 		}
 	}
 	if deleted > 0 {
+		// cleanup/eviction also changes the set used for unique reverse lookup.
+		resetReverseDNSMemo()
 		zlog.Debugf("%s [Cache-GC] ♻️ Cleaned up %d cache entries, remaining: %d", TAG, deleted, len(l.cache))
 	}
 }
