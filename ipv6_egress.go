@@ -28,7 +28,7 @@ const (
 )
 
 // ipv6EgressTracker describes the forwarding capability of the *remote SSH
-// exit*, not the address family used to reach the SSH server itself.  An SSH
+// exit*, not the address family used to reach the SSH server itself. An SSH
 // server may be reached over IPv4 and still have perfectly good IPv6 egress.
 type ipv6EgressTracker struct {
 	mu         sync.Mutex
@@ -124,6 +124,11 @@ func startIPv6EgressProbe(client *ssh.Client) {
 	if client == nil {
 		return
 	}
+
+	// Local DIRECT capability is independent from the remote SSH exit. Refresh
+	// it on initial connect and every reconnect so network changes eventually
+	// get a fresh protected-socket probe as well.
+	startLocalDirectIPv6Probe()
 
 	remoteIPv6Egress.mu.Lock()
 	if remoteIPv6Egress.mode != IPv6EgressModeAuto {
@@ -285,8 +290,18 @@ func isIPv6Literal(host string) bool {
 	return ip != nil && ip.To4() == nil
 }
 
+// shouldRejectProxyIPv6Literal now applies the appropriate capability source:
+// PROXY literals depend on the remote SSH exit, while DIRECT literals depend
+// on the device's protected local path. Unknown local state is intentionally
+// allowed to avoid false-negative startup caching.
 func shouldRejectProxyIPv6Literal(host string, isDirect bool) bool {
-	return !isDirect && isIPv6Literal(host) && proxyIPv6EgressUnavailable()
+	if !isIPv6Literal(host) {
+		return false
+	}
+	if isDirect {
+		return localDirectIPv6Unavailable()
+	}
+	return proxyIPv6EgressUnavailable()
 }
 
 func shouldSuppressProxyAAAA(req *dns.Msg) bool {
@@ -295,10 +310,10 @@ func shouldSuppressProxyAAAA(req *dns.Msg) bool {
 	}
 
 	domain := strings.TrimSuffix(req.Question[0].Name, ".")
-	// Direct domains leave through the Android/device network and are unrelated
-	// to the remote SSH server's address-family capability.
+	// DIRECT domains use the Android/device network, so their AAAA eligibility
+	// follows local protected-socket IPv6 reachability rather than the SSH exit.
 	if gr := globalRouter.Load(); gr != nil && gr.MatchDomain(domain) {
-		return false
+		return localDirectIPv6Unavailable()
 	}
 	return !proxyIPv6EgressAvailable()
 }
@@ -312,9 +327,9 @@ func makeAAAANoDataReply(req *dns.Msg) ([]byte, error) {
 }
 
 // egressAwareSocksHandler decorates the existing handler without changing its
-// mature TCP/UDP forwarding implementation. It suppresses unusable proxied
-// AAAA answers and fail-fast rejects proxied IPv6 literal CONNECTs once the
-// remote SSH exit is known to have no IPv6 egress.
+// mature TCP/UDP forwarding implementation. It chooses local-vs-remote IPv6
+// capability according to the routing decision before suppressing AAAA or
+// fail-fast rejecting an IPv6 literal CONNECT.
 type egressAwareSocksHandler struct {
 	*SshProxyHandler
 }
@@ -333,14 +348,20 @@ func (h *egressAwareSocksHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r 
 		}
 
 		if shouldRejectProxyIPv6Literal(host, isDirect) {
+			scope := "remote SSH exit"
+			logTag := "IPv6-Egress"
+			if isDirect {
+				scope = "local DIRECT path"
+				logTag = "IPv6-Direct"
+			}
 			if Debug {
-				zlog.Debugf("%s [IPv6-Egress] rejecting proxied IPv6 literal on IPv4-only exit: %s", TAG, target)
+				zlog.Debugf("%s [%s] rejecting IPv6 literal because %s has no IPv6 connectivity: %s", TAG, logTag, scope, target)
 			}
 			rep := socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
 			if c != nil {
 				_, _ = rep.WriteTo(c)
 			}
-			return fmt.Errorf("remote SSH exit has no IPv6 egress for literal target %s", target)
+			return fmt.Errorf("%s has no IPv6 connectivity for literal target %s", scope, target)
 		}
 	}
 	return h.SshProxyHandler.TCPHandle(s, c, r)
@@ -355,7 +376,7 @@ func (h *egressAwareSocksHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr,
 				return err
 			}
 			if Debug && len(req.Question) > 0 {
-				zlog.Debugf("%s [IPv6-Egress] suppressing proxied AAAA for %s", TAG, req.Question[0].Name)
+				zlog.Debugf("%s [IPv6] suppressing unusable AAAA for %s", TAG, req.Question[0].Name)
 			}
 			h.sendSocks5UDPResponse(s, addr, d.Atyp, d.DstAddr, d.DstPort, replyData)
 			return nil
