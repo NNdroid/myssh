@@ -39,6 +39,50 @@ func TestIPv6EgressProbeTargetsIncludeAliDNS(t *testing.T) {
 	require.Contains(t, ipv6EgressProbeTargets, "[2400:3200::1]:443")
 }
 
+func TestIPv6EgressProbeRunsTargetsConcurrently(t *testing.T) {
+	oldProbe := ipv6EgressProbeDial
+	started := make(chan string, len(ipv6EgressProbeTargets))
+	releaseAliDNS := make(chan struct{})
+
+	ipv6EgressProbeDial = func(ctx context.Context, client *ssh.Client, target string) error {
+		started <- target
+		if target == "[2400:3200::1]:443" {
+			select {
+			case <-releaseAliDNS:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	defer func() { ipv6EgressProbeDial = oldProbe }()
+
+	result := make(chan bool, 1)
+	go func() { result <- probeIPv6Egress(&ssh.Client{}) }()
+
+	seen := make(map[string]bool, len(ipv6EgressProbeTargets))
+	deadline := time.NewTimer(250 * time.Millisecond)
+	defer deadline.Stop()
+	for len(seen) < len(ipv6EgressProbeTargets) {
+		select {
+		case target := <-started:
+			seen[target] = true
+		case <-deadline.C:
+			t.Fatalf("probe targets were not started concurrently: started=%v", seen)
+		}
+	}
+
+	close(releaseAliDNS)
+	select {
+	case available := <-result:
+		require.True(t, available)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("probe did not return promptly after a concurrent target succeeded")
+	}
+}
+
 func TestIPv6EgressForcedModesReturnImmediately(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
 
