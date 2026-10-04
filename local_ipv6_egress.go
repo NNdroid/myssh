@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// localDirectIPv6Tracker describes IPv6 reachability of the Android/device
-// network used by DIRECT traffic. It is deliberately independent from the
-// remote SSH exit capability: either side may have IPv6 while the other does
-// not.
+// localDirectIPv6Tracker records a diagnostic observation of public IPv6
+// reachability on the Android/device network used by DIRECT traffic. It does
+// not gate forwarding: private/ULA/enterprise IPv6 may still be reachable even
+// when all public probe targets fail.
 type localDirectIPv6Tracker struct {
 	mu         sync.Mutex
 	state      int
@@ -23,8 +23,8 @@ var localDirectIPv6 = localDirectIPv6Tracker{
 	done:  make(chan struct{}),
 }
 
-// Injectable for tests. Production uses a protected socket so the probe leaves
-// through the device's underlying network instead of looping back into the VPN.
+// Injectable for tests. Production uses a protected socket so the diagnostic
+// probe leaves through the device's underlying network instead of the VPN.
 var localDirectIPv6ProbeDial = func(ctx context.Context, target string) error {
 	conn, err := dialProtected(ctx, ProxyConfig{}, "tcp", target, ipv6EgressProbeTimeout)
 	if err != nil {
@@ -47,10 +47,9 @@ func resetLocalDirectIPv6State() {
 	localDirectIPv6.doneClosed = false
 }
 
-// startLocalDirectIPv6Probe refreshes the DIRECT-path capability. It is called
-// whenever the SSH connection becomes usable, which covers initial startup and
-// subsequent reconnects. A generation number prevents a late result from an
-// older probe from overwriting a newer one.
+// startLocalDirectIPv6Probe refreshes diagnostics on initial connect and later
+// reconnects. A generation prevents stale probe results from overwriting a
+// newer observation after an underlying-network change.
 func startLocalDirectIPv6Probe() {
 	localDirectIPv6.mu.Lock()
 	localDirectIPv6.generation++
@@ -72,10 +71,10 @@ func startLocalDirectIPv6Probe() {
 		}
 		if available {
 			localDirectIPv6.state = ipv6EgressAvailable
-			zlog.Infof("%s [IPv6-Direct] ✅ local DIRECT path has IPv6 connectivity", TAG)
+			zlog.Infof("%s [IPv6-Direct] ✅ diagnostic: local public IPv6 reachable", TAG)
 		} else {
 			localDirectIPv6.state = ipv6EgressUnavailable
-			zlog.Warnf("%s [IPv6-Direct] ⚠️ local DIRECT path has no IPv6 connectivity; DIRECT AAAA/literals will fail fast", TAG)
+			zlog.Warnf("%s [IPv6-Direct] ⚠️ diagnostic: local public IPv6 not confirmed; target-specific DIRECT IPv6 remains allowed", TAG)
 		}
 		if !localDirectIPv6.doneClosed {
 			close(localDirectIPv6.done)
@@ -84,9 +83,9 @@ func startLocalDirectIPv6Probe() {
 	}()
 }
 
-// probeLocalDirectIPv6 races the same independent IPv6:443 targets used by the
-// remote probe, but through dialProtected(). One success proves local IPv6;
-// three failures (or the shared deadline) mark the DIRECT path unavailable.
+// probeLocalDirectIPv6 races the same public IPv6:443 targets used by the
+// remote diagnostic, but through dialProtected(). One success proves public
+// IPv6 reachability; all failures only mean that public IPv6 was not confirmed.
 func probeLocalDirectIPv6() bool {
 	if len(ipv6EgressProbeTargets) == 0 {
 		return false
@@ -120,13 +119,12 @@ func probeLocalDirectIPv6() bool {
 				return true
 			}
 			if Debug {
-				zlog.Debugf("%s [IPv6-Direct] probe failed target=%s err=%v", TAG, result.target, result.err)
+				zlog.Debugf("%s [IPv6-Direct] diagnostic probe failed target=%s err=%v", TAG, result.target, result.err)
 			}
 		case <-ctx.Done():
 			return false
 		}
 	}
-
 	return false
 }
 
@@ -174,14 +172,14 @@ func waitLocalDirectIPv6Ms(timeoutMs int) int {
 	}
 }
 
-// WaitDirectIPv6 waits for the local DIRECT-path IPv6 capability probe.
-// Return values: 1 = available, 0 = unavailable, -1 = unknown/timeout.
+// WaitDirectIPv6 waits for the local public-IPv6 diagnostic probe.
+// Return values: 1 = observed available, 0 = not confirmed, -1 = unknown/timeout.
 func (p *SshTProxy) WaitDirectIPv6(timeoutMs int) int {
 	return waitLocalDirectIPv6Ms(timeoutMs)
 }
 
-// GetDirectIPv6State returns available, unavailable, or unknown for DIRECT
-// traffic on the device network.
+// GetDirectIPv6State returns the diagnostic observation: available,
+// unavailable (not confirmed), or unknown. It is not a forwarding policy.
 func (p *SshTProxy) GetDirectIPv6State() string {
 	return localDirectIPv6StateName()
 }

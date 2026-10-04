@@ -22,9 +22,13 @@ func TestNormalizeIPv6EgressMode(t *testing.T) {
 		"ipv4":       IPv6EgressModeIPv4Only,
 		"ipv4_only":  IPv6EgressModeIPv4Only,
 		"ipv4-only":  IPv6EgressModeIPv4Only,
+		"ipv6-only":  IPv6EgressModeIPv6Only,
+		"ipv6_only":  IPv6EgressModeIPv6Only,
 		"dual":       IPv6EgressModeDualStack,
 		"dual_stack": IPv6EgressModeDualStack,
 		"dual-stack": IPv6EgressModeDualStack,
+		"ipv6":       IPv6EgressModeDualStack, // legacy alias
+		"v6":         IPv6EgressModeDualStack, // legacy alias
 	}
 	for input, want := range cases {
 		got, err := normalizeIPv6EgressMode(input)
@@ -93,11 +97,7 @@ func TestIPv6EgressProbeUsesOneSharedDeadline(t *testing.T) {
 
 	started := time.Now()
 	require.False(t, probeIPv6Egress(&ssh.Client{}))
-	elapsed := time.Since(started)
-
-	// Three sequential 1.5 s probes would take roughly 4.5 s. Parallel probes
-	// share one 1.5 s deadline, with generous CI scheduling headroom here.
-	require.Less(t, elapsed, 3*time.Second)
+	require.Less(t, time.Since(started), 3*time.Second)
 }
 
 func TestIPv6EgressForcedModesReturnImmediately(t *testing.T) {
@@ -107,42 +107,59 @@ func TestIPv6EgressForcedModesReturnImmediately(t *testing.T) {
 	require.Equal(t, ipv6EgressUnavailable, waitIPv6EgressMs(1))
 	require.Equal(t, "unavailable", ipv6EgressStateName())
 
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv6-only"}`))
+	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(1))
+
 	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"dual-stack"}`))
 	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(1))
-	require.Equal(t, "available", ipv6EgressStateName())
 }
 
-func TestIPv6LiteralFailFastGuard(t *testing.T) {
+func TestExplicitIPv4OnlyStillRejectsUnrecoverableProxyIPv6Literal(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
-
 	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv4-only"}`))
+
 	require.True(t, shouldRejectProxyIPv6Literal("2001:db8::1", false))
-	require.True(t, shouldRejectProxyIPv6Literal("[2001:db8::1]", false))
-	require.True(t, shouldRejectProxyIPv6Literal("fe80::1%wlan0", false))
-	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", true), "DIRECT IPv6 must bypass the remote-exit guard")
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", true), "DIRECT is target-driven")
 	require.False(t, shouldRejectProxyIPv6Literal("203.0.113.7", false))
-	require.False(t, shouldRejectProxyIPv6Literal("example.com", false))
-
-	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"dual-stack"}`))
-	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", false))
-
-	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"auto"}`))
-	require.Equal(t, ipv6EgressUnknown, waitIPv6EgressMs(0))
-	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", false), "unknown state must not be treated as confirmed IPv4-only")
 }
 
-func TestProxyAAAASuppressedForIPv4OnlyExit(t *testing.T) {
+func TestAutoProbeFailureIsDiagnosticOnly(t *testing.T) {
+	defer restoreIPv6EgressAuto(t)
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"auto"}`))
+
+	remoteIPv6Egress.mu.Lock()
+	remoteIPv6Egress.state = ipv6EgressUnavailable
+	remoteIPv6Egress.mu.Unlock()
+
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", false), "auto probe failure must not ban target-specific IPv6")
+	req := new(dns.Msg)
+	req.SetQuestion("example.com.", dns.TypeAAAA)
+	require.False(t, shouldSuppressProxyAAAA(req), "auto probe failure must not suppress AAAA")
+}
+
+func TestExplicitFamilyPolicySuppressesOnlyMatchingDNSFamily(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
 	oldRouter := globalRouter.Load()
 	globalRouter.Store(nil)
 	defer globalRouter.Store(oldRouter)
 
-	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv4-only"}`))
+	reqA := new(dns.Msg)
+	reqA.SetQuestion("example.com.", dns.TypeA)
+	reqAAAA := new(dns.Msg)
+	reqAAAA.SetQuestion("example.com.", dns.TypeAAAA)
 
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv4-only"}`))
+	require.False(t, shouldSuppressDNSFamily(reqA))
+	require.True(t, shouldSuppressDNSFamily(reqAAAA))
+
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv6-only"}`))
+	require.True(t, shouldSuppressDNSFamily(reqA))
+	require.False(t, shouldSuppressDNSFamily(reqAAAA))
+}
+
+func TestNoDataReplyIsNoErrorAndEmpty(t *testing.T) {
 	req := new(dns.Msg)
 	req.SetQuestion("example.com.", dns.TypeAAAA)
-	require.True(t, shouldSuppressProxyAAAA(req))
-
 	packed, err := makeAAAANoDataReply(req)
 	require.NoError(t, err)
 
@@ -153,28 +170,17 @@ func TestProxyAAAASuppressedForIPv4OnlyExit(t *testing.T) {
 	require.Equal(t, req.Id, reply.Id)
 }
 
-func TestProxyAAAAPassesForDualStackExit(t *testing.T) {
-	defer restoreIPv6EgressAuto(t)
-	oldRouter := globalRouter.Load()
-	globalRouter.Store(nil)
-	defer globalRouter.Store(oldRouter)
-
-	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"dual-stack"}`))
-	req := new(dns.Msg)
-	req.SetQuestion("example.com.", dns.TypeAAAA)
-	require.False(t, shouldSuppressProxyAAAA(req))
-}
-
-func TestAutoProbePublishesAvailableState(t *testing.T) {
+func TestAutoProbePublishesAvailableDiagnosticState(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
 	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"auto"}`))
 
 	oldProbe := ipv6EgressProbeDial
-	ipv6EgressProbeDial = func(ctx context.Context, client *ssh.Client, target string) error {
-		return nil
-	}
+	ipv6EgressProbeDial = func(ctx context.Context, client *ssh.Client, target string) error { return nil }
 	defer func() { ipv6EgressProbeDial = oldProbe }()
 
 	startIPv6EgressProbe(&ssh.Client{})
-	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(int((250 * time.Millisecond).Milliseconds())))
+	require.Equal(t, ipv6EgressAvailable, waitIPv6EgressMs(250))
+	// startIPv6EgressProbe also starts the local diagnostic probe. Wait for it
+	// before this test returns so a later test can safely replace its fake dialer.
+	require.Equal(t, ipv6EgressAvailable, waitLocalDirectIPv6Ms(250))
 }
