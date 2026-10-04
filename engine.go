@@ -54,6 +54,12 @@ func startSshTProxy(configJson string) int {
 		emitState(StateError, err.Error())
 		return -1
 	}
+	if err := configureIPv6EgressFromJSON(configJson); err != nil {
+		zlog.Errorf("%s [IPv6-Egress] ❌ Invalid policy: %v", TAG, err)
+		emitError(-1, err.Error())
+		emitState(StateError, err.Error())
+		return -1
+	}
 
 	var ctx context.Context
 	if err := validatePerformanceConfig(cfg); err != nil {
@@ -90,12 +96,13 @@ func startSshTProxy(configJson string) int {
 	socksServer = srv
 	mu.Unlock()
 
-	handler := &SshProxyHandler{
+	baseHandler := &SshProxyHandler{
 		ctx:          ctx,
 		cfg:          cfg,
 		UdpgwAddr:    cfg.UdpgwAddr, // 按 config 配置，空串则禁用 UDPGW
 		UdpgwVersion: cfg.UdpgwVersion,
 	}
+	handler := &egressAwareSocksHandler{SshProxyHandler: baseHandler}
 
 	if err := prepareSocksServer(ctx, srv); err != nil {
 		stopEngine()
@@ -169,6 +176,7 @@ func startSshTProxy(configJson string) int {
 			}
 			sshClient = client
 			mu.Unlock()
+			startIPv6EgressProbe(client)
 			zlog.Infof("%s [AutoSSH] ✅ SSH tunnel established successfully, global traffic taken over!", TAG)
 			emitState(StateConnected, cfg.SshAddr)
 			emitNodeEvent(cfg.SshAddr, NodeEventConnected, "")
