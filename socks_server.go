@@ -70,7 +70,16 @@ type udpJob struct {
 	data   []byte
 }
 
-func serveSocks(ctx context.Context, s *socks5.Server, h *SshProxyHandler) error {
+// socksRequestHandler is intentionally small so the production handler can be
+// decorated with cross-cutting policy (for example IPv6 egress capability)
+// without duplicating the mature forwarding implementation.
+type socksRequestHandler interface {
+	TCPHandle(*socks5.Server, *net.TCPConn, *socks5.Request) error
+	UDPHandle(*socks5.Server, *net.UDPAddr, *socks5.Datagram) error
+	reapUDPSessions(context.Context)
+}
+
+func serveSocks(ctx context.Context, s *socks5.Server, h socksRequestHandler) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	value, _ := preparedSocks.Load(s)
