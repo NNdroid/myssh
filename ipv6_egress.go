@@ -185,13 +185,17 @@ func probeIPv6Egress(client *ssh.Client) bool {
 	ctx, cancel := context.WithTimeout(currentEngineCtx(), ipv6EgressProbeTimeout)
 	defer cancel()
 
+	// Snapshot the injectable dialer before workers start. Besides keeping each
+	// probe generation internally consistent, this avoids racing test-time
+	// replacement of ipv6EgressProbeDial against worker goroutines.
+	probeDial := ipv6EgressProbeDial
 	results := make(chan ipv6EgressProbeResult, len(ipv6EgressProbeTargets))
 	for _, target := range ipv6EgressProbeTargets {
 		target := target
 		taskTrack()
 		go func() {
 			defer taskRelease()
-			err := ipv6EgressProbeDial(ctx, client, target)
+			err := probeDial(ctx, client, target)
 			select {
 			case results <- ipv6EgressProbeResult{target: target, err: err}:
 			case <-ctx.Done():
