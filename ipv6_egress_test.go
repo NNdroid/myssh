@@ -17,18 +17,18 @@ func restoreIPv6EgressAuto(t *testing.T) {
 
 func TestNormalizeIPv6EgressMode(t *testing.T) {
 	cases := map[string]string{
-		"":            IPv6EgressModeAuto,
-		"auto":        IPv6EgressModeAuto,
-		"ipv4":        IPv6EgressModeIPv4Only,
-		"ipv4_only":   IPv6EgressModeIPv4Only,
-		"ipv4-only":   IPv6EgressModeIPv4Only,
-		"ipv6-only":   IPv6EgressModeIPv6Only,
-		"ipv6_only":   IPv6EgressModeIPv6Only,
-		"dual":        IPv6EgressModeDualStack,
-		"dual_stack":  IPv6EgressModeDualStack,
-		"dual-stack":  IPv6EgressModeDualStack,
-		"ipv6":        IPv6EgressModeDualStack, // legacy alias
-		"v6":          IPv6EgressModeDualStack, // legacy alias
+		"":           IPv6EgressModeAuto,
+		"auto":       IPv6EgressModeAuto,
+		"ipv4":       IPv6EgressModeIPv4Only,
+		"ipv4_only":  IPv6EgressModeIPv4Only,
+		"ipv4-only":  IPv6EgressModeIPv4Only,
+		"ipv6-only":  IPv6EgressModeIPv6Only,
+		"ipv6_only":  IPv6EgressModeIPv6Only,
+		"dual":       IPv6EgressModeDualStack,
+		"dual_stack": IPv6EgressModeDualStack,
+		"dual-stack": IPv6EgressModeDualStack,
+		"ipv6":       IPv6EgressModeDualStack, // legacy alias
+		"v6":         IPv6EgressModeDualStack, // legacy alias
 	}
 	for input, want := range cases {
 		got, err := normalizeIPv6EgressMode(input)
