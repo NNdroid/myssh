@@ -112,6 +112,25 @@ func TestIPv6EgressForcedModesReturnImmediately(t *testing.T) {
 	require.Equal(t, "available", ipv6EgressStateName())
 }
 
+func TestIPv6LiteralFailFastGuard(t *testing.T) {
+	defer restoreIPv6EgressAuto(t)
+
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"ipv4-only"}`))
+	require.True(t, shouldRejectProxyIPv6Literal("2001:db8::1", false))
+	require.True(t, shouldRejectProxyIPv6Literal("[2001:db8::1]", false))
+	require.True(t, shouldRejectProxyIPv6Literal("fe80::1%wlan0", false))
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", true), "DIRECT IPv6 must bypass the remote-exit guard")
+	require.False(t, shouldRejectProxyIPv6Literal("203.0.113.7", false))
+	require.False(t, shouldRejectProxyIPv6Literal("example.com", false))
+
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"dual-stack"}`))
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", false))
+
+	require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"auto"}`))
+	require.Equal(t, ipv6EgressUnknown, waitIPv6EgressMs(0))
+	require.False(t, shouldRejectProxyIPv6Literal("2001:db8::1", false), "unknown state must not be treated as confirmed IPv4-only")
+}
+
 func TestProxyAAAASuppressedForIPv4OnlyExit(t *testing.T) {
 	defer restoreIPv6EgressAuto(t)
 	oldRouter := globalRouter.Load()
