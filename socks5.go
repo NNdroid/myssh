@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,38 @@ import (
 
 // 本文件实现 SOCKS5 入站处理：TCP CONNECT 中继（直连/代理分流）、
 // UDP 关联转发（直连 NAT / UDPGW 隧道）与 DNS 劫持。
+
+// directDialLogTimes 直连拨号失败日志的抑制表：目标 -> 上次记录时间。
+// 组播/链路本地这类目标直连 UDP 永远建不起来（UDP 组播地址不能 connect()），
+// 而 mDNS / SSDP 一轮下来就是同址连续几十个包，逐条记 ERROR 会把日志刷成单一
+// 地址的海量重复。窗口与容量上限复用 georouter.go 的 rateLimitedLog*。
+var (
+	directDialLogTimes sync.Map
+	directDialLogCount atomic.Int64
+)
+
+// logDirectDialFailure 按目标去重地记一条直连拨号失败：同一目标在
+// rateLimitedLogInterval 内只记一次。失败本身不吞 —— 调用方仍要 return err。
+func logDirectDialFailure(target string, err error) {
+	if directDialLogCount.Load() > rateLimitedLogMaxKeys {
+		directDialLogTimes.Range(func(k, _ interface{}) bool {
+			directDialLogTimes.Delete(k)
+			return true
+		})
+		directDialLogCount.Store(0)
+	}
+
+	now := time.Now()
+	if prev, ok := directDialLogTimes.LoadOrStore(target, now); ok {
+		if now.Sub(prev.(time.Time)) < rateLimitedLogInterval {
+			return
+		}
+		directDialLogTimes.Store(target, now)
+	} else {
+		directDialLogCount.Add(1)
+	}
+	zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP -> %s: %v", TAG, target, err)
+}
 
 type SshProxyHandler struct {
 	ctx          context.Context
@@ -255,7 +288,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		} else {
 			rawConn, err := dialProtected(h.context(), h.cfg, "udp", directTarget, 5*time.Second)
 			if err != nil {
-				zlog.Errorf("%s [ROUTER-Direct] ❌ Failed to establish direct UDP: %v", TAG, err)
+				logDirectDialFailure(directTarget, err)
 				return err
 			}
 
