@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // socketMarkClient 与 root 侧的 `sockmark` 辅助进程通信，请求为隧道 socket 打 SO_MARK。
@@ -35,14 +36,18 @@ import (
 // helper 由 App 侧（Kotlin, root shell）以 `sockmark <app_pid>` 启动，通过一对 pipe 与之通信。
 // 本文件只负责在拿到 socket fd 后发请求并等 ACK；helper 挂了会自动懒重启。
 type socketMarkClient struct {
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    *os.File // 写请求
-	stdout   *bufio.Reader
-	exePath  string
-	appPID   int
-	markVal  int
-	disabled bool // helper 不可用时置位，避免每次拨号都重试拖慢
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	stdin   *os.File // 写请求
+	stdout  *bufio.Reader
+	exePath string
+	appPID  int
+	markVal int
+	// 一次失败后进入冷却窗口的到期时刻。冷却期内 markSocketFD 直接跳过请求，
+	// 避免拨号洪峰下每次拨号都 fork 一次 helper；窗口到期后的下一次请求会经
+	// ensureLocked 惰性重拉 helper —— 因此失败是「临时降级 + 自动恢复」，
+	// 而不是旧实现那种「一次失败就把整个会话的 mark 永久关掉（c.disabled 置位）」。
+	cooldownUntil time.Time
 }
 
 var (
@@ -60,6 +65,13 @@ func RegisterSocketMarkHelper(exePath string, appPID int64, mark int64) {
 	globalMarkClientMu.Lock()
 	defer globalMarkClientMu.Unlock()
 
+	// 先回收旧的 client，避免 helper 进程 / 管道泄漏。旧 client 此刻已脱离
+	// globalMarkClient，其他 goroutine 即便还攥着旧引用，Close() 也会等它释放
+	// c.mu 后再回收——没有任何路径在持 c.mu 时去抢 globalMarkClientMu，故不死锁。
+	if old := globalMarkClient; old != nil {
+		old.Close()
+	}
+
 	if exePath == "" || mark == 0 {
 		globalMarkClient = nil
 		zlog.Infof("%s [Mark] ⚠️ Socket mark helper disabled (exe=%q mark=%d)", TAG, exePath, mark)
@@ -76,20 +88,41 @@ func RegisterSocketMarkHelper(exePath string, appPID int64, mark int64) {
 	zlog.Infof("%s [Mark] 🔧 Socket mark helper registered (exe=%s pid=%d mark=0x%x)", TAG, exePath, appPID, mark)
 }
 
+// markCooldown 是「一次失败后多久内不再重试」的冷却窗口。
+//
+// 为什么不是永久禁用：旧实现首失败即把 c.disabled 置位、整个会话再也不打 mark，
+// 等于把「tproxy 模式下隧道 socket 该被 mark 放行」这个功能废掉（隧道流量被 TPROXY
+// 抓回、回环或回落成 uid 直连）。而本进程每次拨号都会惰性重试——所以只给一个冷却窗口：
+// 窗口内跳过请求（避免每次拨号都 fork 一次 helper），窗口到期后下一次请求经
+// ensureLocked 重新拉起它。失败就续冷却、成功则恢复正常：既自愈，又不在拨号洪峰下疯狂 fork。
+const markCooldown = 5 * time.Second
+
 // markSocketFD 请求为指定 fd 打 mark。失败只记录日志、绝不中断拨号 ——
 // 隧道能不能建起来不取决于 mark，mark 只决定"是否被 TPROXY 抓"。
 func markSocketFD(fd uintptr) {
 	globalMarkClientMu.Lock()
 	c := globalMarkClient
 	globalMarkClientMu.Unlock()
-	if c == nil || c.disabled {
+	if c == nil {
 		return
 	}
+
+	// 读冷却状态要单独加锁：request() 内部也要抢 c.mu，而 sync.Mutex 不可重入，
+	// 不能把 c.mu 一路持到 request() 里。
+	c.mu.Lock()
+	onCooldown := time.Now().Before(c.cooldownUntil)
+	c.mu.Unlock()
+	if onCooldown {
+		return
+	}
+
 	if err := c.request(fd); err != nil {
-		// 连不上 helper（没启动 / 已退出）时标记为不可用，避免每次拨号都 fork 一次。
-		// 下次连接时 RegisterSocketMarkHelper 会重新建立。
-		zlog.Warnf("%s [Mark] ⚠️ mark request failed (fd=%d): %v — further marks disabled for this session", TAG, fd, err)
-		c.disable()
+		// request() 失败时已经把 helper 关掉（closeLocked），所以下一窗口到期后
+		// ensureLocked 会重新拉起它——这是设计内的自愈，而非永久降级。
+		zlog.Warnf("%s [Mark] ⚠️ mark request failed (fd=%d): %v — backing off %s, helper will be lazily re-spawned", TAG, fd, err, markCooldown)
+		c.mu.Lock()
+		c.cooldownUntil = time.Now().Add(markCooldown)
+		c.mu.Unlock()
 	}
 }
 
@@ -248,10 +281,12 @@ func (c *socketMarkClient) readBackMark(fd uintptr) (int64, error) {
 	return int64(v), nil
 }
 
-func (c *socketMarkClient) disable() {
+// Close 释放 helper 进程与管道。供 RegisterSocketMarkHelper 在替换旧 client 时回收，
+// 此时旧 client 已脱离 globalMarkClient，且没有任何路径在持 c.mu 时去抢
+// globalMarkClientMu，所以即便有在途请求正持 c.mu，Close() 也只是等它释放后再回收，不致死锁。
+func (c *socketMarkClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.disabled = true
 	c.closeLocked()
 }
 
