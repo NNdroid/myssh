@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/txthinking/socks5"
@@ -207,12 +208,22 @@ func startSshTProxy(configJson string) int {
 			mu.Unlock()
 
 			killActiveProxyConnections()
-			udpgwMap.Range(func(k, v any) bool {
-				if udpgwMap.CompareAndDelete(k, v) {
-					v.(net.Conn).Close()
-				}
-				return true
-			})
+			// ⚠️ udpNatMap 必须与 udpgwMap 一起清。它是「直连 UDP 会话」的表，
+			// 与 SSH 无关（流量不过隧道），所以旧代码只在 stopEngine 里清它 ——
+			// 而回收器 sweepUDPSessions 按 c.owner == h 过滤，重连后新 handler
+			// 压根不认旧会话。结果是每断线一次，这批会话就永久泄漏、连接数只涨不落。
+			// tproxy 模式把局域网/mDNS/私有段的 UDP 全劫持进来，这批会话量极大，
+			// 泄漏几次就能把「活跃连接数」顶到几十倍。
+			for _, m := range []*sync.Map{&udpNatMap, &udpgwMap} {
+				m.Range(func(k, v any) bool {
+					if m.CompareAndDelete(k, v) {
+						if conn, ok := v.(net.Conn); ok {
+							conn.Close()
+						}
+					}
+					return true
+				})
+			}
 
 			select {
 			case <-ctx.Done():

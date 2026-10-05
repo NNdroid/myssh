@@ -81,7 +81,12 @@ func (h *SshProxyHandler) sweepUDPSessions(now time.Time, idle time.Duration, cl
 	for _, m := range []*sync.Map{&udpNatMap, &udpgwMap} {
 		m.Range(func(k, v any) bool {
 			c, ok := v.(*udpSession)
-			if ok && c.owner == h && (closeAll || now.Sub(time.Unix(0, c.lastActivity.Load())) >= idle) {
+			// ⚠️ 刻意**不**按 c.owner == h 过滤。两张表都是进程级单例，而回收判据是
+			// 「已空闲 idle」，与会话属于哪个 handler 无关。加了 owner 过滤后，
+			// SSH 重连换 handler 会让旧会话永远没人回收 —— 它们在表里躺着、
+			// 计数不减、socket 不关，几次重连就把连接数顶到几十倍。
+			// Close() 内部走的是 c.owner.sessions.Add(-1)，计数仍归原 handler，不受影响。
+			if ok && (closeAll || now.Sub(time.Unix(0, c.lastActivity.Load())) >= idle) {
 				if m.CompareAndDelete(k, c) {
 					c.Close()
 				}

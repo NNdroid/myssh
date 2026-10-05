@@ -142,7 +142,7 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 		}
 
 		// --- Wrap the outbound connection ---
-		remote = WrapConn(remote, target)
+		remote = WrapConnKind(remote, target, "tcp")
 		// ------------------------------------
 
 		defer remote.Close()
@@ -293,7 +293,11 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			}
 
 			// --- Wrap the outbound connection ---
-			uc, err = h.newUDPSession(WrapConn(rawConn, directTarget))
+			// ⚠️ 必须显式标 "udp-direct"：这条会话是**本机直连**转发出去的，压根不过
+			// 隧道。目标串只是一个普通 host:port，protocolOfTarget 分辨不出它和 TCP
+			// 的区别 —— 漏标的话，tproxy 劫持进来的局域网/mDNS/私有段流量会被算成
+			// TCP 隧道连接，「连接数暴涨」就再也查不出真正原因。
+			uc, err = h.newUDPSession(WrapConnKind(rawConn, directTarget, "udp-direct"))
 			if err != nil {
 				return err
 			}
@@ -418,7 +422,7 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 			}
 
 			// --- Wrap the UDPGW connection ---
-			dconn, derr2 = h.newUDPSession(WrapConn(dconn, fmt.Sprintf("UDPGW->%s", targetAddrStr)))
+			dconn, derr2 = h.newUDPSession(WrapConnKind(dconn, fmt.Sprintf("UDPGW->%s", targetAddrStr), "udp-proxy"))
 			if derr2 != nil {
 				return nil, derr2
 			}
