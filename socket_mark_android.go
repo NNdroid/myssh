@@ -104,29 +104,148 @@ func markSocketFD(fd uintptr) {
 // 实现上造一个真实的 AF_INET socket 并请 helper 打 mark —— 只做 setsockopt，不 connect、
 // 不发包，因此不产生任何网络流量。
 //
+// 诊断分四段打日志（[Mark-Diag] 前缀，便于 `adb logcat | grep Mark-Diag` 一把捞全）：
+//
+//	阶段 1  自身能力：euid / helper 二进制存在性与可执行位 / 各 su 候选路径的探测结果
+//	阶段 2  helper 能否以 root 起来：实际用的 su 路径、helper pid
+//	阶段 3  协议往返：PING 是否通（区分"进程没起来"与"起来了但不响应"）
+//	阶段 4  真正的 setsockopt：内核给的 errno（EPERM=没 CAP_NET_ADMIN、ENOSYS=内核太老、
+//	           ESRCH=App 进程不在、EINVAL=fd 不对）
+//
 // 返回值：1 = 通路可用；0 = 不可用（已记日志，调用方应回落到 uid 放行）。
 func ProbeSocketMark() int64 {
 	globalMarkClientMu.Lock()
 	c := globalMarkClient
 	globalMarkClientMu.Unlock()
 	if c == nil {
-		zlog.Warnf("%s [Mark] probe: no helper registered", TAG)
+		zlog.Warnf("%s [Mark-Diag] 阶段1 失败：没有注册 helper（Kotlin 侧没调 RegisterSocketMarkHelper，"+
+			"或 exePath 为空 / mark=0 被当成禁用）", TAG)
 		return 0
 	}
 
+	// ── 阶段 1：自身能力 ────────────────────────────────────────────────
+	zlog.Infof("%s [Mark-Diag] ══ 阶段1 自身能力 ══", TAG)
+	zlog.Infof("%s [Mark-Diag]   app_pid=%d  mark=0x%x  euid=%d (0=已是root 1000=普通App)", TAG, c.appPID, c.markVal, os.Geteuid())
+	if fi, err := os.Stat(c.exePath); err != nil {
+		zlog.Warnf("%s [Mark-Diag]   helper 不可达：%v —— 检查 AppBootstrap 是否部署成功", TAG, err)
+	} else {
+		mode := fi.Mode()
+		zlog.Infof("%s [Mark-Diag]   helper 存在：%s  size=%d  mode=%s  可执行=%v",
+			TAG, c.exePath, fi.Size(), mode.String(), mode.Perm()&0111 != 0)
+	}
+	if os.Geteuid() != 0 {
+		// 非 root 时必须走 su。把每个候选的探测结果都打出来 ——
+		// 之前只在"全失败"时给一个汇总错误，根本看不出是哪个路径不存在。
+		found := ""
+		for _, su := range suCandidates {
+			if p, err := exec.LookPath(su); err == nil {
+				zlog.Infof("%s [Mark-Diag]   su 候选可用：%-24s → %s", TAG, su, p)
+				if found == "" {
+					found = su
+				}
+			} else {
+				zlog.Infof("%s [Mark-Diag]   su 候选缺失：%-24s (%v)", TAG, su, err)
+			}
+		}
+		if found == "" {
+			zlog.Warnf("%s [Mark-Diag]   ⚠️ 没有任何 su 路径可用 ⇒ helper 必然以非 root 运行 ⇒ setsockopt 必 EPERM。"+
+				"本机是否 root？Magisk/KernelSU 是否安装？", TAG)
+		}
+	} else {
+		zlog.Infof("%s [Mark-Diag]   euid=0，跳过 su 直接以 root 拉起 helper", TAG)
+	}
+
+	// ── 阶段 2/3：helper 启动 + 协议往返 ───────────────────────────────
+	zlog.Infof("%s [Mark-Diag] ══ 阶段2/3 启动 helper 并验证协议 ══", TAG)
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
 	if err != nil {
-		zlog.Warnf("%s [Mark] probe: cannot create probe socket: %v", TAG, err)
+		zlog.Warnf("%s [Mark-Diag] 探测 socket 创建失败：%v", TAG, err)
 		return 0
 	}
 	defer syscall.Close(fd)
 
-	if err := c.request(uintptr(fd)); err != nil {
-		zlog.Warnf("%s [Mark] probe failed: %v — caller should fall back to uid bypass", TAG, err)
+	if err := c.probeRoundTrip(uintptr(fd)); err != nil {
+		zlog.Warnf("%s [Mark-Diag] 阶段3/4 失败：%v", TAG, err)
+		zlog.Warnf("%s [Mark-Diag] ══ 结论：SO_MARK 不可用 ⇒ 将回落到 uid 放行（App 内流量全部直连）══", TAG)
 		return 0
 	}
-	zlog.Infof("%s [Mark] probe ok — mark 0x%x is settable, mark bypass may be used", TAG, c.markVal)
+
+	// ── 阶段 4：回读验证 ───────────────────────────────────────────────
+	zlog.Infof("%s [Mark-Diag] ══ 阶段4 setsockopt + GET 回读 ══", TAG)
+	if got, err := c.readBackMark(uintptr(fd)); err != nil {
+		zlog.Warnf("%s [Mark-Diag]   GET 回读失败：%v（不影响结论：MARK 已返回 OK）", TAG, err)
+	} else if int(got) != c.markVal {
+		zlog.Warnf("%s [Mark-Diag]   ⚠️ 回读值 %d(0x%x) 与期望 %d(0x%x) 不一致 —— helper 可能在别的 netns 里设的 mark",
+			TAG, got, got, c.markVal, c.markVal)
+	} else {
+		zlog.Infof("%s [Mark-Diag]   回读一致：mark=0x%x 真的落在 socket 上", TAG, got)
+	}
+
+	zlog.Infof("%s [Mark-Diag] ══ 结论：SO_MARK 通路可用，隧道 socket 将按 mark 精确放行 ══", TAG)
 	return 1
+}
+
+// probeRoundTrip 先 PING 验协议、再 MARK 验权限，把两类失败分开报。
+func (c *socketMarkClient) probeRoundTrip(fd uintptr) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.ensureLocked(); err != nil {
+		return fmt.Errorf("拉起 helper 失败: %w", err)
+	}
+	zlog.Infof("%s [Mark-Diag]   helper 已启动（记住上面 launched via 那一行的 su 路径）", TAG)
+
+	// PING 不碰权限，纯粹验协议：能回 PONG 说明进程活着且管道通。
+	// 这一步把"helper 没起来"与"起来了但 setsockopt 被拒"区分开 ——
+	// 两者的根因与修法完全不同，混成一句 ERR 就没法排查了。
+	if _, err := fmt.Fprintf(c.stdin, "PING\n"); err != nil {
+		c.closeLocked()
+		return fmt.Errorf("写 PING 失败（管道不通）: %w", err)
+	}
+	line, err := c.stdout.ReadString('\n')
+	if err != nil {
+		c.closeLocked()
+		return fmt.Errorf("读 PING 响应失败（helper 可能已崩溃，或 su 未真正提权）: %w", err)
+	}
+	if got := strings.TrimSpace(line); !strings.HasPrefix(got, "PONG") {
+		return fmt.Errorf("PING 响应异常: %q", got)
+	}
+	zlog.Infof("%s [Mark-Diag]   PING/PONG 正常 ⇒ 管道通、helper 活着", TAG)
+
+	if _, err := fmt.Fprintf(c.stdin, "MARK %d %d\n", fd, c.markVal); err != nil {
+		c.closeLocked()
+		return fmt.Errorf("写 MARK 失败: %w", err)
+	}
+	line, err = c.stdout.ReadString('\n')
+	if err != nil {
+		c.closeLocked()
+		return fmt.Errorf("读 MARK 响应失败: %w", err)
+	}
+	if got := strings.TrimSpace(line); got != "OK" {
+		return fmt.Errorf("helper 拒绝设 mark: %s —— "+
+			"EPERM=helper 没有 CAP_NET_ADMIN（su 没真提权，或 SELinux 拦了）、"+
+			"ESRCH=%d 进程已死、ENOSYS=内核不支持所需 syscall", got, c.appPID)
+	}
+	zlog.Infof("%s [Mark-Diag]   MARK 返回 OK", TAG)
+	return nil
+}
+
+// readBackMark 用 GET 回读 mark 值。getsockopt 不需要特权，所以这是独立验证。
+func (c *socketMarkClient) readBackMark(fd uintptr) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := fmt.Fprintf(c.stdin, "GET %d\n", fd); err != nil {
+		return 0, err
+	}
+	line, err := c.stdout.ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	var v int
+	if n, serr := fmt.Sscanf(strings.TrimSpace(line), "MARK %d", &v); serr != nil || n != 1 {
+		return 0, fmt.Errorf("GET 响应异常: %q", strings.TrimSpace(line))
+	}
+	return int64(v), nil
 }
 
 func (c *socketMarkClient) disable() {
