@@ -38,6 +38,12 @@ type GeoRouter struct {
 	cacheCount        atomic.Int32
 	routeIPCacheCount atomic.Int32
 
+	// ipDecisionCache 是纯 IP 目标的直连判定缓存。UDP 数据面每个包都会进来，
+	// 同一个组播 / ULA 地址一秒刷出上百个包时，每条都重跑一遍 Trie 查找
+	// 纯属浪费。
+	ipDecisionCache      sync.Map // IP 字符串 -> ipDecision，带 TTL
+	ipDecisionCacheCount atomic.Int32
+
 	// 分流日志抑制表：目标 -> 上次记录时间。未命中的目标会被反复重试
 	// （mDNS 组播每几百毫秒一轮），逐条记录会把日志刷成单一地址的海量重复。
 	rateLogTimes sync.Map
@@ -90,6 +96,25 @@ type routeResolved struct {
 	expire time.Time
 }
 
+// ipDecision 是单个 IP 的直连判定结果。
+//
+// 判定语义只依赖本路由器自己的 Trie 与 netip 的分类位段，两者在路由器的
+// 生命周期内都不变：loadGlobalConfig 每次都是新建 GeoRouter（连同空缓存）
+// 再整体原子替换，规则更新不会让缓存过期失效。所以 TTL 在这里纯粹是内存
+// 上界，不是正确性手段 —— 缓存过期只是多算一次，不会答错。
+type ipDecision struct {
+	direct bool
+	expire time.Time
+}
+
+// ipDecisionCacheTTL 是上面 TTL 的取值。取和 routeIPCacheTTL 同量级，
+// 既够把热点地址长期钉在缓存里，又不至于让一次会话积累出无界条目。
+const ipDecisionCacheTTL = 10 * time.Minute
+
+// ipDecisionCacheCleanThreshold 与 routeCacheCleanThreshold 同机制：越过阈值
+// 就顺手清一次过期项，非全清，保留热点。
+const ipDecisionCacheCleanThreshold = 5000
+
 // rateLimitedLogInterval 是分流日志的抑制窗口：同一目标在窗口内只记一次。
 const rateLimitedLogInterval = 5 * time.Minute
 
@@ -101,6 +126,11 @@ const rateLimitedLogMaxKeys = 4096
 // 未指定地址。代理端既不能也不会为它们建立会话，请求这类目标只会换回远端
 // 拒绝（tun2proxy-udpgw 的 0x20 错误），或在 GeoIP 规则缺失时被误发到上游。
 // 因此这里无条件直连，不依赖规则表是否完整。
+//
+// 刻意**不含** IsPrivate（RFC1918 / fc00::/7，含 ULA fd00::/8）：那部分由
+// geoip 的 private 标签负责，而标签集合是用户可配置的（DirectIPTags）。硬编码
+// 会把「我从标签里去掉 private、就想让内网走隧道」这种配置静默短路掉。
+// 代价是私有段仍要过一遍 MatchNetIP —— 见 ipDecision，判定结果已按目标缓存。
 func nonProxyable(addr netip.Addr) bool {
 	return addr.IsMulticast() ||
 		addr.IsUnspecified() ||
@@ -144,26 +174,17 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	// 使用 Go 1.18+ 的 netip 包解析，比 net.ParseIP 更严格
 	if addr, err := netip.ParseAddr(host); err == nil {
-		if r.MatchNetIP(addr) {
-			zlog.Debugf("%s [Router] Direct IP access [%s] -> Hit GeoIP, routing direct", TAG, host)
-			return RouteResult{IsDirect: true, DialHost: host}
-		}
-		if nonProxyable(addr) {
-			r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> non-proxyable, routing direct", TAG, host)
-			return RouteResult{IsDirect: true, DialHost: host}
-		}
-		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
-		return RouteResult{IsDirect: false, DialHost: host}
+		return r.ipDecision(host, addr)
 	}
 
 	// 先查 GeoSite (域名规则) 是否直连
 	if r.MatchDomain(host) {
 		ips := GetCachedIPs(host)
 		if len(ips) > 0 {
-			zlog.Debugf("%s [Router] Domain [%s] hit GeoSite -> Using cached IP (%s) for direct routing", TAG, host, ips[0].String())
+			r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] hit GeoSite -> Using cached IP (%s) for direct routing", TAG, host, ips[0].String())
 			return RouteResult{IsDirect: true, DialHost: ips[0].String()}
 		}
-		zlog.Debugf("%s [Router] Domain [%s] hit GeoSite -> No cached IP, keeping domain for direct routing", TAG, host)
+		r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] hit GeoSite -> No cached IP, keeping domain for direct routing", TAG, host)
 		return RouteResult{IsDirect: true, DialHost: host}
 	}
 
@@ -236,7 +257,7 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	for _, resolvedIP := range ips {
 		if r.MatchIP(resolvedIP) {
-			zlog.Debugf("%s [Router] Domain [%s] resolved IP (%s) hit GeoIP -> routing direct", TAG, host, resolvedIP.String())
+			r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] resolved IP (%s) hit GeoIP -> routing direct", TAG, host, resolvedIP.String())
 			return RouteResult{IsDirect: true, DialHost: resolvedIP.String()}
 		}
 	}
@@ -244,6 +265,63 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	// 默认走代理 (兜底)
 	r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] missed all direct rules -> routing proxy", TAG, host)
 	return RouteResult{IsDirect: false, DialHost: host}
+}
+
+// ipDecision 给出纯 IP 目标的直连判定，同一地址只算一次。
+//
+// 分支顺序与加缓存之前保持一致：先 MatchNetIP 再 nonProxyable。GeoIP 是
+// 权威来源，nonProxyable 只在规则表缺失或空时兜底 —— 反过来的话日志会把
+// 一次真实的 GeoIP 命中写成 "non-proxyable"，排障时容易误判根因。
+//
+// 缓存命中不再打日志：命中意味着判定早已打过一遍，逐包复读同一结论
+// 就是把数据面日志刷成噪声。
+func (r *GeoRouter) ipDecision(host string, addr netip.Addr) RouteResult {
+	if cached, ok := r.ipDecisionCache.Load(host); ok {
+		d := cached.(ipDecision)
+		if time.Now().Before(d.expire) {
+			return RouteResult{IsDirect: d.direct, DialHost: host}
+		}
+		r.ipDecisionCache.Delete(host)
+	}
+
+	var direct bool
+	if r.MatchNetIP(addr) {
+		direct = true
+		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> Hit GeoIP, routing direct", TAG, host)
+	} else if nonProxyable(addr) {
+		direct = true
+		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> non-proxyable, routing direct", TAG, host)
+	} else {
+		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
+	}
+
+	// LoadOrStore 而不是 Store：冷启动的突发包会同时落到这里。判定只依赖
+	// Trie 与 netip 的分类位段，两者在路由器生命周期内不变，所以抢先写入者
+	// 与本调用者的结论必然相同（仅 expire 差几个纳秒），直接复用它即可；
+	// 只有成功写入的那一个记账，否则同一目标会被计成多次判定。
+	stored := ipDecision{direct: direct, expire: time.Now().Add(ipDecisionCacheTTL)}
+	if _, loaded := r.ipDecisionCache.LoadOrStore(host, stored); !loaded {
+		// 计数越过阈值触发一次后台清理。这里必须无条件归零：旧实现用
+		// CAS(N, 0)，并发下计数跳过 N 后 CAS 永久失配，清理从此再也不会
+		// 触发，缓存无界增长。
+		if r.ipDecisionCacheCount.Add(1) >= ipDecisionCacheCleanThreshold {
+			r.ipDecisionCacheCount.Store(0)
+			go r.cleanExpiredIPDecisionCache()
+		}
+	}
+
+	return RouteResult{IsDirect: direct, DialHost: host}
+}
+
+// cleanExpiredIPDecisionCache 后台清理过期条目，只删不加。
+func (r *GeoRouter) cleanExpiredIPDecisionCache() {
+	now := time.Now()
+	r.ipDecisionCache.Range(func(k, v interface{}) bool {
+		if now.After(v.(ipDecision).expire) {
+			r.ipDecisionCache.Delete(k)
+		}
+		return true
+	})
 }
 
 // MatchDomain 匹配域名 - 先查缓存
@@ -312,8 +390,13 @@ func (r *GeoRouter) ResetCacheAndStats() {
 		r.routeIPCache.Delete(key)
 		return true
 	})
+	r.ipDecisionCache.Range(func(key, value interface{}) bool {
+		r.ipDecisionCache.Delete(key)
+		return true
+	})
 	r.cacheCount.Store(0)
 	r.routeIPCacheCount.Store(0)
+	r.ipDecisionCacheCount.Store(0)
 	r.queryCount.Store(0)
 	r.cacheHitCount.Store(0)
 	zlog.Infof("%s [Router] ♻️ Route cache and query stats manually reset", TAG)

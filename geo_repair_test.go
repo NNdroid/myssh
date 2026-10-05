@@ -2,11 +2,13 @@ package myssh
 
 import (
 	"bytes"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -231,5 +233,103 @@ func TestGeoRouter_LogRateLimitedSuppressesRepeats(t *testing.T) {
 	}
 	if r.rateLogCount.Load() > rateLimitedLogMaxKeys {
 		t.Fatalf("count must be reset after the overflow sweep, got %d", r.rateLogCount.Load())
+	}
+}
+
+// TestGeoRouter_IPDecisionCacheReusesVerdict pins the memo around the pure-IP
+// branch of ShouldDirect. That branch is the tproxy/socks5 UDP hot path — one
+// call per packet — and before the memo every packet re-ran the Trie lookup.
+// The log flood in the PR #4 report was the same address re-deciding itself
+// hundreds of times a second.
+func TestGeoRouter_IPDecisionCacheReusesVerdict(t *testing.T) {
+	r := newGeoRouter() // 空规则表：既非 GeoIP 命中，也非 nonProxyable
+
+	if res := r.ShouldDirect("10.1.2.3"); res.IsDirect {
+		t.Fatal("10.1.2.3 must be routed through the proxy with an empty GeoIP table")
+	}
+
+	// 每个不同的目标只算一次；命中缓存不得重复计算。
+	for i := 0; i < 500; i++ {
+		if res := r.ShouldDirect("10.1.2.3"); res.IsDirect {
+			t.Fatal("a cached proxy verdict must not flip on a cache hit")
+		}
+	}
+	if got := r.ipDecisionCacheCount.Load(); got != 1 {
+		t.Fatalf("cache hits must not recompute, got %d decisions", got)
+	}
+
+	// 过期后重新计算。规则重载会整体替换 GeoRouter（连同空缓存），所以这是
+	// 条目内唯一可能看到表变更的路径 —— TTL 是内存上界，过期必须真正重算。
+	r.ipDecisionCache.Store("10.1.2.3", ipDecision{direct: false, expire: time.Now().Add(-time.Minute)})
+	r.ipTrie.Insert(net.ParseIP("10.1.0.0").To4(), 16)
+	if res := r.ShouldDirect("10.1.2.3"); !res.IsDirect {
+		t.Fatal("an expired decision must be recomputed against the updated table")
+	}
+	if got := r.ipDecisionCacheCount.Load(); got != 2 {
+		t.Fatalf("an expired entry must trigger exactly one recompute, got %d", got)
+	}
+}
+
+// TestGeoRouter_IPDecisionCacheConcurrent guards the hot path under contention.
+// The UDP data plane calls ShouldDirect from many goroutines for the same
+// group address; sync.Map must not report a race here.
+func TestGeoRouter_IPDecisionCacheConcurrent(t *testing.T) {
+	r := newGeoRouter()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 2000; i++ {
+				r.ShouldDirect("224.0.0.251")
+				r.ShouldDirect("fd00::1")
+				r.ShouldDirect("192.168.1.1")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 组播无条件直连，ULA 与 RFC1918 交由 GeoIP（空表 → 走代理）。
+	if res := r.ShouldDirect("224.0.0.251"); !res.IsDirect {
+		t.Fatal("multicast must stay direct under contention")
+	}
+	for _, host := range []string{"fd00::1", "192.168.1.1"} {
+		if res := r.ShouldDirect(host); res.IsDirect {
+			t.Fatalf("%s must stay behind the proxy with an empty GeoIP table", host)
+		}
+	}
+	if got := r.ipDecisionCacheCount.Load(); got != 3 {
+		t.Fatalf("three distinct targets decide exactly once each, got %d", got)
+	}
+}
+
+// TestGeoRouter_IPDecisionResetClearsVerdicts keeps ipDecisionCache inside the
+// manual reset contract — otherwise a "reset all caches" call would keep the
+// memo the very thing it is supposed to clear.
+func TestGeoRouter_IPDecisionResetClearsVerdicts(t *testing.T) {
+	r := newGeoRouter()
+
+	r.ShouldDirect("224.0.0.251")
+	r.ShouldDirect("10.1.2.3")
+	if got := r.ipDecisionCacheCount.Load(); got != 2 {
+		t.Fatalf("expected 2 cached decisions before the reset, got %d", got)
+	}
+
+	r.ResetCacheAndStats()
+
+	if got := r.ipDecisionCacheCount.Load(); got != 0 {
+		t.Fatalf("reset must clear the decision counter, got %d", got)
+	}
+	if _, ok := r.ipDecisionCache.Load("224.0.0.251"); ok {
+		t.Fatal("reset must clear the decision entries")
+	}
+
+	// 缓存已清，同一目标必须重新计算一次。
+	if res := r.ShouldDirect("224.0.0.251"); !res.IsDirect {
+		t.Fatal("multicast must still be direct after the reset")
+	}
+	if got := r.ipDecisionCacheCount.Load(); got != 1 {
+		t.Fatalf("a reset cache must recompute, got %d", got)
 	}
 }
