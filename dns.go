@@ -110,9 +110,7 @@ func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshCli
 	}
 
 	sessionName := fmt.Sprintf("%s->%s", prefix, addr)
-	// 显式标 "dns"：它是一条过隧道的短连接（每次远端解析一条、用完即关），
-	// 与 TCP 数据流混在一起会让「连接数」完全没有归因能力。
-	return WrapConnKind(rawConn, sessionName, "dns"), nil
+	return WrapConn(rawConn, sessionName), nil
 }
 
 func (l *LocalDnsServer) cacheCleanupLoop() {

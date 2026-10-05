@@ -330,7 +330,9 @@ func TestDownloadFile_NeverInstallsBadBody(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := downloadFile(srv.URL, dest); err == nil {
+			// No sidecar: exercise the degraded path where only the length and
+			// structural checks stand between a broken body and the router.
+			if err := downloadFile(srv.URL, "", dest); err == nil {
 				t.Fatal("malformed body must be rejected")
 			}
 
@@ -363,7 +365,9 @@ func TestDownloadFile_InstallsValidFile(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "geoip.dat")
 
-	if err := downloadFile(srv.URL, dest); err != nil {
+	// No sidecar here: these cases predate checksum verification and cover the
+	// degraded path, where only the length and structural checks apply.
+	if err := downloadFile(srv.URL, "", dest); err != nil {
 		t.Fatalf("valid body must install: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -396,7 +400,9 @@ func TestDownloadFile_AcceptsCompleteShortFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := downloadFile(srv.URL, dest); err != nil {
+	// No sidecar here: these cases predate checksum verification and cover the
+	// degraded path, where only the length and structural checks apply.
+	if err := downloadFile(srv.URL, "", dest); err != nil {
 		t.Fatalf("a complete %d-byte file must install (%d bytes available): %v", len(short), len(full), err)
 	}
 	got, err := os.ReadFile(dest)

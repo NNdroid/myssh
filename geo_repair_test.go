@@ -20,11 +20,17 @@ func setRuleSources(t *testing.T, urls map[string]string) {
 	old := ruleSources
 	ruleSources = nil
 	for name, url := range urls {
-		ruleSources = append(ruleSources, struct {
-			name string
-			url  string
-		}{name: name, url: url})
+		ruleSources = append(ruleSources, ruleSource{name: name, url: url})
 	}
+	t.Cleanup(func() { ruleSources = old })
+}
+
+// setRuleSourcesWithSum is setRuleSources for tests that need to pin a sha256
+// sidecar next to the payload URL.
+func setRuleSourcesWithSum(t *testing.T, srcs ...ruleSource) {
+	t.Helper()
+	old := ruleSources
+	ruleSources = srcs
 	t.Cleanup(func() { ruleSources = old })
 }
 

@@ -546,7 +546,7 @@ func (h *egressAwareSocksHandler) handleUnifiedTCPConnect(c *net.TCPConn, r *soc
 		zlog.Debugf("%s [Outbound] %s target=%s effective=%s winner=%s", TAG, routeName, target, effectiveHost, winner)
 	}
 
-	remote = WrapConnKind(remote, target, "tcp")
+	remote = WrapConn(remote, target)
 	defer remote.Close()
 
 	rep := socks5.NewReply(socks5.RepSuccess, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})

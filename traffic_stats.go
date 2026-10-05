@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,15 +19,6 @@ import (
 // 全局限速采样、域名活跃度排行，以及暴露给 GoMobile 宿主的回调与 JSON API。
 
 // ConnInfo 单条连接的实时统计（以 json 导出给 Android UI）。
-//
-// Protocol 把「连接数」拆成四摊。没有它就没法回答"tproxy 模式连接数是 VPN 的
-// 20 倍"到底是哪一摊撑起来的 —— 四摊的成因与修法毫不相干：
-//   - "tcp"：TCP 隧道连接。多 = 短连接风暴（每个 HTTP 请求一条 / 没开 keepalive）。
-//   - "udp-proxy"：走 UDPGW 的代理 UDP 会话。多 = 按 (源地址,目标) 建会话且空闲回收没生效。
-//   - "udp-direct"：**本地直连的 UDP NAT 会话**。它压根不过隧道，只是被 tproxy 收进
-//     来后本机转发出去。多 = 局域网/私有段/mDNS 之类的流量被劫持后建了本地会话。
-//     这一摊最容易被误读成「隧道连接数暴涨」，实际与隧道无关。
-//   - "dns"：DNS 隧道连接（每次远端解析一条，用完即关）。
 type ConnInfo struct {
 	ReadBytes  atomic.Uint64 `json:"read_bytes"`
 	WriteBytes atomic.Uint64 `json:"write_bytes"`
@@ -37,13 +27,12 @@ type ConnInfo struct {
 	TargetHost string        `json:"target_host"`
 	ProxyAddr  string        `json:"proxy_addr"`
 	StartTime  time.Time     `json:"start_time"`
-	Protocol   string        `json:"protocol"` // "tcp" / "udp-proxy" / "udp-direct" / "dns"
 }
 
 func (c *ConnInfo) String() string {
 	duration := time.Since(c.StartTime).Round(time.Second)
-	return fmt.Sprintf("[ID:%d] %s Target:%s | Uptime:%s | ↑%d B | ↓%d B",
-		c.ID, c.Protocol, c.TargetAddr, duration, c.WriteBytes.Load(), c.ReadBytes.Load())
+	return fmt.Sprintf("[ID:%d] Target:%s | Uptime:%s | ↑%d B | ↓%d B",
+		c.ID, c.TargetAddr, duration, c.WriteBytes.Load(), c.ReadBytes.Load())
 }
 
 // ===== 域名活跃度统计 =====
@@ -127,33 +116,12 @@ func (dsm *domainStatsManager) reset() {
 // ===== 全局流量计数器 =====
 
 type trafficManager struct {
-	TxTotal         atomic.Uint64 // 累计上行字节数
-	RxTotal         atomic.Uint64 // 累计下行字节数
-	ActiveConns     atomic.Int64  // 活跃连接数
-	TotalConns      atomic.Int64  // 历史连接总数
-	ActiveTcp       atomic.Int64  // 活跃 TCP 隧道连接数
-	ActiveUdpProxy  atomic.Int64  // 活跃 UDPGW 代理会话数（过隧道）
-	ActiveUdpDirect atomic.Int64  // 活跃本地直连 UDP 会话数（不过隧道）
-	ActiveDns       atomic.Int64  // 活跃 DNS 隧道连接数
-	connIDCounter   atomic.Int64  // 连接 ID 发生器
-	activeMap       sync.Map      // key: int64 (连接 ID), value: *ConnInfo
-}
-
-// bumpProtocol 按类别增减分类计数。close 传 -1，open 传 +1。
-//
-// ⚠️ 两侧必须成对：少减一次会让计数只涨不落，而这个数正是判断"连接数异常"的依据，
-// 一旦失真就再也无法归因。
-func (m *trafficManager) bumpProtocol(protocol string, delta int64) {
-	switch protocol {
-	case "udp-proxy":
-		m.ActiveUdpProxy.Add(delta)
-	case "udp-direct":
-		m.ActiveUdpDirect.Add(delta)
-	case "dns":
-		m.ActiveDns.Add(delta)
-	default:
-		m.ActiveTcp.Add(delta)
-	}
+	TxTotal       atomic.Uint64 // 累计上行字节数
+	RxTotal       atomic.Uint64 // 累计下行字节数
+	ActiveConns   atomic.Int64  // 活跃连接数
+	TotalConns    atomic.Int64  // 历史连接总数
+	connIDCounter atomic.Int64  // 连接 ID 发生器
+	activeMap     sync.Map      // key: int64 (连接 ID), value: *ConnInfo
 }
 
 var globalTrafficManager = &trafficManager{}
@@ -263,10 +231,7 @@ func (tc *TrackedConn) CloseWrite() error {
 
 func (tc *TrackedConn) Close() error {
 	tc.closeOnce.Do(func() {
-		if countsTowardActiveTotal(tc.info.Protocol) {
-			tc.manager.ActiveConns.Add(-1)
-		}
-		tc.manager.bumpProtocol(tc.info.Protocol, -1)
+		tc.manager.ActiveConns.Add(-1)
 		tc.manager.activeMap.Delete(tc.info.ID)
 		tc.closeErr = tc.Conn.Close()
 	})
@@ -301,10 +266,7 @@ func (tc *TrackedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error)
 
 func (tc *TrackedPacketConn) Close() error {
 	tc.closeOnce.Do(func() {
-		if countsTowardActiveTotal(tc.info.Protocol) {
-			tc.manager.ActiveConns.Add(-1)
-		}
-		tc.manager.bumpProtocol(tc.info.Protocol, -1)
+		tc.manager.ActiveConns.Add(-1)
 		tc.manager.activeMap.Delete(tc.info.ID)
 		tc.closeErr = tc.PacketConn.Close()
 	})
@@ -313,54 +275,10 @@ func (tc *TrackedPacketConn) Close() error {
 
 // ===== 包装入口 =====
 
-// countsTowardActiveTotal 判定某类连接是否计入 ActiveConns（UI 的「活跃连接数」）。
-//
-// ActiveConns 的语义是**隧道负载**，所以 udp-direct 被排除：它是「被 tproxy 劫持进来、
-// 判定为直连、再由本机原样转发」的会话，从头到尾不过隧道 —— 局域网发现、mDNS、
-// DLNA/投屏、私有段 NAS 全属此类。旁路表拿掉 RFC1918 之后（c509a97）这批流量会
-// 重新进分流判定，于是在 tproxy 模式下被放大几十倍：把它们算进「连接数」，数字就
-// 与隧道实际负载彻底脱钩，排查"为什么 tproxy 是 VPN 的 N 倍"时会被彻底带偏。
-//
-// 它们仍进 activeMap（UI 连接列表可见、带 udp-direct 标记）并照常统计流量，
-// 只是不顶那个总数。
-func countsTowardActiveTotal(kind string) bool {
-	return kind != "udp-direct"
-}
-
-// protocolOfTarget 推断一条被包装连接的类别，供不便显式传参的调用点使用。
-//
-// 只看目标串的形态：走 UDPGW 的会话一律以 `UDPGW->` 前缀包装（见 socks5.go），
-// 所以这个前缀就是代理 UDP 的可靠标记。其余按 TCP 计。
-// 不要试图从地址本身推断协议 —— 同一个域名既能走 TCP(DoH) 也能走 UDP(DoT)，
-// 而 QUIC 用的还是 UDP 443，地址和 TCP 443 完全一样。
-//
-// ⚠️ 它**分辨不出** udp-direct：直连 UDP 会话的目标串就是一个普通的 host:port，
-// 与 TCP 毫无区别。所以直连分支必须走 WrapConnKind 显式声明，别指望这里兜住。
-func protocolOfTarget(targetAddr string) string {
-	if strings.HasPrefix(targetAddr, "UDPGW->") {
-		return "udp-proxy"
-	}
-	return "tcp"
-}
-
-// WrapConnKind 包装连接并**显式**声明类别，纳入流量统计。
-//
-// kind 取 "tcp" / "udp-proxy" / "udp-direct" / "dns"。凡是调用方自己清楚类别的
-// 一律走这里 —— 类别一旦判错，连接数归因就是反向的，比没有分类更糟。
-func WrapConnKind(conn net.Conn, targetAddr string, kind string) net.Conn {
-	return wrapConnAs(conn, targetAddr, kind)
-}
-
-// WrapConn 包装连接并按目标串推断类别，纳入流量统计。
+// WrapConn 包装 TCP 连接，纳入流量统计。
 func WrapConn(conn net.Conn, targetAddr string) net.Conn {
-	return wrapConnAs(conn, targetAddr, protocolOfTarget(targetAddr))
-}
-
-func wrapConnAs(conn net.Conn, targetAddr string, kind string) net.Conn {
 	globalTrafficManager.TotalConns.Add(1)
-	if countsTowardActiveTotal(kind) {
-		globalTrafficManager.ActiveConns.Add(1)
-	}
+	globalTrafficManager.ActiveConns.Add(1)
 	id := globalTrafficManager.connIDCounter.Add(1)
 
 	var host string
@@ -378,10 +296,8 @@ func wrapConnAs(conn net.Conn, targetAddr string, kind string) net.Conn {
 		TargetHost: host,
 		ProxyAddr:  addrString(conn.RemoteAddr()),
 		StartTime:  time.Now(),
-		Protocol:   kind,
 	}
 	globalTrafficManager.activeMap.Store(id, info)
-	globalTrafficManager.bumpProtocol(kind, 1)
 
 	// 按目标域名聚合活跃度，未解析出域名则不参与排行。
 	// 域名条目在 Read/Write 中只做原子累加，命中 sync.Map 即可。
@@ -421,10 +337,8 @@ func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 		TargetHost: host,
 		ProxyAddr:  addrString(conn.LocalAddr()),
 		StartTime:  time.Now(),
-		Protocol:   "udp-proxy", // WrapPacketConn 只用于 UDP（net.PacketConn 语义即数据报）
 	}
 	globalTrafficManager.activeMap.Store(id, info)
-	globalTrafficManager.bumpProtocol("udp", 1)
 
 	return &TrackedPacketConn{
 		PacketConn: conn,
@@ -682,22 +596,6 @@ func init() {
 			currentRxRate.Store(rxRate)
 
 			globalDomainStatsManager.calculateAndRank(elapsed)
-
-			// 每 30 秒把「活跃连接数」按协议拆开打一次。
-			// 排查"tproxy 模式的连接数是 VPN 的 N 倍"时，总数本身没有归因能力 ——
-			// TCP 短连接风暴与 UDP 会话堆积是两件完全不同的事，修法也不相干。
-			// 只在连接数非零时打，避免静默期刷屏。
-			if actConns > 0 && now.Unix()%30 == 0 {
-				zlog.Infof(
-					"%s [ConnStats] active=%d (tcp=%d udp-proxy=%d udp-direct=%d dns=%d) total=%d tx=%d rx=%d",
-					TAG, actConns,
-					globalTrafficManager.ActiveTcp.Load(),
-					globalTrafficManager.ActiveUdpProxy.Load(),
-					globalTrafficManager.ActiveUdpDirect.Load(),
-					globalTrafficManager.ActiveDns.Load(),
-					totConns, txRate, rxRate,
-				)
-			}
 
 			// 回调 Android 宿主
 			// 读取回调指针必须与写入方同样持锁，否则构成 data race。
