@@ -131,10 +131,14 @@ func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (
 
 	// Apply Android VpnService Protect.
 	safeDialer := wrapAndroidProtect(dialer)
-	matchDialerNetwork(safeDialer, network)
+	// Apply SO_MARK for tproxy bypass（Android 有效，其它平台为空实现）。
+	// 与 protect 并联：protect 解决 VPN 模式的回环，mark 解决 tproxy 模式的回环。
+	// 两者都要在 DialContext 之前挂上 —— Control 回调在 socket 创建后、connect 前触发。
+	markDialer := wrapSocketMark(safeDialer)
+	matchDialerNetwork(markDialer, network)
 
 	zlog.Debugf("%s [Dialer] 📞 Executing DialContext...", TAG)
-	conn, err := safeDialer.DialContext(ctx, network, address)
+	conn, err := markDialer.DialContext(ctx, network, address)
 	if err != nil {
 		zlog.Errorf("%s [Socket] ❌ Underlying %s connection failed: %v", TAG, strings.ToUpper(network), err)
 		return nil, err

@@ -39,6 +39,31 @@ func (p *SshTProxy) WaitIPv6Egress(timeoutMs int) int {
 	return waitIPv6EgressMs(timeoutMs)
 }
 
+// RegisterSocketMarkHelper 告诉引擎到哪去找 root 侧的 `sockmark` 辅助进程，以及
+// 给隧道 socket 打什么 SO_MARK。
+//
+// 必须在 Start 之前调用 —— Start 会立刻拨 SSH，socket 一建出来首个 SYN 就发出去，
+// 届时若 mark 通路还没就绪，SSH 连接会被 tproxy 自己的 TPROXY 抓回本地 socks5。
+//
+// appPID 传 0 表示由 Go 侧 os.Getpid() 自取。exePath 为空或 mark 为 0 时禁用
+// mark 通路（此时 tproxy 侧会回落到按 uid 放行整个 App 的旧策略）。
+//
+// ⚠️ 参数用 int64 而非 int：gomobile 把 Go 整数映射成 Java `long`（恒 64 位），
+// `int` 在 32 位 ABI 上经 JNI 传参会截断。
+func (p *SshTProxy) RegisterSocketMarkHelper(exePath string, appPID int64, mark int64) {
+	RegisterSocketMarkHelper(exePath, appPID, mark)
+}
+
+// ProbeSocketMark 实际跑一次 mark 通路，确认「App 能借到自己的 fd、root 能成功设上 mark」。
+//
+// 必须在 [SshTProxy.RegisterSocketMarkHelper] 之后、Start 之前调用。
+// 返回 1 = 通路可用，规则侧可以走 mark 放行；返回 0 = 不可用，调用方**必须**回落到
+// uid 放行（把整个 App 加进 BYPASS_APPS_LIST）—— 代价只是 App 内流量全直连，
+// 而不回落会导致隧道 socket 既没 mark 又不在旁路列表，直接落进 TPROXY 死循环。
+func (p *SshTProxy) ProbeSocketMark() int64 {
+	return ProbeSocketMark()
+}
+
 // GetIPv6EgressState returns available, unavailable, or unknown.
 func (p *SshTProxy) GetIPv6EgressState() string {
 	return ipv6EgressStateName()
