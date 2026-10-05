@@ -48,6 +48,37 @@ func splitGeoFixture(t *testing.T, tags []string) (full []byte, lastEntryOffset 
 	return full, len(buildGeoList(t, tags[:len(tags)-1]))
 }
 
+// buildGeoIPList serializes a geoip.dat whose entries carry real CIDR
+// sub-messages (ip bytes + prefix varint), so LoadGeoIP actually inserts
+// subnets. buildGeoList's payload is domain-shaped and parses as zero CIDRs,
+// which made a "the load succeeded" assertion vacuous: the tags matched, yet
+// the Radix tree stayed empty.
+func buildGeoIPList(t *testing.T, tags []string) []byte {
+	t.Helper()
+	var buf []byte
+	for _, tag := range tags {
+		cidr := protowire.AppendTag(nil, 1, protowire.BytesType)
+		cidr = protowire.AppendBytes(cidr, []byte{10, 0, 0, 0})
+		cidr = protowire.AppendTag(cidr, 2, protowire.VarintType)
+		cidr = protowire.AppendVarint(cidr, 8)
+
+		entry := protowire.AppendTag(nil, 1, protowire.BytesType)
+		entry = protowire.AppendString(entry, tag)
+		entry = protowire.AppendTag(entry, 2, protowire.BytesType)
+		entry = protowire.AppendBytes(entry, cidr)
+
+		buf = protowire.AppendTag(buf, 1, protowire.BytesType)
+		buf = protowire.AppendBytes(buf, entry)
+	}
+	return buf
+}
+
+func splitGeoIPFixture(t *testing.T, tags []string) (full []byte, lastEntryOffset int) {
+	t.Helper()
+	full = buildGeoIPList(t, tags)
+	return full, len(buildGeoIPList(t, tags[:len(tags)-1]))
+}
+
 // writeCutGeoFile writes a rule file holding one unrelated tag followed by
 // every requested tag, then cuts off mid-entry right after that prefix. Every
 // requested tag therefore sits past the cut, which is the shape that used to
@@ -78,7 +109,7 @@ func TestLoadGeoIP_TruncatedReportsTruncation(t *testing.T) {
 	requested := []string{"cn", "private"}
 	path := writeCutGeoFile(t, requested)
 
-	err := newGeoRouter().LoadGeoIP(path, requested)
+	_, err := newGeoRouter().LoadGeoIP(path, requested)
 	if err == nil {
 		t.Fatal("truncated file must not load as if it were complete")
 	}
@@ -97,7 +128,7 @@ func TestLoadGeoIP_NoMatchInCompleteFile(t *testing.T) {
 	full, _ := splitGeoFixture(t, []string{"private", "cloudflare"})
 	path := writeRuleFile(t, "geoip.dat", full)
 
-	err := newGeoRouter().LoadGeoIP(path, []string{"cn"})
+	_, err := newGeoRouter().LoadGeoIP(path, []string{"cn"})
 	if err == nil {
 		t.Fatal("missing tag in a complete file must still fail")
 	}
@@ -109,13 +140,55 @@ func TestLoadGeoIP_NoMatchInCompleteFile(t *testing.T) {
 	}
 }
 
-// TestLoadGeoIP_CompleteFileLoads verifies the happy path is untouched.
+// TestLoadGeoIP_CompleteFileLoads verifies the happy path is untouched, and
+// that the reported count reflects what actually reached the Radix tree.
 func TestLoadGeoIP_CompleteFileLoads(t *testing.T) {
-	full, _ := splitGeoFixture(t, []string{"private", "cloudflare", "cn"})
+	full := buildGeoIPList(t, []string{"private", "cloudflare", "cn"})
 	path := writeRuleFile(t, "geoip.dat", full)
 
-	if err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"}); err != nil {
+	n, err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"})
+	if err != nil {
 		t.Fatalf("complete file must load: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected the two matched tags to contribute their CIDRs, got %d", n)
+	}
+}
+
+// TestLoadGeoIP_TagsMatchedButNoCIDRsFails guards the branch that used to be
+// silent: the country_code matched the request, so the old check reported a
+// clean success and the caller announced "GeoIP loaded successfully" with an
+// empty Radix tree. A matched tag that yields no subnet means the file is
+// broken, not merely incomplete.
+func TestLoadGeoIP_TagsMatchedButNoCIDRsFails(t *testing.T) {
+	// buildGeoList's payload is domain-shaped, so the tags are found but no
+	// CIDR can be decoded from them.
+	full := buildGeoList(t, []string{"cn", "private"})
+	path := writeRuleFile(t, "geoip.dat", full)
+
+	_, err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"})
+	if err == nil {
+		t.Fatal("a matched tag that yields no CIDR must not report a clean load")
+	}
+	if !strings.Contains(err.Error(), "0 CIDR") {
+		t.Fatalf("error must say no CIDR was extracted, got: %v", err)
+	}
+}
+
+// TestLoadGeoIP_NoTagsRequestedYieldsZero: requesting nothing is a legal
+// configuration (proxy-only routing), so the load succeeds — but it must
+// report zero entries rather than let the caller claim success on an empty
+// rule set.
+func TestLoadGeoIP_NoTagsRequestedYieldsZero(t *testing.T) {
+	full := buildGeoIPList(t, []string{"cn", "private"})
+	path := writeRuleFile(t, "geoip.dat", full)
+
+	n, err := newGeoRouter().LoadGeoIP(path, nil)
+	if err != nil {
+		t.Fatalf("requesting no tags must not fail: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("no tags requested must yield no subnets, got %d", n)
 	}
 }
 
@@ -123,11 +196,15 @@ func TestLoadGeoIP_CompleteFileLoads(t *testing.T) {
 // appeared before the cut, the partial data is usable and the load succeeds
 // rather than failing closed. Availability beats an empty rule set.
 func TestLoadGeoIP_TruncatedKeepsPartialRules(t *testing.T) {
-	full, off := splitGeoFixture(t, []string{"cn", "private", "cloudflare"})
+	full, off := splitGeoIPFixture(t, []string{"cn", "private", "cloudflare"})
 	path := writeRuleFile(t, "geoip.dat", full[:off+3])
 
-	if err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"}); err != nil {
+	n, err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"})
+	if err != nil {
 		t.Fatalf("partial but usable rules must still load: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("the intact entries must still be usable, got %d subnets", n)
 	}
 }
 
@@ -135,7 +212,7 @@ func TestLoadGeoSite_TruncatedReportsTruncation(t *testing.T) {
 	requested := []string{"cn", "private"}
 	path := writeCutGeoFile(t, requested)
 
-	err := newGeoRouter().LoadGeoSite(path, requested)
+	_, err := newGeoRouter().LoadGeoSite(path, requested)
 	if err == nil {
 		t.Fatal("truncated file must not load as if it were complete")
 	}
@@ -151,7 +228,7 @@ func TestLoadGeoSite_NoMatchInCompleteFile(t *testing.T) {
 	full, _ := splitGeoFixture(t, []string{"private", "cloudflare"})
 	path := writeRuleFile(t, "geosite.dat", full)
 
-	err := newGeoRouter().LoadGeoSite(path, []string{"cn"})
+	_, err := newGeoRouter().LoadGeoSite(path, []string{"cn"})
 	if err == nil {
 		t.Fatal("missing tag in a complete file must still fail")
 	}
@@ -168,7 +245,7 @@ func TestLoadGeoSite_NoMatchInCompleteFile(t *testing.T) {
 func TestLoadGeoIP_GarbageFile(t *testing.T) {
 	path := writeRuleFile(t, "geoip.dat", bytes.Repeat([]byte{0xff}, 256))
 
-	err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"})
+	_, err := newGeoRouter().LoadGeoIP(path, []string{"cn", "private"})
 	if err == nil {
 		t.Fatal("non-rule file must not load as if it were complete")
 	}

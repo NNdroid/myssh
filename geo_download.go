@@ -42,6 +42,17 @@ func shouldDownload(filePath string) bool {
 	return false
 }
 
+// ruleSources lists the rule files DownloadRuleFiles fetches. It is a package
+// variable rather than an inline literal so tests can redirect the URLs to an
+// httptest server — a unit test must never reach the real CDN.
+var ruleSources = []struct {
+	name string
+	url  string
+}{
+	{name: "geoip.dat", url: GEOIP_URL},
+	{name: "geosite.dat", url: GEOSITE_URL},
+}
+
 // DownloadRuleFiles downloads geoip.dat and geosite.dat to the specified directory.
 //
 // The two files are refreshed independently: a failure on one must not strand
@@ -54,13 +65,7 @@ func DownloadRuleFiles(destDir string) error {
 	}
 
 	var errs []error
-	for _, f := range []struct {
-		name string
-		url  string
-	}{
-		{name: "geoip.dat", url: GEOIP_URL},
-		{name: "geosite.dat", url: GEOSITE_URL},
-	} {
+	for _, f := range ruleSources {
 		path := filepath.Join(destDir, f.name)
 		if !shouldDownload(path) {
 			zlog.Debugf("%s is up to date, skipping download.", f.name)
@@ -77,6 +82,45 @@ func DownloadRuleFiles(destDir string) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// RepairRuleFile re-downloads the rule file at path when the copy on disk is
+// present but structurally unusable, and reports whether a usable file exists
+// afterwards.
+//
+// shouldDownload already knows how to spot a truncated file, but it was only
+// ever called from a download entry point — the web/MCP endpoint and the daily
+// GeoData worker. A file that landed corrupt between runs therefore sat
+// untouched for the whole session: LoadGeoIP parsed it, filled an empty Radix
+// tree, and every IP fell through to the proxy — multicast, link-local and
+// LAN addresses included. The load path is where corruption first becomes
+// observable, so it is the right place to repair it.
+//
+// An absent file is deliberately left alone: config.go already reports a missing
+// rule set as graceful degradation, and downloading on every cold start would
+// add network latency to boot on a device that may be offline.
+func RepairRuleFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false // missing, not corrupt: the caller handles absence itself
+	}
+	if info.Size() != 0 {
+		if _, truncated, terr := extractGeoFileTags(path); terr == nil && !truncated {
+			return true // already usable
+		}
+	}
+
+	zlog.Warnf("%s [GeoRules] %s is corrupt or truncated, attempting a re-download before load", TAG, path)
+	if dErr := DownloadRuleFiles(filepath.Dir(filepath.Clean(path))); dErr != nil {
+		zlog.Warnf("%s [GeoRules] re-download failed, keeping the broken copy: %v", TAG, dErr)
+		return false
+	}
+	if i2, err2 := os.Stat(path); err2 != nil || i2.Size() == 0 {
+		zlog.Warnf("%s [GeoRules] re-download reported success but %s is still unusable", TAG, path)
+		return false
+	}
+	zlog.Infof("%s [GeoRules] %s repaired by re-download", TAG, path)
+	return true
 }
 
 // downloadFile contains the core download logic: download to a temporary file first,

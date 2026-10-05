@@ -150,21 +150,30 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	zlog.Infof("%s [Config] ✅ Global config applied: LocalDNS=[%s], RemoteDNS=[%s]", TAG, cfg.LocalDnsServer, cfg.RemoteDnsServer)
 
 	gr := newGeoRouter()
+	// 文件存在但结构损坏（截断/非规则文件）时先重下一次：加载路径是损坏首次
+	// 被发现的地方，也是唯一能在本次会话内修好它的位置。文件不存在保持原有的
+	// 「直连分流禁用」降级语义 —— 冷启动就下载会额外增加网络延迟。
 	if _, err := os.Stat(cfg.GeoSiteFilePath); err == nil {
-		if err := gr.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
+		RepairRuleFile(cfg.GeoSiteFilePath)
+		if n, err := gr.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoSite: %v", TAG, err)
+		} else if n == 0 {
+			zlog.Warnf("%s [Config] ⚠️ GeoSite yielded 0 domain rule(s), direct domain routing disabled", TAG)
 		} else {
-			zlog.Infof("%s [Config] ✅ GeoSite loaded successfully", TAG)
+			zlog.Infof("%s [Config] ✅ GeoSite loaded successfully (%d domain rule(s))", TAG, n)
 		}
 	} else if os.IsNotExist(err) {
 		zlog.Warnf("%s [Config] ⚠️ GeoSite file not found (%s), direct domain routing disabled", TAG, cfg.GeoSiteFilePath)
 	}
 
 	if _, err := os.Stat(cfg.GeoIPFilePath); err == nil {
-		if err := gr.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
+		RepairRuleFile(cfg.GeoIPFilePath)
+		if n, err := gr.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoIP: %v", TAG, err)
+		} else if n == 0 {
+			zlog.Warnf("%s [Config] ⚠️ GeoIP yielded 0 CIDR subnet(s), direct IP routing disabled", TAG)
 		} else {
-			zlog.Infof("%s [Config] ✅ GeoIP loaded successfully", TAG)
+			zlog.Infof("%s [Config] ✅ GeoIP loaded successfully (%d CIDR subnet(s))", TAG, n)
 		}
 	} else if os.IsNotExist(err) {
 		zlog.Warnf("%s [Config] ⚠️ GeoIP file not found (%s), direct IP routing disabled", TAG, cfg.GeoIPFilePath)

@@ -38,6 +38,11 @@ type GeoRouter struct {
 	cacheCount        atomic.Int32
 	routeIPCacheCount atomic.Int32
 
+	// 分流日志抑制表：目标 -> 上次记录时间。未命中的目标会被反复重试
+	// （mDNS 组播每几百毫秒一轮），逐条记录会把日志刷成单一地址的海量重复。
+	rateLogTimes sync.Map
+	rateLogCount atomic.Int64
+
 	// resolveGroup 对同一域名的并发 DNS 回退解析去重：UDP 数据面每个包
 	// 都会走到 ShouldDirect，缓存冷启动窗口内的并发包必须共享一次解析，
 	// 否则会形成 DNS 查询风暴。
@@ -85,6 +90,48 @@ type routeResolved struct {
 	expire time.Time
 }
 
+// rateLimitedLogInterval 是分流日志的抑制窗口：同一目标在窗口内只记一次。
+const rateLimitedLogInterval = 5 * time.Minute
+
+// rateLimitedLogMaxKeys 是抑制表的容量上限，超出即整体清空重来 —— 清空的代价
+// 只是每个目标多记一次，远优于无界增长。
+const rateLimitedLogMaxKeys = 4096
+
+// nonProxyable 报告 addr 是否根本无法经代理转发：组播、回环、链路本地与
+// 未指定地址。代理端既不能也不会为它们建立会话，请求这类目标只会换回远端
+// 拒绝（tun2proxy-udpgw 的 0x20 错误），或在 GeoIP 规则缺失时被误发到上游。
+// 因此这里无条件直连，不依赖规则表是否完整。
+func nonProxyable(addr netip.Addr) bool {
+	return addr.IsMulticast() ||
+		addr.IsUnspecified() ||
+		addr.IsLoopback() ||
+		addr.IsLinkLocalUnicast()
+}
+
+// logRateLimited 按目标去重地记录一条分流日志：同一目标在 rateLimitedLogInterval
+// 内只记一次。分流判定位于数据面热路径（每个包都会进来），未命中的目标往往还
+// 会被反复重试，逐条记录会把日志刷成单一地址的海量重复、淹没真正的错误。
+func (r *GeoRouter) logRateLimited(key, format string, args ...interface{}) {
+	if r.rateLogCount.Load() > rateLimitedLogMaxKeys {
+		r.rateLogTimes.Range(func(k, _ interface{}) bool {
+			r.rateLogTimes.Delete(k)
+			return true
+		})
+		r.rateLogCount.Store(0)
+	}
+
+	now := time.Now()
+	if prev, ok := r.rateLogTimes.LoadOrStore(key, now); ok {
+		if now.Sub(prev.(time.Time)) < rateLimitedLogInterval {
+			return
+		}
+		r.rateLogTimes.Store(key, now)
+	} else {
+		r.rateLogCount.Add(1)
+	}
+	zlog.Debugf(format, args...)
+}
+
 // ShouldDirect 判断目标 host 是否直连。
 //
 //	先查 GeoSite 域名规则、再查 IP（或解析后）是否 GeoIP 命中，命中则 IsDirect=true，
@@ -101,7 +148,11 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 			zlog.Debugf("%s [Router] Direct IP access [%s] -> Hit GeoIP, routing direct", TAG, host)
 			return RouteResult{IsDirect: true, DialHost: host}
 		}
-		zlog.Debugf("%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
+		if nonProxyable(addr) {
+			r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> non-proxyable, routing direct", TAG, host)
+			return RouteResult{IsDirect: true, DialHost: host}
+		}
+		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
 		return RouteResult{IsDirect: false, DialHost: host}
 	}
 
@@ -191,7 +242,7 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	}
 
 	// 默认走代理 (兜底)
-	zlog.Debugf("%s [Router] Domain [%s] missed all direct rules -> routing proxy", TAG, host)
+	r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] missed all direct rules -> routing proxy", TAG, host)
 	return RouteResult{IsDirect: false, DialHost: host}
 }
 

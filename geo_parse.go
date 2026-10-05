@@ -14,17 +14,21 @@ import (
 // 本文件实现 geosite.dat / geoip.dat 的零拷贝 protowire 解析：
 // 只提取目标 tag 的条目，填充 GeoRouter 的域名/关键词/正则/IP 规则集。
 
-func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
+// LoadGeoSite parses the rule file and fills the domain rules for targetTags.
+// It returns the number of domain rules extracted, so the caller can tell an
+// empty rule set apart from a real one: a nil error alone used to let config
+// announce "GeoSite loaded successfully" right after the parser logged 0 rules.
+func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) (int, error) {
 	f, err := os.Open(filepath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return fmt.Errorf("failed to read geosite.dat: %w", err)
+		return 0, fmt.Errorf("failed to read geosite.dat: %w", err)
 	}
 
 	tagMap := make(map[string]bool)
@@ -33,6 +37,7 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	}
 
 	foundCount := 0
+	domainCount := 0
 	keywordMap := make(map[string]struct{}) // Keyword 去重集合，交给 AC 匹配
 
 	// 顶层 protowire 流式解析 bytes 字段
@@ -132,15 +137,19 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 						if _, exists := keywordMap[val]; !exists {
 							keywordMap[val] = struct{}{}
 							r.keywordList = append(r.keywordList, val)
+							domainCount++
 						}
 					case 1: // Regex
 						if re, err := regexp.Compile(val); err == nil {
 							r.regexList = append(r.regexList, re)
+							domainCount++
 						}
 					case 2: // RootDomain
 						r.subDomains[val] = struct{}{}
+						domainCount++
 					case 3: // Full
 						r.fullDomains[val] = struct{}{}
+						domainCount++
 					}
 				}
 			}
@@ -160,9 +169,15 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 
 	if foundCount == 0 && len(targetTags) > 0 {
 		if truncated {
-			return fmt.Errorf("geosite.dat is truncated (wire parse stopped after %d of %d bytes), so no specified tags could be read: %v", len(data)-len(b), len(data), targetTags)
+			return 0, fmt.Errorf("geosite.dat is truncated (wire parse stopped after %d of %d bytes), so no specified tags could be read: %v", len(data)-len(b), len(data), targetTags)
 		}
-		return fmt.Errorf("no specified tags found in geosite: %v", targetTags)
+		return 0, fmt.Errorf("no specified tags found in geosite: %v", targetTags)
+	}
+
+	// Tags matched but nothing usable came out of them: the file parsed far
+	// enough to find the country_code, yet carried no readable domain entries.
+	if len(targetTags) > 0 && domainCount == 0 {
+		return 0, fmt.Errorf("geosite tags %v matched but yielded 0 domain rule(s), the rule file is structurally broken", targetTags)
 	}
 
 	// 合并正则
@@ -179,8 +194,8 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) error {
 	data = nil
 	keywordMap = nil
 
-	zlog.Debugf("%s [Router] GeoSite parsing completed, matched %d rule clusters", TAG, foundCount)
-	return nil
+	zlog.Debugf("%s [Router] GeoSite parsing completed, matched %d rule clusters, %d domain rule(s) extracted", TAG, foundCount, domainCount)
+	return domainCount, nil
 }
 
 // combineRegexPatterns 把正则列表按块合并，减少 DFA 状态数
@@ -215,17 +230,20 @@ func (r *GeoRouter) combineRegexPatterns() {
 	zlog.Debugf("%s [Router] %d regular expressions optimized into %d matching groups", TAG, len(r.regexList), len(r.regexGrouped))
 }
 
-func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
+// LoadGeoIP parses the rule file and fills the IP trie for targetTags. It
+// returns the number of CIDR subnets inserted, so the caller can tell a usable
+// rule set apart from an empty one — see LoadGeoSite.
+func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) (int, error) {
 	f, err := os.Open(filepath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return fmt.Errorf("failed to read geoip.dat: %w", err)
+		return 0, fmt.Errorf("failed to read geoip.dat: %w", err)
 	}
 
 	tagMap := make(map[string]bool)
@@ -351,14 +369,20 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) error {
 
 	if foundCount == 0 && len(targetTags) > 0 {
 		if truncated {
-			return fmt.Errorf("geoip.dat is truncated (wire parse stopped after %d of %d bytes), so no specified tags could be read: %v", len(data)-len(b), len(data), targetTags)
+			return 0, fmt.Errorf("geoip.dat is truncated (wire parse stopped after %d of %d bytes), so no specified tags could be read: %v", len(data)-len(b), len(data), targetTags)
 		}
-		return fmt.Errorf("no specified tags found in geoip: %v", targetTags)
+		return 0, fmt.Errorf("no specified tags found in geoip: %v", targetTags)
+	}
+
+	// Tags matched but nothing usable came out of them: the file parsed far
+	// enough to find the country_code, yet not a single CIDR survived.
+	if len(targetTags) > 0 && ipInsertCount == 0 {
+		return 0, fmt.Errorf("geoip tags %v matched but yielded 0 CIDR subnets, the rule file is structurally broken", targetTags)
 	}
 
 	// cleanup：解除大块字节引用，交由 GC 自然回收（理由同 LoadGeoSite）。
 	data = nil
 
 	zlog.Debugf("%s [Router] GeoIP parsing completed, loaded %d CIDR subnets into Radix tree", TAG, ipInsertCount)
-	return nil
+	return ipInsertCount, nil
 }
