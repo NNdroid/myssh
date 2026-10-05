@@ -24,6 +24,15 @@ type PingResult struct {
 	LatencyMs int64  `json:"latencyMs"`
 	Error     string `json:"error"`
 	ErrorType string `json:"errorType"` // timeout|connrefused|auth|hostkey|tcpforward|tls|dns|http|other|""
+
+	// 分段计时。LatencyMs == HandshakeMs + HttpMs（三段之和），单列出来是为了让
+	// UI 能解释「为什么这里 200ms 而系统 ping 只有 30ms」：握手含 TCP + SSH KEX/认证，
+	// 跨洋节点里它往往是主要开销，而不是网络 RTT。
+	//
+	// 加字段是向后兼容的：pingNodes 返回的是 JSON 字符串而非 gomobile 结构体，
+	// 老版本客户端解析时忽略未知键即可，**无需重新生成 AAR**。
+	HandshakeMs int64 `json:"handshakeMs"` // TCP 建连 + SSH 握手
+	HttpMs      int64 `json:"httpMs"`      // 隧道内 HTTP 往返
 }
 
 var pingCancel atomic.Value
@@ -65,14 +74,14 @@ func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			latency, err := testSingleNodeTrueLatency(ctx, r.Config, targetUrl, time.Duration(timeoutMs)*time.Millisecond)
+			latency, handshakeMs, httpMs, err := testSingleNodeTrueLatency(ctx, r.Config, targetUrl, time.Duration(timeoutMs)*time.Millisecond)
 			if err != nil {
 				zlog.Errorf("[Latency] node %s failed: %v", r.Id, err)
 				resCh <- PingResult{Id: r.Id, Ok: false, Error: err.Error(), ErrorType: classifyPingError(err)}
 				return
 			}
-			zlog.Infof("[Latency] node %s success: %d ms", r.Id, latency)
-			resCh <- PingResult{Id: r.Id, Ok: true, LatencyMs: latency}
+			zlog.Infof("[Latency] node %s success: %d ms (handshake %d ms + http %d ms)", r.Id, latency, handshakeMs, httpMs)
+			resCh <- PingResult{Id: r.Id, Ok: true, LatencyMs: latency, HandshakeMs: handshakeMs, HttpMs: httpMs}
 		}(req)
 	}
 
@@ -88,7 +97,12 @@ func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 	return string(out)
 }
 
-func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl string, timeout time.Duration) (int64, error) {
+// testSingleNodeTrueLatency 返回 (总耗时, 握手耗时, 隧道内 HTTP 耗时)。
+//
+// 计时分段而非只报总数，是为了让 UI 能解释延迟构成：跨洋节点里 SSH 握手
+// （TCP + KEX + 认证）常占大头，把它和真实 RTT 混在一个数字里会让用户
+// 误以为是链路问题。总耗时保持为两段之和，语义与旧版完全一致。
+func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl string, timeout time.Duration) (int64, int64, int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -96,8 +110,9 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 
 	sshClient, conn, err := DialNode(ctx, cfg, true)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
+	handshakeMs := time.Since(start).Milliseconds()
 	defer conn.Close()
 	defer sshClient.Close()
 
@@ -107,7 +122,7 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 
 	req, err := http.NewRequestWithContext(ctx, "GET", targetUrl, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/Ping")
 
@@ -130,17 +145,19 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 		Timeout: timeout,
 	}
 
+	httpStart := time.Now()
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("http err: %w", err)
+		return 0, 0, 0, fmt.Errorf("http err: %w", err)
 	}
 	defer resp.Body.Close()
+	httpMs := time.Since(httpStart).Milliseconds()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0, fmt.Errorf("status %d", resp.StatusCode)
+		return 0, 0, 0, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	return time.Since(start).Milliseconds(), nil
+	return handshakeMs + httpMs, handshakeMs, httpMs, nil
 }
 
 func classifyPingError(err error) string {
