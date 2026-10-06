@@ -351,9 +351,9 @@ func (l *LocalDnsServer) resolveUDP(req *dns.Msg, addr string, isDirect bool, ss
 		return nil, fmt.Errorf("write udp dns request failed: %v", err)
 	}
 
-	bufPtr := udpBufPool.Get().(*[]byte)
+	bufPtr := relayBufPool.Get().(*[]byte)
 	buffer := (*bufPtr)[:cap(*bufPtr)]
-	defer udpBufPool.Put(bufPtr)
+	defer relayBufPool.Put(bufPtr)
 
 	n, err := trackedConn.Read(buffer)
 	if err != nil {
@@ -645,6 +645,14 @@ func (l *LocalDnsServer) printDnsResponse(source, server, domainName, qtypeStr s
 	}
 }
 
+// DNS 缓存键形如 <fqdn>-<qtype>，写入端见 lookupDNS。
+// 后缀在包初始化时算一次即可：GetCachedIPs 位于 UDP 数据面逐包热路径上，
+// 每次调用现算 strconv.Itoa 等于每包两次堆分配。
+var (
+	dnsCacheKeySuffixA    = "-" + strconv.Itoa(int(dns.TypeA))
+	dnsCacheKeySuffixAAAA = "-" + strconv.Itoa(int(dns.TypeAAAA))
+)
+
 // GetCachedIPs 返回域名在缓存中的 A/AAAA 记录 IP（供路由热路径直读）。
 func GetCachedIPs(domain string) []net.IP {
 	lds := localDnsServer.Load()
@@ -654,14 +662,14 @@ func GetCachedIPs(domain string) []net.IP {
 	fqdn := dns.Fqdn(domain)
 	var ips []net.IP
 	lds.cacheMu.RLock()
-	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		key := fqdn + "-" + strconv.Itoa(int(qt))
-		if entry, ok := lds.cache[key]; ok && time.Now().Before(entry.expiresAt) {
-			// 直读写入时预解析好的 ips 切片（不可变）。该函数位于 UDP
-			// 数据面逐包热路径上，绝不能在这里 Unpack——旧实现每次命中
-			// 都重新解包整条 DNS 消息且持有读锁，高吞吐下开销显著。
-			ips = append(ips, entry.ips...)
-		}
+	// 直读写入时预解析好的 ips 切片（不可变）。该函数位于 UDP
+	// 数据面逐包热路径上，绝不能在这里 Unpack——旧实现每次命中
+	// 都重新解包整条 DNS 消息且持有读锁，高吞吐下开销显著。
+	if entry, ok := lds.cache[fqdn+dnsCacheKeySuffixA]; ok && time.Now().Before(entry.expiresAt) {
+		ips = append(ips, entry.ips...)
+	}
+	if entry, ok := lds.cache[fqdn+dnsCacheKeySuffixAAAA]; ok && time.Now().Before(entry.expiresAt) {
+		ips = append(ips, entry.ips...)
 	}
 	lds.cacheMu.RUnlock()
 	return ips

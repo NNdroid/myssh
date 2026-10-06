@@ -1,7 +1,6 @@
 package myssh
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -18,15 +17,12 @@ var (
 	Version  = "dev"
 	DebugStr = "false"
 	Debug    = false
-	// TCP 中转 io.CopyBuffer 使用的缓冲池，缓冲区 64KB+1KB
-	tcpBufPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, 64*1024+1024)
-			return &buf
-		},
-	}
-	// UDP 中转使用的大缓冲池，缓冲区 64KB+1KB（读满/写满）
-	udpBufPool = sync.Pool{
+	// relayBufPool 是 TCP/UDP 中转共用的大缓冲池，缓冲区 64KB+1KB。
+	// TCP 侧供 io.CopyBuffer 使用，UDP 侧用于读满/写满一个数据报。
+	// 原先 tcpBufPool 与 udpBufPool 是两个尺寸完全相同的池——维护两份等价
+	// 的池既没有收益（尺寸一致、都走 sync.Pool 的 per-P 缓存），又多一处
+	// 需要同步修改的重复声明，故合并为一个。
+	relayBufPool = sync.Pool{
 		New: func() interface{} {
 			buf := make([]byte, 64*1024+1024)
 			return &buf
@@ -37,12 +33,6 @@ var (
 		New: func() interface{} {
 			buf := make([]byte, 2048)
 			return &buf
-		},
-	}
-	// 复用的 bytes.Buffer 池，减少临时分配
-	bytesBufPool = sync.Pool{
-		New: func() interface{} {
-			return new(bytes.Buffer)
 		},
 	}
 	// 填充数据池
@@ -66,10 +56,10 @@ func init() {
 }
 
 func tcpRelay(dst io.Writer, src io.Reader) (int64, error) {
-	bufPtr := tcpBufPool.Get().(*[]byte)
+	bufPtr := relayBufPool.Get().(*[]byte)
 	buf := *bufPtr
 
-	defer tcpBufPool.Put(bufPtr)
+	defer relayBufPool.Put(bufPtr)
 
 	// 中转基于 io.CopyBuffer，使用池化缓冲
 	// 依赖 src 读到 EOF 时 CopyBuffer 自行结束
@@ -88,14 +78,21 @@ func relayStream(dst, src net.Conn) (int64, error) {
 }
 
 // formatSHA256Fingerprint 格式化 SHA-256 指纹为冒号分隔的大写十六进制 (XX:XX:XX:...)
+//
+// 用查表 + 预扩容 Builder 一次写完，不走 fmt.Fprintf：证书校验每次握手都
+// 会**无条件**先算一遍实际指纹（要打日志供用户比对 pin），逐字节 Fprintf
+// 等于 32 次反射式格式化，纯属浪费。改为查表后只分配一次。
 func formatSHA256Fingerprint(raw []byte) string {
+	const hexDigits = "0123456789ABCDEF"
 	sha256Sum := sha256.Sum256(raw)
 	var fpBuilder strings.Builder
+	fpBuilder.Grow(len(sha256Sum)*3 - 1) // "XX" 加分隔符 ':'，末字节后无冒号
 	for i, b := range sha256Sum {
 		if i > 0 {
-			fpBuilder.WriteString(":")
+			fpBuilder.WriteByte(':')
 		}
-		fmt.Fprintf(&fpBuilder, "%02X", b)
+		fpBuilder.WriteByte(hexDigits[b>>4])
+		fpBuilder.WriteByte(hexDigits[b&0x0F])
 	}
 	return fpBuilder.String()
 }

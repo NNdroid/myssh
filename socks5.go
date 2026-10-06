@@ -320,10 +320,10 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 					defer conn.Close()
 					defer udpNatMap.CompareAndDelete(key, conn)
 
-					bufPtr := udpBufPool.Get().(*[]byte)
+					bufPtr := relayBufPool.Get().(*[]byte)
 					// 读满整个缓冲，MTU 内一次读完不浪费
 					buf := (*bufPtr)[:cap(*bufPtr)]
-					defer udpBufPool.Put(bufPtr)
+					defer relayBufPool.Put(bufPtr)
 
 					for {
 						n, err := conn.Read(buf)
@@ -444,9 +444,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				defer conn.Close()
 				defer udpgwMap.CompareAndDelete(key, conn)
 
-				bufPtr := udpBufPool.Get().(*[]byte)
+				bufPtr := relayBufPool.Get().(*[]byte)
 				buf := (*bufPtr)[:cap(*bufPtr)]
-				defer udpBufPool.Put(bufPtr)
+				defer relayBufPool.Put(bufPtr)
 
 				for {
 					n, rerr := conn.Read(buf)
@@ -495,9 +495,9 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 // sendSocks5UDPResponse 打包 SOCKS5 UDP 回程报文并写回客户端
 func (h *SshProxyHandler) sendSocks5UDPResponse(s *socks5.Server, clientAddr *net.UDPAddr, atyp byte, addr []byte, port []byte, data []byte) {
 	outLen := 3 + 1 + len(addr) + 2 + len(data)
-	outBufPtr := udpBufPool.Get().(*[]byte)
+	outBufPtr := relayBufPool.Get().(*[]byte)
 	outBuf := *outBufPtr
-	defer udpBufPool.Put(outBufPtr)
+	defer relayBufPool.Put(outBufPtr)
 
 	var outPkt []byte
 	if outLen <= cap(outBuf) {

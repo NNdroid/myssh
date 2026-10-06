@@ -139,9 +139,17 @@ func nonProxyable(addr netip.Addr) bool {
 }
 
 // logRateLimited 按目标去重地记录一条分流日志：同一目标在 rateLimitedLogInterval
-// 内只记一次。分流判定位于数据面热路径（每个包都会进来），未命中的目标往往还
+// 内只记一次。分流判定位于数据面热路径（UDP 每个包都会进来），未命中的目标往往还
 // 会被反复重试，逐条记录会把日志刷成单一地址的海量重复、淹没真正的错误。
-func (r *GeoRouter) logRateLimited(key, format string, args ...interface{}) {
+//
+// emit 是惰性回调而不是 (format, args...)：变参形式下 String() 与装箱在**被
+// 抑制**时照样发生——而这恰恰是绝大多数情况——等于每个包都白分配好几次。
+// 改成闭包后，只有真要落日志时才付出格式化成本。
+//
+// key 直接用目标字符串，不再拼 "domain:"/"ip:" 前缀：ShouldDirect 里 IP 与
+// 域名两条分支互斥（取决于 ParseAddr 是否成功），同一字符串不可能既走 IP 分支
+// 又走域名分支，键空间天然不相交，前缀是多余的（还多一次拼接分配）。
+func (r *GeoRouter) logRateLimited(key string, emit func()) {
 	if r.rateLogCount.Load() > rateLimitedLogMaxKeys {
 		r.rateLogTimes.Range(func(k, _ interface{}) bool {
 			r.rateLogTimes.Delete(k)
@@ -159,7 +167,7 @@ func (r *GeoRouter) logRateLimited(key, format string, args ...interface{}) {
 	} else {
 		r.rateLogCount.Add(1)
 	}
-	zlog.Debugf(format, args...)
+	emit()
 }
 
 // ShouldDirect 判断目标 host 是否直连。
@@ -181,10 +189,14 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 	if r.MatchDomain(host) {
 		ips := GetCachedIPs(host)
 		if len(ips) > 0 {
-			r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] hit GeoSite -> Using cached IP (%s) for direct routing", TAG, host, ips[0].String())
+			r.logRateLimited(host, func() {
+				zlog.Debugf("%s [Router] Domain [%s] hit GeoSite -> Using cached IP (%s) for direct routing", TAG, host, ips[0].String())
+			})
 			return RouteResult{IsDirect: true, DialHost: ips[0].String()}
 		}
-		r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] hit GeoSite -> No cached IP, keeping domain for direct routing", TAG, host)
+		r.logRateLimited(host, func() {
+			zlog.Debugf("%s [Router] Domain [%s] hit GeoSite -> No cached IP, keeping domain for direct routing", TAG, host)
+		})
 		return RouteResult{IsDirect: true, DialHost: host}
 	}
 
@@ -257,13 +269,17 @@ func (r *GeoRouter) ShouldDirect(host string) RouteResult {
 
 	for _, resolvedIP := range ips {
 		if r.MatchIP(resolvedIP) {
-			r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] resolved IP (%s) hit GeoIP -> routing direct", TAG, host, resolvedIP.String())
+			r.logRateLimited(host, func() {
+				zlog.Debugf("%s [Router] Domain [%s] resolved IP (%s) hit GeoIP -> routing direct", TAG, host, resolvedIP.String())
+			})
 			return RouteResult{IsDirect: true, DialHost: resolvedIP.String()}
 		}
 	}
 
 	// 默认走代理 (兜底)
-	r.logRateLimited("domain:"+host, "%s [Router] Domain [%s] missed all direct rules -> routing proxy", TAG, host)
+	r.logRateLimited(host, func() {
+		zlog.Debugf("%s [Router] Domain [%s] missed all direct rules -> routing proxy", TAG, host)
+	})
 	return RouteResult{IsDirect: false, DialHost: host}
 }
 
@@ -287,12 +303,18 @@ func (r *GeoRouter) ipDecision(host string, addr netip.Addr) RouteResult {
 	var direct bool
 	if r.MatchNetIP(addr) {
 		direct = true
-		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> Hit GeoIP, routing direct", TAG, host)
+		r.logRateLimited(host, func() {
+			zlog.Debugf("%s [Router] Direct IP access [%s] -> Hit GeoIP, routing direct", TAG, host)
+		})
 	} else if nonProxyable(addr) {
 		direct = true
-		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> non-proxyable, routing direct", TAG, host)
+		r.logRateLimited(host, func() {
+			zlog.Debugf("%s [Router] Direct IP access [%s] -> non-proxyable, routing direct", TAG, host)
+		})
 	} else {
-		r.logRateLimited("ip:"+host, "%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
+		r.logRateLimited(host, func() {
+			zlog.Debugf("%s [Router] Direct IP access [%s] -> Missed GeoIP, routing proxy", TAG, host)
+		})
 	}
 
 	// LoadOrStore 而不是 Store：冷启动的突发包会同时落到这里。判定只依赖

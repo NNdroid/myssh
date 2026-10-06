@@ -275,21 +275,27 @@ func (tc *TrackedPacketConn) Close() error {
 
 // ===== 包装入口 =====
 
+// targetHostOf 从 "host:port" 中取出 host，供域名活跃度聚合使用。
+//
+// addr 不是 host:port 形式时，只有非 IP 字面量才当作域名——纯 IP 目标不参与
+// 域名排行（返回空串，调用方据此跳过聚合）。
+func targetHostOf(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	if net.ParseIP(addr) == nil {
+		return addr
+	}
+	return ""
+}
+
 // WrapConn 包装 TCP 连接，纳入流量统计。
 func WrapConn(conn net.Conn, targetAddr string) net.Conn {
 	globalTrafficManager.TotalConns.Add(1)
 	globalTrafficManager.ActiveConns.Add(1)
 	id := globalTrafficManager.connIDCounter.Add(1)
 
-	var host string
-	h, _, err := net.SplitHostPort(targetAddr)
-	if err == nil {
-		host = h
-	} else {
-		if net.ParseIP(targetAddr) == nil {
-			host = targetAddr
-		}
-	}
+	host := targetHostOf(targetAddr)
 	info := &ConnInfo{
 		ID:         id,
 		TargetAddr: targetAddr,
@@ -322,15 +328,7 @@ func WrapPacketConn(conn net.PacketConn, sessionName string) net.PacketConn {
 	globalTrafficManager.ActiveConns.Add(1)
 	id := globalTrafficManager.connIDCounter.Add(1)
 
-	var host string
-	h, _, err := net.SplitHostPort(sessionName)
-	if err == nil {
-		host = h
-	} else {
-		if net.ParseIP(sessionName) == nil {
-			host = sessionName
-		}
-	}
+	host := targetHostOf(sessionName)
 	info := &ConnInfo{
 		ID:         id,
 		TargetAddr: sessionName,

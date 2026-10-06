@@ -220,9 +220,9 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	headerLen := 3 + (1 + len(c.targetAddressData) + 2)
 	totalSize := headerLen + dataLen // 不含 LEN 前缀
 
-	bufPtr := udpBufPool.Get().(*[]byte)
+	bufPtr := relayBufPool.Get().(*[]byte)
 	buffer := (*bufPtr)[:cap(*bufPtr)]
-	defer udpBufPool.Put(bufPtr)
+	defer relayBufPool.Put(bufPtr)
 
 	if totalSize > 65535 || 2+totalSize > cap(buffer) {
 		return 0, fmt.Errorf("payload too large")
@@ -262,9 +262,9 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 	c.readLock.Lock()
 	defer c.readLock.Unlock()
 
-	bufPtr := udpBufPool.Get().(*[]byte)
+	bufPtr := relayBufPool.Get().(*[]byte)
 	bodyBuf := (*bufPtr)[:cap(*bufPtr)]
-	defer udpBufPool.Put(bufPtr)
+	defer relayBufPool.Put(bufPtr)
 
 	for {
 		var lenBuf [2]byte

@@ -208,34 +208,50 @@ func TestGeoRouter_NonProxyableDirectWithEmptyGeoIP(t *testing.T) {
 func TestGeoRouter_LogRateLimitedSuppressesRepeats(t *testing.T) {
 	r := newGeoRouter()
 
-	r.logRateLimited("ip:1.2.3.4", "hit")
+	// emit 是惰性回调：被抑制时不许调用它，否则数据面每个包都要白付格式化成本。
+	emitted := 0
+	emit := func() { emitted++ }
+
+	r.logRateLimited("ip:1.2.3.4", emit)
 	first, _ := r.rateLogTimes.Load("ip:1.2.3.4")
+	if emitted != 1 {
+		t.Fatalf("first call must emit exactly once, got %d", emitted)
+	}
 
 	for i := 0; i < 500; i++ {
-		r.logRateLimited("ip:1.2.3.4", "hit")
+		r.logRateLimited("ip:1.2.3.4", emit)
+	}
+	if emitted != 1 {
+		t.Fatalf("suppressed repeats must not invoke emit (that is the point of the lazy callback), got %d", emitted)
 	}
 	again, _ := r.rateLogTimes.Load("ip:1.2.3.4")
 	if !first.(time.Time).Equal(again.(time.Time)) {
 		t.Fatal("suppressed repeats must not refresh the timestamp")
 	}
 
-	r.logRateLimited("ip:5.6.7.8", "hit")
+	r.logRateLimited("ip:5.6.7.8", emit)
 	if r.rateLogCount.Load() != 2 {
 		t.Fatalf("each distinct target counts once, got %d", r.rateLogCount.Load())
+	}
+	if emitted != 2 {
+		t.Fatalf("a distinct target must emit, got %d", emitted)
 	}
 
 	// 窗口过期后重新放行，并更新时间戳
 	stale := time.Now().Add(-10 * time.Minute)
 	r.rateLogTimes.Store("ip:9.9.9.9", stale)
-	r.logRateLimited("ip:9.9.9.9", "hit")
+	r.logRateLimited("ip:9.9.9.9", emit)
 	fresh, _ := r.rateLogTimes.Load("ip:9.9.9.9")
 	if fresh.(time.Time).Equal(stale) {
 		t.Fatal("an expired entry must be re-logged")
 	}
+	if emitted != 3 {
+		t.Fatalf("an expired entry must emit again, got %d", emitted)
+	}
 
 	// 容量上限触发整体清空
 	for i := 0; i < rateLimitedLogMaxKeys+16; i++ {
-		r.logRateLimited("domain:flood", "hit")
+		r.logRateLimited("domain:flood", emit)
 	}
 	if r.rateLogCount.Load() > rateLimitedLogMaxKeys {
 		t.Fatalf("count must be reset after the overflow sweep, got %d", r.rateLogCount.Load())

@@ -284,9 +284,9 @@ func (c *BadvpnUdpgwConn) Write(b []byte) (int, error) {
 }
 
 func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
-	bufPtr := udpBufPool.Get().(*[]byte)
+	bufPtr := relayBufPool.Get().(*[]byte)
 	bodyBuf := (*bufPtr)[:cap(*bufPtr)]
-	defer udpBufPool.Put(bufPtr)
+	defer relayBufPool.Put(bufPtr)
 
 	for {
 		var lenBuf [2]byte

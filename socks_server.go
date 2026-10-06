@@ -188,13 +188,13 @@ func getPacketBuffer(n int) *[]byte {
 	if n <= 2048 {
 		return udpSmallBufPool.Get().(*[]byte)
 	}
-	return udpBufPool.Get().(*[]byte)
+	return relayBufPool.Get().(*[]byte)
 }
 
 func putPacketBuffer(p *[]byte) {
 	if cap(*p) == 2048 {
 		udpSmallBufPool.Put(p)
 	} else {
-		udpBufPool.Put(p)
+		relayBufPool.Put(p)
 	}
 }
