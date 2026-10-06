@@ -276,7 +276,12 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 	// 直连流量，建立本地 UDP NAT 会话
 	// ==========================================
 	if isDirect {
-		directTarget := net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
+		// 分流没有改写目标时（DialHost == targetHost）两者是同一个字符串，
+		// 不必再拼一次 JoinHostPort + Itoa。UDP 数据面每个包都走这里。
+		directTarget := targetAddrStr
+		if dialHost != targetHost {
+			directTarget = net.JoinHostPort(dialHost, strconv.Itoa(int(dstPort)))
+		}
 		sessionKey := addr.String() + "<->" + directTarget
 
 		var uc net.Conn

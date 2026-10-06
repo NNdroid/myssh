@@ -219,11 +219,14 @@ func (l *LocalDnsServer) tryGetPooledConn(pool *dnsConnPool) (*dns.Conn, bool) {
 }
 
 func (l *LocalDnsServer) calculateOptimalTTL(reply *dns.Msg) uint32 {
-	// lookupDNS 调用本函数时已持有 cacheMu 写锁，并会在释放该锁前
-	// 写入新的 cache entry。此处先使 IP->domain memo 失效，后续透明
-	// 连接若要恢复域名，会在获取 cacheMu 读锁后看到完整的新缓存状态。
-	// 这样共享 CDN IP 从“唯一”变为“歧义”时不会保留 30 秒旧结论。
-	resetReverseDNSMemo()
+	// lookupDNS 调用本函数时已持有 cacheMu 写锁，并会在释放该锁前写入新的
+	// cache entry。此处先把**本次响应涉及的 IP** 的反向 memo 作废：它们可能
+	// 从“唯一归属”变成“多域共享”，旧结论不能留。
+	//
+	// 只失效受影响的 IP，而不是全量清空——全清会让 memo 在持续解析时几乎永远
+	// 为空，recoverDomainFromDNSCache 就退化成每次都对 DNS 缓存做 O(N) 全表
+	// 扫描（还全程持有 cacheMu 读锁）。
+	invalidateReverseDNSMemoIPs(extractAnswerIPs(reply))
 
 	minTTL := uint32(DefaultMaxTTL)
 	for _, ans := range reply.Answer {
@@ -266,8 +269,12 @@ func (l *LocalDnsServer) cleanupExpiredCache() {
 	defer l.cacheMu.Unlock()
 	now := time.Now()
 	deleted := 0
+	// 记录被删条目涉及的 IP：条目移除后，某些 IP 可能从“多域共享”回到“唯一
+	// 归属”，其 memo 结论同样要作废。
+	var removedIPs []net.IP
 	for k, v := range l.cache {
 		if now.After(v.expiresAt) {
+			removedIPs = append(removedIPs, v.ips...)
 			delete(l.cache, k)
 			deleted++
 		}
@@ -288,13 +295,15 @@ func (l *LocalDnsServer) cleanupExpiredCache() {
 		})
 		toDelete := len(candidates) - MaxCacheSize
 		for i := 0; i < toDelete; i++ {
+			removedIPs = append(removedIPs, l.cache[candidates[i].key].ips...)
 			delete(l.cache, candidates[i].key)
 			deleted++
 		}
 	}
 	if deleted > 0 {
 		// cleanup/eviction also changes the set used for unique reverse lookup.
-		resetReverseDNSMemo()
+		// 与 calculateOptimalTTL 同理：只失效受影响的 IP，不做全量清空。
+		invalidateReverseDNSMemoIPs(removedIPs)
 		zlog.Debugf("%s [Cache-GC] ♻️ Cleaned up %d cache entries, remaining: %d", TAG, deleted, len(l.cache))
 	}
 }

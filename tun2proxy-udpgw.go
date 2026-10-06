@@ -220,9 +220,11 @@ func (c *UdpgwConn) Write(payload []byte) (int, error) {
 	headerLen := 3 + (1 + len(c.targetAddressData) + 2)
 	totalSize := headerLen + dataLen // 不含 LEN 前缀
 
-	bufPtr := relayBufPool.Get().(*[]byte)
+	// 按实际帧长取缓冲：DNS 查询这类几十字节的小包走 2KB 池，不必每包都占住
+	// 一个 64KB 缓冲——并发 UDP 会话多时这点内存差很可观。
+	bufPtr := getPacketBuffer(2 + totalSize)
 	buffer := (*bufPtr)[:cap(*bufPtr)]
-	defer relayBufPool.Put(bufPtr)
+	defer putPacketBuffer(bufPtr)
 
 	if totalSize > 65535 || 2+totalSize > cap(buffer) {
 		return 0, fmt.Errorf("payload too large")

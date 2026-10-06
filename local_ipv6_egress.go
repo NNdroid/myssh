@@ -65,20 +65,28 @@ func startLocalDirectIPv6Probe() {
 		available := probeLocalDirectIPv6()
 
 		localDirectIPv6.mu.Lock()
-		defer localDirectIPv6.mu.Unlock()
 		if localDirectIPv6.generation != generation {
+			localDirectIPv6.mu.Unlock()
 			return
 		}
 		if available {
 			localDirectIPv6.state = ipv6EgressAvailable
-			zlog.Infof("%s [IPv6-Direct] ✅ diagnostic: local public IPv6 reachable", TAG)
 		} else {
 			localDirectIPv6.state = ipv6EgressUnavailable
-			zlog.Warnf("%s [IPv6-Direct] ⚠️ diagnostic: local public IPv6 not confirmed; target-specific DIRECT IPv6 remains allowed", TAG)
 		}
 		if !localDirectIPv6.doneClosed {
 			close(localDirectIPv6.done)
 			localDirectIPv6.doneClosed = true
+		}
+		localDirectIPv6.mu.Unlock()
+
+		// Log outside the lock: a zlog write can block once its buffer is full.
+		// waitLocalDirectIPv6Ms waits on `done`, which is already closed above,
+		// so moving the log after the critical section cannot delay waiters.
+		if available {
+			zlog.Infof("%s [IPv6-Direct] ✅ diagnostic: local public IPv6 reachable", TAG)
+		} else {
+			zlog.Warnf("%s [IPv6-Direct] ⚠️ diagnostic: local public IPv6 not confirmed; target-specific DIRECT IPv6 remains allowed", TAG)
 		}
 	}()
 }
@@ -132,10 +140,6 @@ func localDirectIPv6State() int {
 	localDirectIPv6.mu.Lock()
 	defer localDirectIPv6.mu.Unlock()
 	return localDirectIPv6.state
-}
-
-func localDirectIPv6Unavailable() bool {
-	return localDirectIPv6State() == ipv6EgressUnavailable
 }
 
 func localDirectIPv6StateName() string {

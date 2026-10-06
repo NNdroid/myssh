@@ -38,6 +38,29 @@ func resetReverseDNSMemo() {
 	reverseDNSMemo.Unlock()
 }
 
+// invalidateReverseDNSMemoIPs 只作废受给定 IP 影响的 memo 条目。
+//
+// 反向 memo 的正确性要求只是：某 IP 的归属 domain 集合发生变化时，关于**该 IP**
+// 的结论必须作废（共享 CDN IP 从"唯一"变"歧义"时尤其如此）。其余 IP 的结论
+// 完全不受影响。
+//
+// 因此这里绝不能图省事全量清空：DNS 缓存写入/清理非常频繁，全清会让 memo
+// 几乎永远为空，recoverDomainFromDNSCache 从而退化成每次都对 DNS 缓存做一遍
+// O(N) 全表扫描（且全程持有 cacheMu 读锁）。
+func invalidateReverseDNSMemoIPs(ips []net.IP) {
+	if len(ips) == 0 {
+		return
+	}
+	reverseDNSMemo.Lock()
+	defer reverseDNSMemo.Unlock()
+	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
+		delete(reverseDNSMemo.entries, ip.String())
+	}
+}
+
 func parseIPLiteral(host string) (net.IP, bool) {
 	host = strings.TrimSpace(strings.Trim(host, "[]"))
 	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
@@ -119,20 +142,17 @@ func recoverDomainFromDNSCache(host string) (string, bool) {
 	return memo.domain, memo.found
 }
 
-func proxyFamilyMode() string {
-	remoteIPv6Egress.mu.Lock()
-	defer remoteIPv6Egress.mu.Unlock()
-	return remoteIPv6Egress.mode
-}
-
 func outboundAllowedFamilies(isDirect bool) (allow4, allow6 bool) {
 	if isDirect {
 		return true, true
 	}
-	switch proxyFamilyMode() {
-	case IPv6EgressModeIPv4Only:
+	// Lock-free: this runs for every outbound dial and (via ipFamilyAllowed)
+	// per candidate address. Taking remoteIPv6Egress.mu here would serialize
+	// every connect behind the probe state machine.
+	switch proxyFamilyPolicy() {
+	case policyIPv4Only:
 		return true, false
-	case IPv6EgressModeIPv6Only:
+	case policyIPv6Only:
 		return false, true
 	default:
 		return true, true
@@ -223,10 +243,25 @@ func appendUniqueHost(dst []string, seen map[string]struct{}, host string) []str
 }
 
 func orderTCPHosts(ips []net.IP, originalHost string, isDirect bool) []string {
+	// 出口地址族策略在整个函数内不变，先取一次。策略此前放在 remoteIPv6Egress
+	// 的全局互斥锁后面（proxyFamilyMode），逐个候选 IP 都去抢一次纯属浪费；
+	// 现在读取本身已无锁（atomic），这里保留"先取一次"是为了少一次分支判断
+	// 并让去重逻辑只写一遍。
+	allow4, allow6 := outboundAllowedFamilies(isDirect)
+	allowed := func(ip net.IP) bool {
+		if ip == nil {
+			return true
+		}
+		if ip.To4() != nil {
+			return allow4
+		}
+		return allow6
+	}
+
 	var v4, v6 []string
 	seenIP := make(map[string]struct{})
 	for _, ip := range ips {
-		if ip == nil || !ipFamilyAllowed(ip, isDirect) {
+		if ip == nil || !allowed(ip) {
 			continue
 		}
 		host := ip.String()
@@ -245,7 +280,7 @@ func orderTCPHosts(ips []net.IP, originalHost string, isDirect bool) []string {
 	seen := make(map[string]struct{})
 	originalIP, originalIsIP := parseIPLiteral(originalHost)
 	originalIsV6 := false
-	if originalIsIP && ipFamilyAllowed(originalIP, isDirect) {
+	if originalIsIP && allowed(originalIP) {
 		originalIsV6 = originalIP.To4() == nil
 		ordered = appendUniqueHost(ordered, seen, originalIP.String())
 	}

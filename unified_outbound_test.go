@@ -27,6 +27,39 @@ func dnsCacheKeyForTest(domain string, qtype uint16) string {
 	return dns.Fqdn(domain) + "-" + strconv.Itoa(int(qtype))
 }
 
+// TestInvalidateReverseDNSMemoIPsIsTargeted 钉住「定向失效」而非「全量清空」。
+//
+// DNS 缓存写入与清理非常频繁；若这里退化成全清，memo 会几乎永远为空，
+// recoverDomainFromDNSCache 就会退化成每次都对 DNS 缓存做一遍 O(N) 全表扫描
+// （且全程持有 cacheMu 读锁）。正确性只要求作废**受影响**的那些 IP。
+func TestInvalidateReverseDNSMemoIPsIsTargeted(t *testing.T) {
+	resetReverseDNSMemo()
+	defer resetReverseDNSMemo()
+
+	affected := net.ParseIP("203.0.113.9")
+	unrelated := net.ParseIP("198.51.100.7")
+	exp := time.Now().Add(time.Minute)
+
+	reverseDNSMemo.Lock()
+	reverseDNSMemo.entries[affected.String()] = reverseDNSMemoEntry{domain: "affected.example", expires: exp, found: true}
+	reverseDNSMemo.entries[unrelated.String()] = reverseDNSMemoEntry{domain: "unrelated.example", expires: exp, found: true}
+	reverseDNSMemo.Unlock()
+
+	invalidateReverseDNSMemoIPs([]net.IP{affected})
+
+	reverseDNSMemo.Lock()
+	_, affectedLeft := reverseDNSMemo.entries[affected.String()]
+	unrelatedEntry, unrelatedLeft := reverseDNSMemo.entries[unrelated.String()]
+	reverseDNSMemo.Unlock()
+
+	if affectedLeft {
+		t.Fatal("IPs carried by the new DNS reply must be invalidated")
+	}
+	if !unrelatedLeft || unrelatedEntry.domain != "unrelated.example" {
+		t.Fatal("unrelated IPs must keep their memo entry")
+	}
+}
+
 func TestRecoverDomainFromDNSCacheUnique(t *testing.T) {
 	expires := time.Now().Add(time.Minute)
 	withTestDNSCache(t, map[string]dnsCacheEntry{

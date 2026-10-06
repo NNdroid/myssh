@@ -2,6 +2,7 @@ package myssh
 
 import (
 	"context"
+	"encoding/binary"
 	"hash/maphash"
 	"net"
 	"sync"
@@ -64,10 +65,17 @@ func stopSocksServer(s *socks5.Server) {
 	}
 }
 
+// udpJob 携带一个已解析好的数据报。datagram 的各切片（Data/DstAddr/DstPort）
+// 全部指向 buffer，因此 buffer 必须在 UDPHandle 返回后才能归还池——worker 里
+// 的 putPacketBuffer 就排在调用之后。
+//
+// 只解析一次：reader 先把报文拷进池化缓冲，再从**该拷贝**解析，解析结果就能
+// 安全地跨 goroutine 交给 worker 复用。旧实现在 reader 里解析一次（只为算分片
+// 哈希）、在 worker 里又解析一次，等于每个 UDP 包付两次解析和两次分配。
 type udpJob struct {
-	addr   *net.UDPAddr
-	buffer *[]byte
-	data   []byte
+	addr     *net.UDPAddr
+	buffer   *[]byte
+	datagram *socks5.Datagram
 }
 
 // socksRequestHandler is intentionally small so the production handler can be
@@ -94,10 +102,8 @@ func serveSocks(ctx context.Context, s *socks5.Server, h socksRequestHandler) er
 		go func(q <-chan udpJob) {
 			defer wg.Done()
 			for job := range q {
-				if ctx.Err() == nil {
-					if d, err := socks5.NewDatagramFromBytes(job.data); err == nil && d.Frag == 0 {
-						_ = h.UDPHandle(s, job.addr, d)
-					}
+				if ctx.Err() == nil && job.datagram.Frag == 0 {
+					_ = h.UDPHandle(s, job.addr, job.datagram)
 				}
 				putPacketBuffer(job.buffer)
 			}
@@ -118,27 +124,37 @@ func serveSocks(ctx context.Context, s *socks5.Server, h socksRequestHandler) er
 			if err != nil {
 				return
 			}
-			d, err := socks5.NewDatagramFromBytes(buf[:n])
+			// 先拷进池化缓冲，再从**拷贝**解析：解析结果的所有切片都指向该
+			// 缓冲，worker 因此可以零成本复用，不必再解析一遍。
+			p := getPacketBuffer(n)
+			data := (*p)[:n]
+			copy(data, buf[:n])
+
+			d, err := socks5.NewDatagramFromBytes(data)
 			if err != nil || d.Frag != 0 {
+				putPacketBuffer(p)
 				continue
 			}
 			// Same source/destination always uses one FIFO worker.
 			var hash maphash.Hash
 			hash.SetSeed(seed)
-			hash.WriteString(addr.String())
+			// 直接哈希 IP 原始字节与端口，不走 addr.String()——后者每个包
+			// 都要分配一个字符串出来。
+			hash.Write(addr.IP)
+			var portBuf [2]byte
+			binary.BigEndian.PutUint16(portBuf[:], uint16(addr.Port))
+			hash.Write(portBuf[:])
 			hash.WriteByte(d.Atyp)
 			hash.Write(d.DstAddr)
 			hash.Write(d.DstPort)
 			q := queues[hash.Sum64()%uint64(len(queues))]
 			if len(q) == cap(q) {
+				putPacketBuffer(p)
 				udpQueueDrops.Add(1)
 				continue
 			}
-			p := getPacketBuffer(n)
-			data := (*p)[:n]
-			copy(data, buf[:n])
 			select {
-			case q <- udpJob{addr: addr, buffer: p, data: data}:
+			case q <- udpJob{addr: addr, buffer: p, datagram: d}:
 			default:
 				putPacketBuffer(p)
 				udpQueueDrops.Add(1)

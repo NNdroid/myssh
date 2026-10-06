@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -28,13 +29,51 @@ const (
 	ipv6EgressProbeTimeout = 1500 * time.Millisecond
 )
 
+// ipv6EgressPolicy is the lock-free mirror of the configured mode.
+//
+// Why a separate atomic instead of reading remoteIPv6Egress.mode under its
+// mutex: the mode is written once per config load but read on the hot path —
+// every intercepted DNS packet (shouldSuppressDNSFamily) and every outbound
+// TCP dial (outboundAllowedFamilies). remoteIPv6Egress.mu used to be held
+// across zlog writes by the probe goroutine, so a lock-based read could park
+// packet handling behind logger I/O.
+type ipv6EgressPolicy int32
+
+const (
+	policyAuto ipv6EgressPolicy = iota
+	policyIPv4Only
+	policyIPv6Only
+	policyDualStack
+)
+
+func ipv6EgressPolicyOf(mode string) ipv6EgressPolicy {
+	switch mode {
+	case IPv6EgressModeIPv4Only:
+		return policyIPv4Only
+	case IPv6EgressModeIPv6Only:
+		return policyIPv6Only
+	case IPv6EgressModeDualStack:
+		return policyDualStack
+	default:
+		return policyAuto
+	}
+}
+
+// proxyFamilyPolicy is the hot-path reader: lock-free, never blocks on the
+// tracker mutex that guards the probe state machine.
+func proxyFamilyPolicy() ipv6EgressPolicy {
+	return ipv6EgressPolicy(remoteIPv6Egress.policy.Load())
+}
+
 // ipv6EgressTracker now represents a *diagnostic* public-IPv6 observation when
 // mode=auto. A failed probe cannot prove that private/ULA/enterprise IPv6 is
 // unreachable, so auto-mode forwarding never uses this state to reject traffic.
 // Explicit ipv4-only remains a hard user policy and is enforced by the unified
 // outbound layer.
 type ipv6EgressTracker struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// policy mirrors mode for lock-free hot-path reads. Written under mu.
+	policy     atomic.Int32
 	mode       string
 	state      int
 	client     *ssh.Client
@@ -98,6 +137,7 @@ func configureIPv6EgressFromJSON(configJSON string) error {
 	remoteIPv6Egress.mu.Lock()
 	defer remoteIPv6Egress.mu.Unlock()
 	remoteIPv6Egress.mode = mode
+	remoteIPv6Egress.policy.Store(int32(ipv6EgressPolicyOf(mode)))
 	remoteIPv6Egress.client = nil
 	remoteIPv6Egress.done = make(chan struct{})
 	remoteIPv6Egress.doneClosed = false
@@ -128,11 +168,11 @@ func startIPv6EgressProbe(client *ssh.Client) {
 	// traffic; a target-specific dial is the source of truth in auto mode.
 	startLocalDirectIPv6Probe()
 
-	remoteIPv6Egress.mu.Lock()
-	if remoteIPv6Egress.mode != IPv6EgressModeAuto {
-		remoteIPv6Egress.mu.Unlock()
+	if proxyFamilyPolicy() != policyAuto {
 		return
 	}
+
+	remoteIPv6Egress.mu.Lock()
 	if remoteIPv6Egress.state != ipv6EgressUnknown || remoteIPv6Egress.doneClosed {
 		remoteIPv6Egress.done = make(chan struct{})
 		remoteIPv6Egress.doneClosed = false
@@ -147,20 +187,27 @@ func startIPv6EgressProbe(client *ssh.Client) {
 		available := probeIPv6Egress(client)
 
 		remoteIPv6Egress.mu.Lock()
-		defer remoteIPv6Egress.mu.Unlock()
-		if remoteIPv6Egress.mode != IPv6EgressModeAuto || remoteIPv6Egress.client != client {
+		if proxyFamilyPolicy() != policyAuto || remoteIPv6Egress.client != client {
+			remoteIPv6Egress.mu.Unlock()
 			return
 		}
 		if available {
 			remoteIPv6Egress.state = ipv6EgressAvailable
-			zlog.Infof("%s [IPv6-Egress] ✅ diagnostic: remote public IPv6 reachable", TAG)
 		} else {
 			remoteIPv6Egress.state = ipv6EgressUnavailable
-			zlog.Warnf("%s [IPv6-Egress] ⚠️ diagnostic: remote public IPv6 not confirmed; target-specific IPv6 remains allowed", TAG)
 		}
 		if !remoteIPv6Egress.doneClosed {
 			close(remoteIPv6Egress.done)
 			remoteIPv6Egress.doneClosed = true
+		}
+		remoteIPv6Egress.mu.Unlock()
+
+		// Log only after releasing the mutex: a zlog write can block once its
+		// buffer is full, and hot-path readers must never queue behind that.
+		if available {
+			zlog.Infof("%s [IPv6-Egress] ✅ diagnostic: remote public IPv6 reachable", TAG)
+		} else {
+			zlog.Warnf("%s [IPv6-Egress] ⚠️ diagnostic: remote public IPv6 not confirmed; target-specific IPv6 remains allowed", TAG)
 		}
 	}()
 }
@@ -250,24 +297,12 @@ func ipv6EgressStateName() string {
 	}
 }
 
-func proxyIPv6EgressAvailable() bool {
-	remoteIPv6Egress.mu.Lock()
-	defer remoteIPv6Egress.mu.Unlock()
-	return remoteIPv6Egress.state == ipv6EgressAvailable
-}
-
-func proxyIPv6EgressUnavailable() bool {
-	remoteIPv6Egress.mu.Lock()
-	defer remoteIPv6Egress.mu.Unlock()
-	return remoteIPv6Egress.state == ipv6EgressUnavailable
-}
-
 func proxyIPv6ExplicitlyDisabled() bool {
-	return proxyFamilyMode() == IPv6EgressModeIPv4Only
+	return proxyFamilyPolicy() == policyIPv4Only
 }
 
 func proxyIPv4ExplicitlyDisabled() bool {
-	return proxyFamilyMode() == IPv6EgressModeIPv6Only
+	return proxyFamilyPolicy() == policyIPv6Only
 }
 
 func isIPv6Literal(host string) bool {

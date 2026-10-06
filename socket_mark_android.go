@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -35,14 +36,17 @@ import (
 // helper 由 App 侧（Kotlin, root shell）以 `sockmark <app_pid>` 启动，通过一对 pipe 与之通信。
 // 本文件只负责在拿到 socket fd 后发请求并等 ACK；helper 挂了会自动懒重启。
 type socketMarkClient struct {
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    *os.File // 写请求
-	stdout   *bufio.Reader
-	exePath  string
-	appPID   int
-	markVal  int
-	disabled bool // helper 不可用时置位，避免每次拨号都重试拖慢
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	stdin   *os.File // 写请求
+	stdout  *bufio.Reader
+	exePath string
+	appPID  int
+	markVal int
+	// disabled 由 disable() 在锁内置位，但 markSocketFD 在**不持锁**的快路径上
+	// 读它（每个新 socket 都走一次，不能为了读个 bool 去抢 c.mu）。
+	// 用 atomic.Bool 而不是裸 bool：否则这是一处货真价实的数据竞争。
+	disabled atomic.Bool // helper 不可用时置位，避免每次拨号都重试拖慢
 }
 
 var (
@@ -82,7 +86,7 @@ func markSocketFD(fd uintptr) {
 	globalMarkClientMu.Lock()
 	c := globalMarkClient
 	globalMarkClientMu.Unlock()
-	if c == nil || c.disabled {
+	if c == nil || c.disabled.Load() {
 		return
 	}
 	if err := c.request(fd); err != nil {
@@ -251,7 +255,7 @@ func (c *socketMarkClient) readBackMark(fd uintptr) (int64, error) {
 func (c *socketMarkClient) disable() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.disabled = true
+	c.disabled.Store(true)
 	c.closeLocked()
 }
 

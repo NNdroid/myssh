@@ -184,3 +184,35 @@ func TestAutoProbePublishesAvailableDiagnosticState(t *testing.T) {
 	// before this test returns so a later test can safely replace its fake dialer.
 	require.Equal(t, ipv6EgressAvailable, waitLocalDirectIPv6Ms(250))
 }
+
+// TestFamilyPolicyMirrorTracksConfiguredMode pins the lock-free policy mirror
+// against every accepted mode string. The mirror exists so hot-path readers
+// never touch remoteIPv6Egress.mu; if a new mode is added and the mapping table
+// is forgotten, policy silently falls back to auto and the explicit family
+// policy stops being enforced.
+func TestFamilyPolicyMirrorTracksConfiguredMode(t *testing.T) {
+	defer restoreIPv6EgressAuto(t)
+
+	cases := []struct {
+		mode   string
+		policy ipv6EgressPolicy
+		v6Off  bool
+		v4Off  bool
+	}{
+		{"auto", policyAuto, false, false},
+		{"ipv4-only", policyIPv4Only, true, false},
+		{"ipv6-only", policyIPv6Only, false, true},
+		{"dual-stack", policyDualStack, false, false},
+	}
+	for _, tc := range cases {
+		require.NoError(t, configureIPv6EgressFromJSON(`{"ipv6_egress_mode":"`+tc.mode+`"}`))
+		require.Equal(t, tc.policy, proxyFamilyPolicy(), "mode=%s", tc.mode)
+		require.Equal(t, tc.v6Off, proxyIPv6ExplicitlyDisabled(), "mode=%s", tc.mode)
+		require.Equal(t, tc.v4Off, proxyIPv4ExplicitlyDisabled(), "mode=%s", tc.mode)
+
+		remoteIPv6Egress.mu.Lock()
+		mode := remoteIPv6Egress.mode
+		remoteIPv6Egress.mu.Unlock()
+		require.Equal(t, tc.mode, mode, "string field must stay in sync with the mirror")
+	}
+}

@@ -188,11 +188,12 @@ func (r *GeoRouter) LoadGeoSite(filepath string, targetTags []string) (int, erro
 		r.keywordAC = ahocorasick.NewStringMatcher(r.keywordList)
 	}
 
-	// cleanup：解除大块字节引用，交由 GC 自然回收。
 	// 注意：不要在这里调用 debug.FreeOSMemory()——它强制 STW 并向 OS 归还
 	// 内存，在 Android 上会造成可见的掉帧，收益却只是推迟下一次分配。
-	data = nil
-	keywordMap = nil
+	//
+	// 同样不必把 data / keywordMap 手动置 nil：Go 的 GC 是精确的，局部变量
+	// 在最后一次使用之后即可被回收，手动置 nil 是 C 语言习惯的残留，在这里
+	// 没有任何实际效果（原注释声称的"解除引用"并不成立）。
 
 	zlog.Debugf("%s [Router] GeoSite parsing completed, matched %d rule clusters, %d domain rule(s) extracted", TAG, foundCount, domainCount)
 	return domainCount, nil
@@ -380,8 +381,9 @@ func (r *GeoRouter) LoadGeoIP(filepath string, targetTags []string) (int, error)
 		return 0, fmt.Errorf("geoip tags %v matched but yielded 0 CIDR subnets, the rule file is structurally broken", targetTags)
 	}
 
-	// cleanup：解除大块字节引用，交由 GC 自然回收（理由同 LoadGeoSite）。
-	data = nil
+	// 同 LoadGeoSite：不必手动把 data 置 nil（Go 的 GC 是精确的，局部变量
+	// 最后一次使用之后即可回收），也不调用 debug.FreeOSMemory()（会 STW，
+	// 在 Android 上表现为可见掉帧）。
 
 	zlog.Debugf("%s [Router] GeoIP parsing completed, loaded %d CIDR subnets into Radix tree", TAG, ipInsertCount)
 	return ipInsertCount, nil
