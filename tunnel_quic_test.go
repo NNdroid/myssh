@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestQUICTLSConfig 生成本地测试用自签证书，供 QUIC 服务端使用。
@@ -141,9 +142,9 @@ func TestQUICEchoRoundTrip(t *testing.T) {
 
 	// cleanup 掉缓存里的 QUIC 连接（handler 只开流不关连接，需显式 conn.Close），满足 goleak 检查。
 	defer func() {
-		if v, ok := quicConnCache.Load(serverAddr); ok {
+		if v, ok := quicConnCache.Load(quicCacheKeyOf(cfg)); ok {
 			_ = v.(*quic.Conn).CloseWithError(0, "test end")
-			quicConnCache.Delete(serverAddr)
+			quicConnCache.Delete(quicCacheKeyOf(cfg))
 		}
 		_ = baseConn.Close()
 	}()
@@ -175,4 +176,23 @@ func TestQUICRegistration(t *testing.T) {
 	if proto.Network != "udp" {
 		t.Fatalf("quic network = %q, want \"udp\"", proto.Network)
 	}
+}
+
+// TestQUICCacheKeyIsolatesProfiles pins the security property of the cache key:
+// the same ProxyAddr serving two profiles with a different SNI or a different
+// pinned fingerprint must NOT share a cached QUIC connection. Reusing a
+// connection across profiles would send the wrong SNI and silently bypass the
+// other profile's certificate pinning (InsecureSkipVerify is always on).
+func TestQUICCacheKeyIsolatesProfiles(t *testing.T) {
+	base := ProxyConfig{ProxyAddr: "203.0.113.10:443", ServerName: "a.example.com", ServerCertificateFingerprint: "AA:BB"}
+
+	sameSNI := base
+	diffSNI := base
+	diffSNI.ServerName = "b.example.com"
+	diffFP := base
+	diffFP.ServerCertificateFingerprint = "CC:DD"
+
+	require.Equal(t, quicCacheKeyOf(base), quicCacheKeyOf(sameSNI), "identical TLS identity must collide")
+	require.NotEqual(t, quicCacheKeyOf(base), quicCacheKeyOf(diffSNI), "different SNI must not share a connection")
+	require.NotEqual(t, quicCacheKeyOf(base), quicCacheKeyOf(diffFP), "different pinned fingerprint must not share a connection")
 }
