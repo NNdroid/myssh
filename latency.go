@@ -128,13 +128,7 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 
 	// 每次探测都需要指向该节点 sshClient 的独立 Transport，无法全局复用；
 	// 但必须显式关闭其空闲连接，否则批量 ping 会累积残留的 Transport 与连接。
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return sshClient.Dial("tcp", addr)
-		},
-		DisableKeepAlives:     true,
-		ResponseHeaderTimeout: timeout,
-	}
+	transport := newSSHHTTPTransport(sshClient, timeout)
 	defer transport.CloseIdleConnections()
 
 	httpClient := &http.Client{

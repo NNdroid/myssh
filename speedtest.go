@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -76,13 +75,7 @@ func speedTestWithProgress(configJson, downUrl, upUrl string, upBytes int64, tim
 	defer sshClient.Close()
 
 	httpClient := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return sshClient.Dial("tcp", addr)
-			},
-			DisableKeepAlives:     true,
-			ResponseHeaderTimeout: time.Duration(timeoutMs) * time.Millisecond,
-		},
+		Transport: newSSHHTTPTransport(sshClient, time.Duration(timeoutMs)*time.Millisecond),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
