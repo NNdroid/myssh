@@ -100,14 +100,6 @@ func speedTestWithProgress(configJson, downUrl, upUrl string, upBytes int64, tim
 	return string(out)
 }
 
-// ensureHTTPScheme 为缺少 scheme 的测速 URL 补 http://。
-func ensureHTTPScheme(rawURL string) string {
-	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
-		return "http://" + rawURL
-	}
-	return rawURL
-}
-
 // fillSpeedStats 由传输字节数与起始时间计算 bps/Mbps。
 func fillSpeedStats(n int64, start time.Time) (bps, mbps float64) {
 	d := time.Since(start).Seconds()

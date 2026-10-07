@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -25,4 +26,13 @@ func newSSHHTTPTransport(sshClient *ssh.Client, timeout time.Duration) *http.Tra
 		DisableKeepAlives:     true,
 		ResponseHeaderTimeout: timeout,
 	}
+}
+
+// ensureHTTPScheme 为缺少 scheme 的探测/测速 URL 补 http://。
+// latency.go 与 speedtest.go 共用，避免重复前缀判断。
+func ensureHTTPScheme(rawURL string) string {
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return "http://" + rawURL
+	}
+	return rawURL
 }

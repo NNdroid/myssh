@@ -116,9 +116,7 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 	defer conn.Close()
 	defer sshClient.Close()
 
-	if !strings.HasPrefix(targetUrl, "http://") && !strings.HasPrefix(targetUrl, "https://") {
-		targetUrl = "http://" + targetUrl
-	}
+	targetUrl = ensureHTTPScheme(targetUrl)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", targetUrl, nil)
 	if err != nil {
