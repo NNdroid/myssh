@@ -158,7 +158,11 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 		if n, err := gr.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoSite: %v", TAG, err)
 		} else if n == 0 {
-			zlog.Warnf("%s [Config] ⚠️ GeoSite yielded 0 domain rule(s), direct domain routing disabled", TAG)
+			// n==0 且 err==nil 只可能是标签为空：LoadGeoSite 里所有产出 0 条规则的路径
+			// （截断 / 标签不存在 / 结构损坏）在标签非空时都返回 error。所以这里**不是**
+			// 文件问题——按损坏排查会修错方向。空标签本身是合法配置（不做域名分流，
+			// 全部走代理），故此处只陈述状态与原因，不判为故障。
+			zlog.Warnf("%s [Config] ⚠️ direct_site_tags is empty — direct domain routing disabled, all traffic routed to the proxy. This is the configured value, not a corrupt rule file", TAG)
 		} else {
 			zlog.Infof("%s [Config] ✅ GeoSite loaded successfully (%d domain rule(s))", TAG, n)
 		}
@@ -171,7 +175,9 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 		if n, err := gr.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoIP: %v", TAG, err)
 		} else if n == 0 {
-			zlog.Warnf("%s [Config] ⚠️ GeoIP yielded 0 CIDR subnet(s), direct IP routing disabled", TAG)
+			// 同 GeoSite：n==0 且 err==nil 只可能是 direct_ip_tags 为空，不是文件问题。
+			// 空标签是合法配置（全部走代理），只陈述状态，不判为故障。
+			zlog.Warnf("%s [Config] ⚠️ direct_ip_tags is empty — direct IP routing disabled, all traffic routed to the proxy. This is the configured value, not a corrupt rule file", TAG)
 		} else {
 			zlog.Infof("%s [Config] ✅ GeoIP loaded successfully (%d CIDR subnet(s))", TAG, n)
 		}
