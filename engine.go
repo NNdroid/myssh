@@ -80,7 +80,12 @@ func startSshTProxy(configJson string) int {
 
 	// 启动 DNS 服务
 	if lds := localDnsServer.Load(); lds != nil {
-		lds.Start(cfg.DnsAddr)
+		// DNS 绑定失败（端口被占、地址非法）会让 VPN 模式下所有域名解析失败，而会话仍显示
+		// 「已启动」。此处只留痕不中止：DNS 挂掉不必然影响 socks5 直连，但必须让排障者看得见。
+		if err := lds.Start(cfg.DnsAddr); err != nil {
+			zlog.Errorf("%s [Core] ❌ Local DNS failed to start on %s: %v", TAG, cfg.DnsAddr, err)
+			emitError(-4, "local DNS failed to start on "+cfg.DnsAddr+": "+err.Error())
+		}
 	}
 
 	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)

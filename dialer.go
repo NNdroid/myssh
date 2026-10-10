@@ -177,6 +177,28 @@ func (c *ctxCloseConn) Close() error {
 	return c.Conn.Close()
 }
 
+// ReadFrom / WriteTo 必须显式代理，不能靠嵌入提升。
+//
+// 后果很具体：ctxCloseConn 内嵌的是 net.Conn 接口，promoted surface 里没有
+// ReadFrom/WriteTo，所以它不满足 net.PacketConn。而 quic 与 kcptun 都注册为
+// "udp" 网络——dialTunnel 先给出 *net.UDPConn，紧接着就被 watchEngineCtx 包一层，
+// handler 里的 `baseConn.(*net.UDPConn)` / `baseConn.(net.PacketConn)` 断言必然失败。
+// QUIC 与 KCP 因此完全无法工作；更糟的是报错文案含 "requires a "，正好命中
+// engine.go 的 isPermanentConfigError，引擎会当成配置错误**永久放弃重连**。
+func (c *ctxCloseConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if pc, ok := c.Conn.(net.PacketConn); ok {
+		return pc.ReadFrom(p)
+	}
+	return 0, nil, fmt.Errorf("ctxCloseConn: ReadFrom on non-packet conn %T", c.Conn)
+}
+
+func (c *ctxCloseConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	if pc, ok := c.Conn.(net.PacketConn); ok {
+		return pc.WriteTo(b, addr)
+	}
+	return 0, fmt.Errorf("ctxCloseConn: WriteTo on non-packet conn %T", c.Conn)
+}
+
 // watchEngineCtx 包装 conn，使其随引擎 ctx 取消而关闭。
 func watchEngineCtx(ctx context.Context, conn net.Conn) net.Conn {
 	c := &ctxCloseConn{Conn: conn, closeCh: make(chan struct{})}

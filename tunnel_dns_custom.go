@@ -40,6 +40,8 @@ func NewDNSTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 		return nil, err
 	}
 	zlog.Infof("%s [Tunnel] ✅ dns_custom SDK connected | domain=%s target=%s", TAG, cfg.DnsTunnelDomain, cfg.SshAddr)
+	// 刻意不套 ownSDKConn：dnstunnel.Client 没有 Close，每次 Dial 都是独立会话，
+	// 生命周期完全由返回的 conn 决定。
 	return conn, nil
 }
 

@@ -35,6 +35,17 @@ func (t *ipTrie) Insert(ipBytes []byte, prefixLen int) {
 		return
 	}
 
+	// 前缀长度必须有界。geodata 是下载来的数据，不可信：
+	//   - prefixLen > len*8 时 ipBytes[i/8] 会越界索引 → panic，而 loadGlobalConfig
+	//     在 gomobile 导出层直接被调、外面没有 recover，整个 App 崩；
+	//   - prefixLen == 0 时循环体不执行，isEnd 落在**家族根**上，于是
+	//     ContainsBytes 对任何地址在 i=0 就命中——整个 IPv4/IPv6 空间都被归入该
+	//     标签，流量静默全绕过代理，且无任何报错。
+	maxBits := len(ipBytes) * 8
+	if prefixLen <= 0 || prefixLen > maxBits {
+		return
+	}
+
 	for i := 0; i < prefixLen; i++ {
 		bit := (ipBytes[i/8] >> (7 - (i % 8))) & 1
 		if bit == 0 {

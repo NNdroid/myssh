@@ -62,8 +62,13 @@ type CertInfo struct {
 	IsVerified bool   `json:"is_verified"`
 }
 
-// FetchCertInfo 通过 TLS 或 QUIC 抓取 server 证书信息。
-func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
+// FetchCertInfo 通过 TLS 或 QUIC 抓取 target 地址的证书信息。
+//
+// target 只作拨号地址；serverName 是发往 SNI 的值，与节点握手共用
+// effectiveServerName 的规则（trim 后原样透传，空即不发 SNI）。要拿与 myssh
+// 握手逐字一致的指纹就传节点的 server_name。本函数与 GetTLSCertFingerprint /
+// GetTLSCertDetailsJSON 的区别只在输出结构（CertInfo vs TLSCertDetails）和 QUIC 支持。
+func FetchCertInfo(target string, useQUIC bool, serverName string) (*CertInfo, error) {
 	if target == "" {
 		return nil, fmt.Errorf("empty target")
 	}
@@ -76,8 +81,10 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
+	// SNI 与运行时握手共用 effectiveServerName（空即不发、不回落 host），见其注释。
+	sni := effectiveServerName(serverName)
 	tlsConfig := &tls.Config{
-		ServerName:         host,
+		ServerName:         sni,
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"h3", "http/1.1"},
 	}
@@ -112,7 +119,7 @@ func FetchCertInfo(target string, useQUIC bool) (*CertInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		conn, err := newChromeUConn(ctx, baseConn, host, []string{"h3", "http/1.1"}, nil, false)
+		conn, err := newChromeUConn(ctx, baseConn, sni, []string{"h3", "http/1.1"}, nil, false)
 		if err != nil {
 			return nil, err
 		}
@@ -266,12 +273,10 @@ func probeTLSCert(target string, serverName string) (*TLSCertDetails, error) {
 	}
 
 	addr := ensureHostPort(target, "443")
-	host, _, _ := net.SplitHostPort(addr)
 
-	sni := strings.TrimSpace(serverName)
-	if sni == "" {
-		sni = host
-	}
+	// SNI 与运行时握手共用 effectiveServerName：空即不发，不回落 host（见其注释）。
+	// 这是「获取指纹」写下的 pin 能在真连接时校验通过的前提。
+	sni := effectiveServerName(serverName)
 
 	startTime := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)

@@ -327,8 +327,11 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 			}
 			offset += 2 // 再跳过 DST.PORT(2)
 
-			if offset > int(pLen) {
-				zlog.Errorf("%s [UDPGW-Read] ❌ Packet out of bounds, safely discarded", TAG)
+			// 用 >= 而非 >：offset == pLen 时 body[offset:] 为空、copy 返回 0，
+			// Read 给出 (0, nil)——调用方会把它当成「再读一次」，这一帧被丢掉，
+			// downloadCounter 还会记下一个并不存在的帧大小。
+			if offset >= int(pLen) {
+				zlog.Errorf("%s [UDPGW-Read] ❌ Packet out of bounds or empty payload, safely discarded", TAG)
 				continue
 			}
 

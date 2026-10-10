@@ -3,6 +3,7 @@ package myssh
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -584,21 +585,63 @@ func (l *LocalDnsServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	w.WriteMsg(reply)
 }
 
+// Start 同步绑定端口。
+//
+// 旧写法把 ListenAndServe 整个丢进 goroutine，绑定失败（端口被占、地址非法）只会
+// 留下一条孤零零的 Error 日志，紧接着照样打印 "Local DNS service started" 并 return nil。
+// 上层因此以为 DNS 就绪，VPN 模式下劫持到本地 DNS 的请求全部失败——域名解析彻底
+// 不通，而用户看到的却是「核心已启动」。现在先绑定再交给 Server 去服务。
 func (l *LocalDnsServer) Start(addr string) error {
-	l.udpServer = &dns.Server{Addr: addr, Net: "udp", Handler: l}
-	l.tcpServer = &dns.Server{Addr: addr, Net: "tcp", Handler: l}
-	go func() {
-		if err := l.udpServer.ListenAndServe(); err != nil {
-			zlog.Errorf("UDP DNS Fail: %v", err)
+	var errs []error
+
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("udp bind: %w", err))
+	} else {
+		l.udpServer = &dns.Server{PacketConn: pc, Handler: l}
+		go func() {
+			if err := l.udpServer.ActivateAndServe(); err != nil && !l.isShuttingDown() {
+				zlog.Errorf("%s [DNS-Server] ❌ UDP DNS server exited: %v", TAG, err)
+			}
+		}()
+	}
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("tcp addr: %w", err))
+	} else {
+		lc, err := net.ListenTCP("tcp", tcpAddr)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("tcp bind: %w", err))
+		} else {
+			l.tcpServer = &dns.Server{Listener: lc, Handler: l}
+			go func() {
+				if err := l.tcpServer.ActivateAndServe(); err != nil && !l.isShuttingDown() {
+					zlog.Errorf("%s [DNS-Server] ❌ TCP DNS server exited: %v", TAG, err)
+				}
+			}()
 		}
-	}()
-	go func() {
-		if err := l.tcpServer.ListenAndServe(); err != nil {
-			zlog.Errorf("TCP DNS Fail: %v", err)
-		}
-	}()
+	}
+
+	if len(errs) > 0 {
+		// 绑定失败的端口对应 server 保持 nil，Stop() 会自动跳过——不留半启动的实例。
+		zlog.Errorf("%s [DNS-Server] ❌ Local DNS service FAILED to start on %s: %v", TAG, addr, errors.Join(errs...))
+		return errors.Join(errs...)
+	}
+
 	zlog.Infof("%s [DNS-Server] 🚀 Local DNS service started: %s", TAG, addr)
 	return nil
+}
+
+// isShuttingDown 区分「正常关停」与「服务意外退出」：Shutdown 会关掉 closeChan，
+// 此后 serveUDP/serveTCP 返回的 error 是预期内的，不该当成故障打日志。
+func (l *LocalDnsServer) isShuttingDown() bool {
+	select {
+	case <-l.closeChan:
+		return true
+	default:
+		return false
+	}
 }
 
 func (l *LocalDnsServer) Stop() {

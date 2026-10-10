@@ -131,8 +131,15 @@ func RepairRuleFile(path string) bool {
 		zlog.Warnf("%s [GeoRules] re-download failed, keeping the broken copy: %v", TAG, dErr)
 		return false
 	}
-	if i2, err2 := os.Stat(path); err2 != nil || i2.Size() == 0 {
-		zlog.Warnf("%s [GeoRules] re-download reported success but %s is still unusable", TAG, path)
+	// 必须重新校验内容，不能只看 Size>0：DownloadRuleFiles 只负责 geosite.dat/geoip.dat
+	// 这两个默认文件名，其它（自定义 basename）压根没被碰过——只查大小会把一份仍然
+	// 损坏的旧文件当成修好了，LoadGeoIP 随后照样产出空规则集。
+	if _, err2 := os.Stat(path); err2 != nil {
+		zlog.Warnf("%s [GeoRules] re-download reported success but %s is missing", TAG, path)
+		return false
+	}
+	if _, truncated, terr := extractGeoFileTags(path); terr != nil || truncated {
+		zlog.Warnf("%s [GeoRules] re-download reported success but %s is still unusable: %v", TAG, path, terr)
 		return false
 	}
 	zlog.Infof("%s [GeoRules] %s repaired by re-download", TAG, path)

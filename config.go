@@ -121,6 +121,7 @@ type GlobalConfig struct {
 	DirectIPTags    []string `json:"direct_ip_tags"`    // 命中即直连的 geoip 标签集合
 }
 
+// 返回值：0 成功；-2 JSON 解析失败；-3 规则文件损坏（DNS 等配置已生效，但 Geo 分流表未提交）。
 func loadGlobalConfigFromJson(configJson string) int {
 	var cfg GlobalConfig
 	if err := json.Unmarshal([]byte(configJson), &cfg); err != nil {
@@ -150,12 +151,14 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	zlog.Infof("%s [Config] ✅ Global config applied: LocalDNS=[%s], RemoteDNS=[%s]", TAG, cfg.LocalDnsServer, cfg.RemoteDnsServer)
 
 	gr := newGeoRouter()
+	ruleLoadFailed := false
 	// 文件存在但结构损坏（截断/非规则文件）时先重下一次：加载路径是损坏首次
 	// 被发现的地方，也是唯一能在本次会话内修好它的位置。文件不存在保持原有的
 	// 「直连分流禁用」降级语义 —— 冷启动就下载会额外增加网络延迟。
 	if _, err := os.Stat(cfg.GeoSiteFilePath); err == nil {
 		RepairRuleFile(cfg.GeoSiteFilePath)
 		if n, err := gr.LoadGeoSite(cfg.GeoSiteFilePath, cfg.DirectSiteTags); err != nil {
+			ruleLoadFailed = true
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoSite: %v", TAG, err)
 		} else if n == 0 {
 			// n==0 且 err==nil 只可能是标签为空：LoadGeoSite 里所有产出 0 条规则的路径
@@ -173,6 +176,7 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 	if _, err := os.Stat(cfg.GeoIPFilePath); err == nil {
 		RepairRuleFile(cfg.GeoIPFilePath)
 		if n, err := gr.LoadGeoIP(cfg.GeoIPFilePath, cfg.DirectIPTags); err != nil {
+			ruleLoadFailed = true
 			zlog.Errorf("%s [Config] ❌ Failed to load GeoIP: %v", TAG, err)
 		} else if n == 0 {
 			// 同 GeoSite：n==0 且 err==nil 只可能是 direct_ip_tags 为空，不是文件问题。
@@ -183,6 +187,15 @@ func loadGlobalConfig(cfg GlobalConfig) int {
 		}
 	} else if os.IsNotExist(err) {
 		zlog.Warnf("%s [Config] ⚠️ GeoIP file not found (%s), direct IP routing disabled", TAG, cfg.GeoIPFilePath)
+	}
+
+	// 规则文件损坏时不提交：gr 可能只装上了一半（GeoSite 解析失败、GeoIP 成功），
+	// 一旦发布，直连分流会在用户完全看不见的情况下变空，报错只写在 Go 日志里。
+	// 退回上一份完整的路由+配置对——所有流量照走代理，功能无损；非零返回码让 UI 能提示。
+	// globalConfig 一并不更新，避免「配置里的标签」与「路由表实际用的标签」错位。
+	if ruleLoadFailed {
+		zlog.Errorf("%s [Config] ⚠️ Geo rule load failed — kept the previous rule set. Direct routing is unchanged; update the rule files to restore it", TAG)
+		return -3
 	}
 
 	globalRouter.Store(gr)

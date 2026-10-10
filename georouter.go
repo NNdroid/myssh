@@ -132,6 +132,12 @@ const rateLimitedLogMaxKeys = 4096
 // 会把「我从标签里去掉 private、就想让内网走隧道」这种配置静默短路掉。
 // 代价是私有段仍要过一遍 MatchNetIP —— 见 ipDecision，判定结果已按目标缓存。
 func nonProxyable(addr netip.Addr) bool {
+	// 先归一到 4 形态：下列四个 Is* 判定都按存储形态解释，对 4-in-6（::ffff:a.b.c.d）
+	// 全部返回 false，会让「回环/组播」这类绝不能走代理的目标漏过直连判定。
+	if isIP4Form(addr) {
+		a4 := addr.As4()
+		addr = netip.AddrFrom4(a4)
+	}
 	return addr.IsMulticast() ||
 		addr.IsUnspecified() ||
 		addr.IsLoopback() ||
@@ -493,11 +499,19 @@ func (r *GeoRouter) MatchIP(ip net.IP) bool {
 
 // MatchNetIP 匹配 netip.Addr 类型的 IP
 func (r *GeoRouter) MatchNetIP(addr netip.Addr) bool {
-	if addr.Is4() {
-		// addr.As4() 返回 [4]byte，[:] 转切片，避免额外分配
+	// 必须同时覆盖 4-in-6（::ffff:a.b.c.d）：只看 Is4() 会让映射形态落到 v6 分支，
+	// 而 geoip 的 v4 前缀只进 v4Root——同一条 10.0.0.0/8 规则在纯 v4 形态命中、
+	// 在映射形态静默放行去走代理。
+	if isIP4Form(addr) {
 		a4 := addr.As4()
 		return r.ipTrie.ContainsBytes(a4[:], true)
 	}
 	a16 := addr.As16()
 	return r.ipTrie.ContainsBytes(a16[:], false)
+}
+
+// isIP4Form 覆盖纯 v4 与 4-in-6 两种存储形态（As4() 对两者都可用，但它返回 [4]byte，
+// 零值无法用来判断，所以形态判断要走 Is4/Is4In6）。
+func isIP4Form(a netip.Addr) bool {
+	return a.Is4() || a.Is4In6()
 }

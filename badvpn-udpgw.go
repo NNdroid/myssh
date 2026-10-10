@@ -342,7 +342,9 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 		}
 
 		offset := 3 + addrSize + 2
-		if pLen < offset {
+		// 用 <= 而非 <：pLen == offset 时 body[offset:] 为空、copy 返回 0，
+		// Read 给出 (0, nil)——调用方会当成「再读一次」，空载荷帧被丢掉。
+		if pLen <= offset {
 			continue
 		}
 

@@ -229,11 +229,23 @@ func (l *LocalDnsServer) calculateOptimalTTL(reply *dns.Msg) uint32 {
 	invalidateReverseDNSMemoIPs(extractAnswerIPs(reply))
 
 	minTTL := uint32(DefaultMaxTTL)
+	sawPositiveTTL := false
 	for _, ans := range reply.Answer {
 		ttl := ans.Header().Ttl
-		if ttl > 0 && ttl < minTTL {
-			minTTL = ttl
+		if ttl > 0 {
+			sawPositiveTTL = true
+			if ttl < minTTL {
+				minTTL = ttl
+			}
 		}
+	}
+
+	// TTL 0 与「无 Answer 段」（NXDOMAIN / NOData）都是「不要缓存」的约定，
+	// 却会被上面的循环漏掉而拿到 DefaultMaxTTL：一条瞬时 NXDOMAIN 会被钉满
+	// 一小时，域名恢复解析后用户仍看到它不通。这类否定结果按短 TTL 缓存——
+	// 保留「稍后重试」，又不放大故障。
+	if !sawPositiveTTL {
+		return uint32(DefaultMinTTL)
 	}
 	if minTTL < uint32(DefaultMinTTL) {
 		return uint32(DefaultMinTTL)
