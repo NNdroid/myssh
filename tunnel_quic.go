@@ -134,7 +134,7 @@ func init() {
 		tlsConf := &tls.Config{
 			ServerName:            effectiveServerName(cfg.ServerName),
 			InsecureSkipVerify:    true,
-			NextProtos:            []string{"h3"}, // ALPN 固定为 HTTP/3 协议
+			NextProtos:            quicALPN, // ALPN 固定为 HTTP/3 协议
 			VerifyPeerCertificate: MakePeerCertVerifier(cfg.VerifyCertificateFingerprint, cfg.ServerCertificateFingerprint),
 		}
 

@@ -20,7 +20,7 @@ func init() {
 		}
 		zlog.Infof("%s [Tunnel] 2. Preparing TLS (uTLS SNI Proxy) handshake, Spoofed SNI: %s", TAG, cfg.ServerName)
 
-		utlsConfig := buildUTLSConfig(cfg, []string{"h2", "http/1.1"})
+		utlsConfig := buildUTLSConfig(cfg, chromeALPN)
 		uConn, err := handshakeUTLS(ctx, baseConn, utlsConfig)
 		if err != nil {
 			zlog.Errorf("%s [Tunnel] ❌ TLS connection failed: %v", TAG, err)

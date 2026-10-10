@@ -62,13 +62,24 @@ type CertInfo struct {
 	IsVerified bool   `json:"is_verified"`
 }
 
+// probeConfig 把宿主传入的出站网卡绑定转成探测用的 ProxyConfig。
+//
+// 只取 BindInterface：探测是一条独立的短连接，不参与路由/DNS/隧道配置。这个
+// 参数在 Android 上无效（bindDevice 在 Android 无 root 时是 no-op），但在
+// Linux(root)/桌面平台的 myssh 内建 Web 服务里是真实生效的——探测必须与隧道走
+// 同一条出口，否则在这些部署里会出现「隧道通、探测连不上」。
+func probeConfig(bindInterface string) ProxyConfig {
+	return ProxyConfig{BindInterface: bindInterface}
+}
+
 // FetchCertInfo 通过 TLS 或 QUIC 抓取 target 地址的证书信息。
 //
 // target 只作拨号地址；serverName 是发往 SNI 的值，与节点握手共用
 // effectiveServerName 的规则（trim 后原样透传，空即不发 SNI）。要拿与 myssh
-// 握手逐字一致的指纹就传节点的 server_name。本函数与 GetTLSCertFingerprint /
-// GetTLSCertDetailsJSON 的区别只在输出结构（CertInfo vs TLSCertDetails）和 QUIC 支持。
-func FetchCertInfo(target string, useQUIC bool, serverName string) (*CertInfo, error) {
+// 握手逐字一致的指纹就传节点的 server_name。bindInterface 与隧道出口保持一致。
+// 本函数与 GetTLSCertFingerprint / GetTLSCertDetailsJSON 的区别只在输出结构
+// （CertInfo vs TLSCertDetails）和 QUIC 支持。
+func FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface string) (*CertInfo, error) {
 	if target == "" {
 		return nil, fmt.Errorf("empty target")
 	}
@@ -83,15 +94,12 @@ func FetchCertInfo(target string, useQUIC bool, serverName string) (*CertInfo, e
 
 	// SNI 与运行时握手共用 effectiveServerName（空即不发、不回落 host），见其注释。
 	sni := effectiveServerName(serverName)
-	tlsConfig := &tls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"h3", "http/1.1"},
-	}
 
 	if useQUIC {
 		protocol = "QUIC"
-		baseConn, err := dialProtected(ctx, ProxyConfig{}, "udp", addr, 8*time.Second)
+		// 走 dialUDP 而非裸 Dialer：IP4P 形态的 proxy_addr 必须在这里解开
+		// （见 probeTLSCert 的同款注释），否则 QUIC 探测同样连不上。
+		baseConn, err := dialUDP(ctx, probeConfig(bindInterface), addr)
 		if err != nil {
 			return nil, err
 		}
@@ -105,6 +113,11 @@ func FetchCertInfo(target string, useQUIC bool, serverName string) (*CertInfo, e
 			udpConn.Close()
 			return nil, err
 		}
+		tlsConfig := &tls.Config{
+			ServerName:         sni,
+			InsecureSkipVerify: true,
+			NextProtos:         quicALPN,
+		}
 		conn, err := quic.DialEarly(ctx, udpConn, udpAddr, tlsConfig, nil)
 		if err != nil {
 			udpConn.Close()
@@ -114,12 +127,12 @@ func FetchCertInfo(target string, useQUIC bool, serverName string) (*CertInfo, e
 		peerCerts = conn.ConnectionState().TLS.PeerCertificates
 	} else {
 		protocol = "TLS"
-		dialer := newProtectedDialer(ProxyConfig{}, 8*time.Second)
-		baseConn, err := dialer.DialContext(ctx, "tcp", addr)
+		// 必须走 dialTCP（见 probeTLSCert 注释）；ALPN 与运行时共用 chromeALPN。
+		baseConn, err := dialTCP(ctx, probeConfig(bindInterface), addr)
 		if err != nil {
 			return nil, err
 		}
-		conn, err := newChromeUConn(ctx, baseConn, sni, []string{"h3", "http/1.1"}, nil, false)
+		conn, err := newChromeUConn(ctx, baseConn, sni, chromeALPN, nil, false)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +170,7 @@ type SSHServerDetails struct {
 }
 
 // probeSSHServer 探测：与 SSH 服务器完成版本/密钥交换后即断开。
-func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
+func probeSSHServer(sshAddr string, bindInterface string) (*SSHServerDetails, error) {
 	if strings.TrimSpace(sshAddr) == "" {
 		return nil, fmt.Errorf("empty sshAddr")
 	}
@@ -185,8 +198,11 @@ func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
 		Timeout: 6 * time.Second,
 	}
 
-	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
-	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	// 与运行时共用 dialSocket 的 IP4P 解析，否则 IP4P 形态的 ssh_addr 探测必败
+	// （见 probeTLSCert 的注释）。ctx 复用同一个 6s 预算，与 config.Timeout 对齐。
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	conn, err := dialTCP(ctx, probeConfig(bindInterface), addr)
 	if err != nil {
 		return nil, err
 	}
@@ -225,8 +241,8 @@ func probeSSHServer(sshAddr string) (*SSHServerDetails, error) {
 }
 
 // GetSSHFingerprint 返回 SSH 服务器主机密钥的 SHA256 指纹。
-func GetSSHFingerprint(sshAddr string) (string, error) {
-	details, err := probeSSHServer(sshAddr)
+func GetSSHFingerprint(sshAddr string, bindInterface string) (string, error) {
+	details, err := probeSSHServer(sshAddr, bindInterface)
 	if err != nil {
 		return "", err
 	}
@@ -234,8 +250,8 @@ func GetSSHFingerprint(sshAddr string) (string, error) {
 }
 
 // GetSSHServerDetailsJSON 返回 SSH 服务器探测结果的 JSON 字符串。
-func GetSSHServerDetailsJSON(sshAddr string) (string, error) {
-	details, err := probeSSHServer(sshAddr)
+func GetSSHServerDetailsJSON(sshAddr string, bindInterface string) (string, error) {
+	details, err := probeSSHServer(sshAddr, bindInterface)
 	if err != nil {
 		return "", err
 	}
@@ -267,7 +283,7 @@ type TLSCertDetails struct {
 }
 
 // probeTLSCert 探测：抓取 target TLS/HTTPS 服务端叶子证书详情。
-func probeTLSCert(target string, serverName string) (*TLSCertDetails, error) {
+func probeTLSCert(target string, serverName string, bindInterface string) (*TLSCertDetails, error) {
 	if strings.TrimSpace(target) == "" {
 		return nil, fmt.Errorf("empty target")
 	}
@@ -281,12 +297,19 @@ func probeTLSCert(target string, serverName string) (*TLSCertDetails, error) {
 	startTime := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	dialer := wrapAndroidProtect(&net.Dialer{Timeout: 6 * time.Second})
-	baseConn, err := dialer.DialContext(ctx, "tcp", addr)
+	// 必须走 dialTCP 而不能用裸 net.Dialer——这是「raw+TLS 无法获取证书」的根因。
+	//
+	// 运行时隧道的拨号是 dialTunnel → dialTCP → dialSocket → resolveIP4PDialAddress，
+	// 会解开 IP4P 形态的地址：proxy_addr 写成 [2001::<port><ipv4>]:0 或指向 IP4P AAAA
+	// 的域名时，真实目标是从地址里解出的 IPv4:port。裸 Dialer 拿到的还是那个端口 0
+	// 的 IPv6 字面量，connect 必然失败（且失败在握手之前，连证书都拿不到）。
+	// 于是表现就是：隧道能连、SSH 能通，唯独「获取指纹/详情」永远报错。
+	// dialTCP 还顺带与运行时一致地应用了出口网卡绑定与 socket 调优。
+	baseConn, err := dialTCP(ctx, probeConfig(bindInterface), addr)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := newChromeUConn(ctx, baseConn, sni, []string{"h2", "http/1.1"}, nil, false)
+	conn, err := newChromeUConn(ctx, baseConn, sni, chromeALPN, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -343,8 +366,8 @@ func probeTLSCert(target string, serverName string) (*TLSCertDetails, error) {
 }
 
 // GetTLSCertFingerprint 返回 target TLS/HTTPS/WSS 证书的 SHA256 指纹（格式: XX:XX:XX:...）。
-func GetTLSCertFingerprint(target string, serverName string) (string, error) {
-	details, err := probeTLSCert(target, serverName)
+func GetTLSCertFingerprint(target string, serverName string, bindInterface string) (string, error) {
+	details, err := probeTLSCert(target, serverName, bindInterface)
 	if err != nil {
 		return "", err
 	}
@@ -352,8 +375,11 @@ func GetTLSCertFingerprint(target string, serverName string) (string, error) {
 }
 
 // GetTLSCertDetailsJSON 返回 TLS 证书探测结果的 JSON 字符串。
-func GetTLSCertDetailsJSON(target string, serverName string) (string, error) {
-	details, err := probeTLSCert(target, serverName)
+//
+// 指纹与详情都由 probeTLSCert 的同一次握手产生（fingerprint_sha256 就是指纹），
+// 宿主侧一次调用即可同时拿到两者，不必再单独打一次握手取指纹。
+func GetTLSCertDetailsJSON(target string, serverName string, bindInterface string) (string, error) {
+	details, err := probeTLSCert(target, serverName, bindInterface)
 	if err != nil {
 		return "", err
 	}

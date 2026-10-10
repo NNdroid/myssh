@@ -462,7 +462,10 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 					if err != nil || prof.VerifyFingerprint || strings.TrimSpace(prof.ServerFingerprint) != "" {
 						return
 					}
-					if fp, fpErr := myssh.GetSSHFingerprint(prof.SshAddr); fpErr == nil && fp != "" {
+					// 必须与隧道同出口：绑了网卡的节点如果从默认出口探测，拿到的是
+					// 另一台机器的主机密钥（DNS 重绑定等场景下尤为隐蔽），TOFU 会把
+					// 错密钥 pin 下来，随后被 checkSSHHostKey 当成主机密钥变更拒绝。
+					if fp, fpErr := myssh.GetSSHFingerprint(prof.SshAddr, prof.BindInterface); fpErr == nil && fp != "" {
 						prof.ServerFingerprint = fp
 						if err := UpdateProfile(req.NodeID, *prof); err == nil {
 							zap.L().Sugar().Infof("%s [WebServer] 🔒 TOFU: pinned SSH host key fingerprint for node %s — enable 'Verify SSH Fingerprint' to enforce it", TAG, req.NodeID)

@@ -10,6 +10,23 @@ import (
 
 // 本文件集中 uTLS（Chrome ClientHello 指纹伪装）的构造与握手辅助函数。
 
+// chromeALPN / quicALPN 是两条互斥路径的 ALPN 唯一来源：
+//
+//	chromeALPN  TCP 上的 TLS 握手（raw + TLS、websocket/h2/grpc/xhttp），
+//	            与 Chrome 的 ClientHello 画像配套，运行时与证书探测共用；
+//	quicALPN  QUIC 只认 h3。
+//
+// 证书探测此前在 TCP 路径上自写了一份 ["h3","http/1.1"]，与运行时的
+// ["h2","http/1.1"] 不一致。多数服务器只会从「自己的 NextProtos ∩ 客户端宣告列表」
+// 里挑，交集为空就不选 ALPN，而 uTLS 的 checkALPN 在 quic=false 时对「服务端未选
+// ALPN」是放行的，所以这个偏差平时不炸；但 h3 只属于 QUIC，把它写进 TCP 的
+// NextProtos 既不真实、也可能误导只看 ALPN 的前置代理，而且让探测协商到的协议与
+// 真隧道不同。ALPN 只留这两个来源，避免再次漂移。
+var (
+	chromeALPN = []string{"h2", "http/1.1"}
+	quicALPN   = []string{"h3"}
+)
+
 // effectiveServerName 把节点配置的 server_name 解析成实际发往 SNI 的值。
 //
 // SNI 解析的**唯一**入口：运行时握手（buildUTLSConfig）与证书探测
