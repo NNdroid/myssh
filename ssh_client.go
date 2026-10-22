@@ -244,8 +244,8 @@ func dialSSH(ctx context.Context, conn net.Conn, cfg ProxyConfig, isPing bool) (
 	recordSSHHandshakeVersion(cfg.SshAddr, cv, sv)
 
 	if !isPing {
-		zlog.Warnf("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
-		zlog.Warnf("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
+		zlog.Infof("%s [SSH-Handshake] SSH ClientVersion: %s", TAG, cv)
+		zlog.Infof("%s [SSH-Handshake] SSH ServerVersion: %s", TAG, sv)
 	}
 
 	client := ssh.NewClient(scc, chans, reqs)

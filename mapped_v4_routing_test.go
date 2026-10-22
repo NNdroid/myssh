@@ -23,8 +23,8 @@ import (
 // 而 watchEngineCtx 的监视 goroutine 在 ctx 取消时确实会调 Close。
 type packetTestConn struct{ fakeConn }
 
-func (c *packetTestConn) ReadFrom(p []byte) (int, net.Addr, error) { return 0, &net.UDPAddr{}, nil }
-func (c *packetTestConn) WriteTo(b []byte, addr net.Addr) (int, error)       { return len(b), nil }
+func (c *packetTestConn) ReadFrom(p []byte) (int, net.Addr, error)     { return 0, &net.UDPAddr{}, nil }
+func (c *packetTestConn) WriteTo(b []byte, addr net.Addr) (int, error) { return len(b), nil }
 
 func TestCtxCloseConnKeepsPacketConnInterface(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

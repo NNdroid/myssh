@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,7 +34,7 @@ type PingResult struct {
 	// 加字段是向后兼容的：pingNodes 返回的是 JSON 字符串而非 gomobile 结构体，
 	// 老版本客户端解析时忽略未知键即可，**无需重新生成 AAR**。
 	HandshakeMs int64 `json:"handshakeMs"` // TCP 建连 + SSH 握手
-	HttpMs      int64 `json:"httpMs"`      // 隧道内 HTTP 往返
+	HttpMs      int64 `json:"httpMs"`      // 隧道内 HTTP 往返（多次采样的中位数）
 }
 
 var pingCancel atomic.Value
@@ -102,6 +104,10 @@ func pingNodes(profilesJson string, targetUrl string, timeoutMs int) string {
 // 计时分段而非只报总数，是为了让 UI 能解释延迟构成：跨洋节点里 SSH 握手
 // （TCP + KEX + 认证）常占大头，把它和真实 RTT 混在一个数字里会让用户
 // 误以为是链路问题。总耗时保持为两段之和，语义与旧版完全一致。
+//
+// 隧道内 HTTP 这一段取多次采样的中位数而不是单次首包耗时：首包要付建连与
+// 隧道数据路径建立的开销（Android 上常达秒级），单次采样也会被抖动带偏，
+// 两者都不是用户体感的稳态往返。
 func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl string, timeout time.Duration) (int64, int64, int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -118,12 +124,6 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 
 	targetUrl = ensureHTTPScheme(targetUrl)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", targetUrl, nil)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/Ping")
-
 	// 每次探测都需要指向该节点 sshClient 的独立 Transport，无法全局复用；
 	// 但必须显式关闭其空闲连接，否则批量 ping 会累积残留的 Transport 与连接。
 	transport := newSSHHTTPTransport(sshClient, timeout)
@@ -137,19 +137,86 @@ func testSingleNodeTrueLatency(ctx context.Context, cfg ProxyConfig, targetUrl s
 		Timeout: timeout,
 	}
 
-	httpStart := time.Now()
-	resp, err := httpClient.Do(req)
+	// 隧道内 HTTP 这一段取多次采样的中位数而不是首包耗时：首包要付建连与隧道
+	// 数据路径建立的开销（Android 上常达秒级），是个冷启动离群值，恰好被中位数
+	// 滤掉；跨洋链路偶发重传造成的单样本尖峰同样被滤掉。
+	samples, err := collectProbeSamples(httpClient, ctx, targetUrl)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("http err: %w", err)
+		return 0, 0, 0, err
 	}
-	defer resp.Body.Close()
-	httpMs := time.Since(httpStart).Milliseconds()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0, 0, 0, fmt.Errorf("status %d", resp.StatusCode)
-	}
+	httpMs := medianInt64(samples)
 
 	return handshakeMs + httpMs, handshakeMs, httpMs, nil
+}
+
+// probeSamples 是隧道内 HTTP 的采样次数：取中位数而非单次，首包的冷启动开销
+// 与偶发的重传尖峰都会被滤掉。
+const probeSamples = 3
+
+// collectProbeSamples 连发 probeSamples 次探测请求，返回每次的 HTTP 往返毫秒数。
+// 首包失败说明隧道根本不通，如实上报；后续样本失败只可能是预算耗尽或链路抖动，
+// 丢弃后按已采到的样本收尾——否则「可用但慢」的节点会因为多采几次而被误判成
+// 超时不可用。
+func collectProbeSamples(client *http.Client, ctx context.Context, targetUrl string) ([]int64, error) {
+	samples := make([]int64, 0, probeSamples)
+	for i := 0; i < probeSamples; i++ {
+		ms, err := probeOnceTimed(client, ctx, targetUrl)
+		if err != nil {
+			if len(samples) == 0 {
+				return nil, err
+			}
+			break
+		}
+		samples = append(samples, ms)
+	}
+	return samples, nil
+}
+
+// newProbeRequest 构造一条探测请求。User-Agent 保持浏览器样式，避免部分站点
+// （Cloudflare 等）对裸 Go client 返回非 2xx 的降级页而让探测误报节点不可用。
+func newProbeRequest(ctx context.Context, targetUrl string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", targetUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stun/Ping")
+	return req, nil
+}
+
+// probeOnceTimed 经隧道发一条请求并校验状态码，返回隧道内 HTTP 往返毫秒数。
+func probeOnceTimed(client *http.Client, ctx context.Context, targetUrl string) (int64, error) {
+	req, err := newProbeRequest(ctx, targetUrl)
+	if err != nil {
+		return 0, err
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("http err: %w", err)
+	}
+	defer drainProbeResponse(resp)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return time.Since(start).Milliseconds(), nil
+}
+
+// drainProbeResponse 读空并关闭响应体，让底层连接回到空闲池供后续采样复用。
+// 不读空的话连接会被直接关闭，每个样本又得重付建连开销，测出的就不是稳态往返。
+// 读取总量由 http.Client.Timeout 兜底，无需再限流。
+func drainProbeResponse(resp *http.Response) {
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+}
+
+// medianInt64 取中位数；返回 0 样本时保持 0（调用方只在采样成功后使用）。
+func medianInt64(samples []int64) int64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	s := append([]int64(nil), samples...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s[len(s)/2]
 }
 
 func classifyPingError(err error) string {

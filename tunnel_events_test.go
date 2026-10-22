@@ -9,6 +9,9 @@ import (
 	h2tunnel "github.com/NNdroid/h2tunnel"
 	udpclient "github.com/NNdroid/udp_custom/tunnel"
 	xhttptunnel "github.com/NNdroid/xhttptunnel/tunnel"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	zaptestobserver "go.uber.org/zap/zaptest/observer"
 )
 
 // captureCallback 收集 emitTunnelEvent 转发的事件。
@@ -108,5 +111,66 @@ func TestTunnelEventString(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("String() = %q, want to contain %q", s, want)
 		}
+	}
+}
+
+// TestTunnelEventSeverity 定级要区分故障与主动拆除：本机关连接（延迟探针测完即
+// 拆）是预期行为，不该以 ERROR 计入告警；真实断连与策略拒绝仍然是 ERROR。
+func TestTunnelEventSeverity(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   TunnelEvent
+		want int
+	}{
+		{"established", TunnelEvent{Type: TunnelEventEstablished}, 1},
+		{"reconnecting", TunnelEvent{Type: TunnelEventReconnecting}, 2},
+		{"handshake_retrying", TunnelEvent{Type: TunnelEventHandshakeRetrying}, 2},
+		{"died_local_close", TunnelEvent{Type: TunnelEventDied, Detail: "reason=local close"}, 1},
+		{"died_local_close_variant", TunnelEvent{Type: TunnelEventDied, Detail: "LOCAL CLOSE"}, 1},
+		{"died_context_canceled", TunnelEvent{Type: TunnelEventDied, Detail: "context canceled"}, 1},
+		{"died_unexpected", TunnelEvent{Type: TunnelEventDied, Detail: "reason=peer reset"}, 3},
+		{"died_empty_detail", TunnelEvent{Type: TunnelEventDied}, 3},
+		{"target_denied", TunnelEvent{Type: TunnelEventTargetDenied, Detail: "allowed targets"}, 3},
+		// 非死亡事件即使提到 local close 也不应被降级：降级只对隧道死亡生效。
+		{"reconnecting_mentions_local_close", TunnelEvent{Type: TunnelEventReconnecting, Detail: "previous round ended: local close"}, 2},
+	}
+	for _, tc := range cases {
+		if got := tc.ev.severity(); got != tc.want {
+			t.Errorf("%s: severity() = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestEmitTunnelEventLocalCloseIsNotError 探针式拆除走 info，真断连走 error，
+// 且两路的文本内容与降级前完全一致（不影响宿主解析与既有告警关键字）。
+func TestEmitTunnelEventLocalCloseIsNotError(t *testing.T) {
+	core, obs := zaptestobserver.New(zapcore.InfoLevel)
+	prev := zlog
+	zlog = zap.New(core).Sugar()
+	defer func() { zlog = prev }()
+
+	emitTunnelEvent(TunnelEvent{
+		Type: TunnelEventDied, Source: "xhttp",
+		Session: "probe", Detail: "reason=local close",
+	})
+	if obs.Len() != 1 {
+		t.Fatalf("local close: want 1 log entry, got %d", obs.Len())
+	}
+	if lvl := obs.All()[0].Level; lvl != zapcore.InfoLevel {
+		t.Errorf("local close logged at %s, want info", lvl)
+	}
+	if !strings.Contains(obs.All()[0].Message, "[xhttp] tunnel_died session=probe reason=local close") {
+		t.Errorf("event text changed unexpectedly: %q", obs.All()[0].Message)
+	}
+
+	emitTunnelEvent(TunnelEvent{
+		Type: TunnelEventDied, Source: "xhttp",
+		Session: "main", Detail: "reason=peer reset",
+	})
+	if obs.Len() != 2 {
+		t.Fatalf("unexpected death: want 2 log entries, got %d", obs.Len())
+	}
+	if lvl := obs.All()[1].Level; lvl != zapcore.ErrorLevel {
+		t.Errorf("unexpected death logged at %s, want error", lvl)
 	}
 }

@@ -2,6 +2,7 @@ package myssh
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -67,8 +68,13 @@ func (e TunnelEvent) String() string {
 }
 
 // severity 按事件类型给出日志级别：死亡/拒绝为错误，建立为提示，
-// 重连与握手重试为警告。
+// 重连与握手重试为警告。本机主动拆除是例外：延迟探针每轮新建隧道、测完即关，
+// 属于预期的生命周期而不是故障。这些死亡仍会照常打出来（内容不变），只是不再
+// 用 ERROR 惊动告警——否则每轮探针会产生两条 ERROR，把真实断连淹没掉。
 func (e TunnelEvent) severity() int {
+	if e.Type == TunnelEventDied && isLocalCloseDeath(e) {
+		return 1 // info
+	}
 	switch e.Type {
 	case TunnelEventDied, TunnelEventTargetDenied:
 		return 3 // error
@@ -77,6 +83,19 @@ func (e TunnelEvent) severity() int {
 	default:
 		return 2 // warn
 	}
+}
+
+// isLocalCloseDeath 判断死亡原因是不是本机主动关连接。各 SDK 的表述不完全一致
+// （xhttptunnel 是 "local close"，本机 ctx 取消会被 SDK 归成 "context canceled"），
+// 这里按子串匹配而不是精确相等，避免某个 SDK 改写措辞后静默回退到 ERROR。
+func isLocalCloseDeath(e TunnelEvent) bool {
+	d := strings.ToLower(e.Detail)
+	for _, r := range []string{"local close", "local_closed", "local closed", "context canceled"} {
+		if strings.Contains(d, r) {
+			return true
+		}
+	}
+	return false
 }
 
 var tunnelEventMu sync.RWMutex
