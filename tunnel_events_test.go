@@ -125,12 +125,31 @@ func TestTunnelEventSeverity(t *testing.T) {
 		{"established", TunnelEvent{Type: TunnelEventEstablished}, 1},
 		{"reconnecting", TunnelEvent{Type: TunnelEventReconnecting}, 2},
 		{"handshake_retrying", TunnelEvent{Type: TunnelEventHandshakeRetrying}, 2},
-		{"died_local_close", TunnelEvent{Type: TunnelEventDied, Detail: "reason=local close"}, 1},
-		{"died_local_close_variant", TunnelEvent{Type: TunnelEventDied, Detail: "LOCAL CLOSE"}, 1},
-		{"died_context_canceled", TunnelEvent{Type: TunnelEventDied, Detail: "context canceled"}, 1},
-		{"died_unexpected", TunnelEvent{Type: TunnelEventDied, Detail: "reason=peer reset"}, 3},
+
+		// 本机主动拆除：各 SDK 的措辞都要覆盖，漏一个就还会每轮探针打一条 ERROR。
+		{"died_xhttp_local_close", TunnelEvent{Type: TunnelEventDied, Source: "xhttp", Detail: "reason=local close"}, 1},
+		{"died_xhttp_local_close_upper", TunnelEvent{Type: TunnelEventDied, Source: "xhttp", Detail: "LOCAL CLOSE"}, 1},
+		{"died_h2_canceled", TunnelEvent{Type: TunnelEventDied, Source: "h2", Detail: "canceled"}, 1},
+		{"died_dns_caller_closed", TunnelEvent{Type: TunnelEventDied, Source: "dns_custom",
+			Detail: "target=8.8.8.8:53 transport=udp reason=closed by caller"}, 1},
+		{"died_dns_ctx_cancelled", TunnelEvent{Type: TunnelEventDied, Source: "dns_custom", Detail: "reason=context cancelled"}, 1},
+		{"died_ctx_canceled", TunnelEvent{Type: TunnelEventDied, Source: "xhttp", Detail: "context canceled"}, 1},
+		{"died_udp_bare_closed", TunnelEvent{Type: TunnelEventDied, Source: "udp_custom", Detail: "closed"}, 1},
+		{"died_icmp_bare_closed", TunnelEvent{Type: TunnelEventDied, Source: "icmp_custom", Detail: "closed"}, 1},
+
+		// 真实断连与策略拒绝仍然是 ERROR。
+		{"died_peer_reset", TunnelEvent{Type: TunnelEventDied, Source: "xhttp", Detail: "reason=peer reset"}, 3},
+		// "peer closed" 含 closed 但是服务端收尾，不能被裸 closed 规则误降级。
+		{"died_xhttp_peer_closed", TunnelEvent{Type: TunnelEventDied, Source: "xhttp", Detail: "reason=peer closed"}, 3},
+		// 裸 "closed" 只对 udp/icmp_custom 生效，别处仍是异常。
+		{"died_bare_closed_other_source", TunnelEvent{Type: TunnelEventDied, Source: "xhttp", Detail: "closed"}, 3},
+		{"died_udp_read_failed", TunnelEvent{Type: TunnelEventDied, Source: "udp_custom", Detail: "local conn read failed"}, 3},
+		{"died_udp_idle_timeout", TunnelEvent{Type: TunnelEventDied, Source: "udp_custom", Detail: "idle timeout"}, 3},
+		{"died_dns_write_failed", TunnelEvent{Type: TunnelEventDied, Source: "dns_custom", Detail: "reason=write failed"}, 3},
+		{"died_h2_data_gap", TunnelEvent{Type: TunnelEventDied, Source: "h2", Detail: "data gap"}, 3},
 		{"died_empty_detail", TunnelEvent{Type: TunnelEventDied}, 3},
 		{"target_denied", TunnelEvent{Type: TunnelEventTargetDenied, Detail: "allowed targets"}, 3},
+
 		// 非死亡事件即使提到 local close 也不应被降级：降级只对隧道死亡生效。
 		{"reconnecting_mentions_local_close", TunnelEvent{Type: TunnelEventReconnecting, Detail: "previous round ended: local close"}, 2},
 	}
@@ -172,5 +191,23 @@ func TestEmitTunnelEventLocalCloseIsNotError(t *testing.T) {
 	}
 	if lvl := obs.All()[1].Level; lvl != zapcore.ErrorLevel {
 		t.Errorf("unexpected death logged at %s, want error", lvl)
+	}
+
+	// 非 xhttptunnel 的本机拆除措辞同样要走 info。
+	for _, tc := range []struct {
+		src    string
+		detail string
+	}{
+		{"h2", "canceled"},
+		{"udp_custom", "closed"},
+		{"dns_custom", "target=1.1.1.1:53 reason=closed by caller"},
+	} {
+		emitTunnelEvent(TunnelEvent{
+			Type: TunnelEventDied, Source: tc.src,
+			Session: "probe", Detail: tc.detail,
+		})
+		if lvl := obs.All()[obs.Len()-1].Level; lvl != zapcore.InfoLevel {
+			t.Errorf("%s %q logged at %s, want info", tc.src, tc.detail, lvl)
+		}
 	}
 }

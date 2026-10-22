@@ -68,9 +68,9 @@ func (e TunnelEvent) String() string {
 }
 
 // severity 按事件类型给出日志级别：死亡/拒绝为错误，建立为提示，
-// 重连与握手重试为警告。本机主动拆除是例外：延迟探针每轮新建隧道、测完即关，
-// 属于预期的生命周期而不是故障。这些死亡仍会照常打出来（内容不变），只是不再
-// 用 ERROR 惊动告警——否则每轮探针会产生两条 ERROR，把真实断连淹没掉。
+// 重连与握手重试为警告。本机主动拆除是例外（延迟探针每轮新建隧道、测完即关，
+// 属于预期的生命周期而不是故障）。这些死亡仍会照常打出来（内容不变），只是
+// 不再用 ERROR 惊动告警——否则每轮探针会产生两条 ERROR，把真实断连淹没掉。
 func (e TunnelEvent) severity() int {
 	if e.Type == TunnelEventDied && isLocalCloseDeath(e) {
 		return 1 // info
@@ -85,12 +85,36 @@ func (e TunnelEvent) severity() int {
 	}
 }
 
-// isLocalCloseDeath 判断死亡原因是不是本机主动关连接。各 SDK 的表述不完全一致
-// （xhttptunnel 是 "local close"，本机 ctx 取消会被 SDK 归成 "context canceled"），
-// 这里按子串匹配而不是精确相等，避免某个 SDK 改写措辞后静默回退到 ERROR。
+// localCloseSubstrings 本机主动拆除的各 SDK 措辞，按子串匹配。子串而不是精确
+// 相等，是因为 Detail 的包装格式各 SDK 不统一（xhttptunnel 是 "reason=..."，
+// dns_custom 是 "target=... reason=..."，h2/udp/icmp 直接放原因），且某个 SDK
+// 改写措辞时精确匹配会静默回退到 ERROR。
+var localCloseSubstrings = []string{
+	"local close",  // xhttptunnel：本机 Close() 或 ctx 取消
+	"local_closed", // 其他 SDK 可能用的下划线写法
+	"local closed",
+	"cancel",           // h2tunnel "canceled"、dns_custom "context cancelled"（英式）、ctx "context canceled"
+	"closed by caller", // dns_custom ReasonCallerClosed
+}
+
+// localCloseBareClosed udp_custom/icmp_custom 在本机 Close() 且无具体原因时写的
+// 就是裸 "closed"。这两个 SDK 的其余原因都不含 closed，但 xhttptunnel 的
+// "peer closed"（服务端收尾，仍算异常）含这个词，所以只能限定来源后精确匹配。
+var localCloseBareClosed = map[string]bool{
+	"udp_custom":  true,
+	"icmp_custom": true,
+}
+
+// isLocalCloseDeath 判断死亡原因是不是本机主动关连接。各 SDK 的表述完全不同
+// （xhttptunnel "local close"、h2tunnel "canceled"、dns_custom "closed by
+// caller"/"context cancelled"、udp/icmp_custom "closed"），同一个动作要全覆盖，
+// 漏一个就会继续每轮探针打一条 ERROR。
 func isLocalCloseDeath(e TunnelEvent) bool {
 	d := strings.ToLower(e.Detail)
-	for _, r := range []string{"local close", "local_closed", "local closed", "context canceled"} {
+	if localCloseBareClosed[e.Source] && d == "closed" {
+		return true
+	}
+	for _, r := range localCloseSubstrings {
 		if strings.Contains(d, r) {
 			return true
 		}
