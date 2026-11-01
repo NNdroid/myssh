@@ -126,6 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
         status: { running: false, running_node: "" },
         logs: { content: '', pending: '', lastFetchFull: true },
         currentNodeId: null,
+        selectedNodeId: null,
         controlsLocked: false,
         nodeFilter: '',
     };
@@ -189,6 +190,56 @@ document.addEventListener('DOMContentLoaded', () => {
         post: (endpoint, body) => fetch(`/api/v1${endpoint}`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(body) }).then(handleAuthError).then(res => res.json()).catch(e => { console.error(e); return { error: e.message }; }),
         put: (endpoint, body) => fetch(`/api/v1${endpoint}`, { method: 'PUT', headers: getHeaders(), body: JSON.stringify(body) }).then(handleAuthError).then(res => res.json()).catch(e => { console.error(e); return { error: e.message }; }),
         delete: (endpoint) => fetch(`/api/v1${endpoint}`, { method: 'DELETE', headers: getHeaders() }).then(handleAuthError).then(res => res.json()).catch(e => { console.error(e); return { error: e.message }; }),
+    };
+
+    // --- 日志渲染：按行着色 + 增量追加 ---
+    // 只把新增的行接进 DOM，而不是每 2 秒重序列化整个缓冲区（最多 256KB）。
+    // 同时按日志级别着色（错误红 / 告警黄 / 调试暗绿），一眼扫出问题。
+    let logPrevLevel = 'info';
+    const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error', 'dpanic', 'panic', 'fatal']);
+
+    // 识别一行日志的级别。标准 zap console 格式是 tab 分隔：时间 \t 级别 \t caller \t 消息。
+    const logLevelOf = (line) => {
+        const fields = line.split('\t');
+        if (fields.length >= 2) {
+            const lv = fields[1].trim().toLowerCase();
+            if (LOG_LEVELS.has(lv)) { logPrevLevel = lv; return lv; }
+        }
+        if (line[0] === '{') { // JSON 格式（防御性）
+            const m = line.match(/"level":"(\w+)"/);
+            if (m && LOG_LEVELS.has(m[1])) { logPrevLevel = m[1]; return logPrevLevel; }
+        }
+        const bm = line.match(/\[(DEBUG|INFO|WARN|WARNING|ERROR)\]/); // 某些 SDK 用 [ERROR]/[WARN]
+        if (bm) {
+            logPrevLevel = bm[1].toLowerCase() === 'warning' ? 'warn' : bm[1].toLowerCase();
+            return logPrevLevel;
+        }
+        return logPrevLevel; // 续行（如多行堆栈）继承上一行颜色
+    };
+
+    const makeLogLine = (text) => {
+        const div = document.createElement('div');
+        div.className = 'log-line log-' + logLevelOf(text);
+        div.textContent = text;
+        return div;
+    };
+
+    // 把增量文本接入终端：先接到上一行"未完成行"的尾部，再按 \n 切分成完整行。
+    // 末尾始终保留一个（可能为空的）当前行槽位：空槽位高度为 0 不可见，但保证
+    // 下一段增量续写到新行，而不是误拼到上一完整行上。
+    const appendLogDelta = (logPre, text) => {
+        let combined = text;
+        const last = logPre.lastElementChild;
+        if (last) {
+            combined = last.textContent + text;
+            last.remove();
+        }
+        const segs = combined.split('\n');
+        const tail = segs.pop();
+        const frag = document.createDocumentFragment();
+        for (const line of segs) frag.appendChild(makeLogLine(line));
+        frag.appendChild(makeLogLine(tail));
+        logPre.appendChild(frag);
     };
 
     // --- Render Functions ---
@@ -360,21 +411,30 @@ document.addEventListener('DOMContentLoaded', () => {
         logs: (isIncremental = false) => {
             const logPre = el('logs');
             if (!logPre) return;
-            if (isIncremental) {
-                state.logs.content += state.logs.pending;
-            } else {
-                state.logs.content = state.logs.pending;
-            }
+            const delta = state.logs.pending;
             state.logs.pending = '';
-            if (state.logs.content.length > LOG_RENDER_MAX_CHARS) {
-                state.logs.content = state.logs.content.slice(-LOG_RENDER_MAX_CHARS);
+            if (isIncremental) {
+                state.logs.content += delta;
+            } else {
+                state.logs.content = delta;
+                logPre.textContent = '';
+                logPrevLevel = 'info';
+            }
+            if (delta) appendLogDelta(logPre, delta);
+            // 超出上限后从最早的一整行开始丢弃，防止长时间运行后 DOM 无限增长拖垮渲染。
+            while (state.logs.content.length > LOG_RENDER_MAX_CHARS) {
                 const nl = state.logs.content.indexOf('\n');
-                if (nl >= 0) state.logs.content = state.logs.content.slice(nl + 1);
+                if (nl < 0) {
+                    state.logs.content = '';
+                    logPre.textContent = '';
+                    break;
+                }
+                state.logs.content = state.logs.content.slice(nl + 1);
+                if (logPre.firstElementChild) logPre.firstElementChild.remove();
             }
             // 仅当用户本来就停留在日志底部附近时才自动滚动；
             // 往上翻阅历史日志时不打扰（否则每 2 秒被拽回底部无法阅读）。
             const nearBottom = logPre.scrollHeight - logPre.scrollTop - logPre.clientHeight < 48;
-            logPre.textContent = state.logs.content;
             if (nearBottom) {
                 logPre.scrollTop = logPre.scrollHeight;
             }

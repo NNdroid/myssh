@@ -134,6 +134,30 @@ func (lc *logCache) resetCache() {
 	lc.lastFetch = time.Time{}
 }
 
+// pathExists 判断路径是否存在。
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// resolveRuleFilePath 就地解析规则文件路径：相对路径先尝试 workDir 下的
+// 候选位置，命中则改写为绝对路径；最终路径不存在时记录一条告警。行为与
+// 旧实现（在 /start 里先 unmarshal、改路径、再 marshal）一致，只是省掉了
+// JSON 往返。
+func resolveRuleFilePath(workDir string, path *string) {
+	if *path == "" {
+		return
+	}
+	if !filepath.IsAbs(*path) {
+		if candidate := filepath.Join(workDir, *path); pathExists(candidate) {
+			*path = candidate
+		}
+	}
+	if !pathExists(*path) {
+		zap.L().Sugar().Infof("%s [WebServer] ❌ Rule file not found at %s", TAG, *path)
+	}
+}
+
 func StartWebServer(bind string, port int, logPath string, workDir string, webUser, webPass string) {
 	if webServer != nil {
 		zap.L().Sugar().Infof("%s [WebServer] Web admin panel is already running, please do not start again", TAG)
@@ -411,37 +435,22 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 				return
 			}
 
-			globalConfigJson, err := BuildGlobalConfigJSON(req.NodeID)
+			gConfig, err := BuildGlobalConfig(req.NodeID)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build global config: " + err.Error()})
 				return
 			}
-			// 如果不是绝对路径，先从workDir中查找，如果找不到再使用原路径，确保在web环境下也能正确加载规则文件 包含GeoSite和GeoIP
-			var gConfig myssh.GlobalConfig
-			if err := json.Unmarshal([]byte(globalConfigJson), &gConfig); err == nil {
-				if gConfig.GeoSiteFilePath != "" && !filepath.IsAbs(gConfig.GeoSiteFilePath) {
-					possiblePath := filepath.Join(workDir, gConfig.GeoSiteFilePath)
-					if _, err := os.Stat(possiblePath); err == nil {
-						gConfig.GeoSiteFilePath = possiblePath
-					}
-				}
-				if _, err := os.Stat(gConfig.GeoSiteFilePath); err != nil {
-					zap.L().Sugar().Infof("%s [WebServer] ❌ GeoSite file not found at %s", TAG, gConfig.GeoSiteFilePath)
-				}
-				if gConfig.GeoIPFilePath != "" && !filepath.IsAbs(gConfig.GeoIPFilePath) {
-					possiblePath := filepath.Join(workDir, gConfig.GeoIPFilePath)
-					if _, err := os.Stat(possiblePath); err == nil {
-						gConfig.GeoIPFilePath = possiblePath
-					}
-				}
-				if _, err := os.Stat(gConfig.GeoIPFilePath); err != nil {
-					zap.L().Sugar().Infof("%s [WebServer] ❌ GeoIP file not found at %s", TAG, gConfig.GeoIPFilePath)
-				}
-				if b, err := json.Marshal(gConfig); err == nil {
-					globalConfigJson = string(b)
-				}
-			}
-			myssh.NewSshTProxy().LoadGlobalConfig(globalConfigJson)
+			// 相对路径的规则文件先到 workDir 下解析，找不到再用原路径，确保 Web
+			// 环境也能加载 geosite/geoip。直接改结构体，避免 marshal→unmarshal→
+			// marshal 往返。
+			resolveRuleFilePath(workDir, &gConfig.GeoSiteFilePath)
+			resolveRuleFilePath(workDir, &gConfig.GeoIPFilePath)
+			globalConfigJson, _ := json.Marshal(gConfig)
+
+			// NewSshTProxy 是无状态门面（引擎状态全在包级），但仍应只建一次、
+			// 同一个实例先后 LoadGlobalConfig + Start。
+			proxy := myssh.NewSshTProxy()
+			proxy.LoadGlobalConfig(string(globalConfigJson))
 
 			proxyConfigJson, err := BuildProxyConfigJSON(req.NodeID)
 			if err != nil {
@@ -449,7 +458,7 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 				return
 			}
 
-			if myssh.NewSshTProxy().Start(proxyConfigJson) == 0 {
+			if proxy.Start(proxyConfigJson) == 0 {
 				proxyRunning = true
 				proxyRunningNode = req.NodeID
 				c.JSON(http.StatusOK, gin.H{"message": "Proxy started"})
@@ -670,13 +679,6 @@ func (rl *rateLimiter) allow() bool {
 		return true
 	}
 	return false
-}
-
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func main() {

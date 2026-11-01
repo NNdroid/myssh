@@ -531,14 +531,17 @@ func BuildProxyConfigJSON(profileID string) (string, error) {
 	return p.ToProxyConfig(s)
 }
 
-func BuildGlobalConfigJSON(profileID string) (string, error) {
+// BuildGlobalConfig 组装全局配置（DNS/Geo 分流）。返回结构体而非 JSON，
+// 让 /start 能就地修正规则文件路径后只序列化一次，省掉 marshal→unmarshal→
+// marshal 的往返。
+func BuildGlobalConfig(profileID string) (*myssh.GlobalConfig, error) {
 	p, err := GetProfile(profileID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	s, err := GetSettings()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	remoteDns := s.RemoteDnsServer
@@ -551,19 +554,17 @@ func BuildGlobalConfigJSON(profileID string) (string, error) {
 	geositeDirect := s.DirectSiteTags
 	geoipDirect := s.DirectIPTags
 	if p.RoutingOverride {
-		geositeDirect = strings.Split(p.GeositeDirect, ",")
-		geoipDirect = strings.Split(p.GeoipDirect, ",")
+		// 与 GetSettings 的 filterEmptyTags 保持一致：节点级覆盖也可能含空 tag。
+		geositeDirect = filterEmptyTags(strings.Split(p.GeositeDirect, ","))
+		geoipDirect = filterEmptyTags(strings.Split(p.GeoipDirect, ","))
 	}
 
-	config := myssh.GlobalConfig{
+	return &myssh.GlobalConfig{
 		LocalDnsServer:  localDns,
 		RemoteDnsServer: remoteDns,
 		GeoSiteFilePath: s.GeoSiteFilePath,
 		GeoIPFilePath:   s.GeoIPFilePath,
 		DirectSiteTags:  geositeDirect,
 		DirectIPTags:    geoipDirect,
-	}
-
-	b, err := json.Marshal(config)
-	return string(b), err
+	}, nil
 }

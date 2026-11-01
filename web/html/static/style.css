@@ -429,6 +429,36 @@ body::after {
     line-height: 1.5;
 }
 
+/* 日志按级别着色（script.js 按行生成 .log-line.log-<level>）。
+   info 继承终端默认绿色，debug 调暗，warn/error 用醒目色，扫一眼即知问题所在。 */
+.log-line.log-info { color: var(--term-text); }
+.log-line.log-debug { color: rgba(50, 215, 75, 0.5); }
+.log-line.log-warn { color: #ffd60a; }
+.log-line.log-error { color: #ff5f57; }
+
+/* 终端细滚动条：默认系统滚动条在深色终端上很突兀，换成细的圆角滑块。 */
+.terminal-body {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(139, 148, 158, 0.4) transparent;
+}
+.terminal-body::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+.terminal-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+.terminal-body::-webkit-scrollbar-thumb {
+    background: rgba(139, 148, 158, 0.35);
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+.terminal-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(139, 148, 158, 0.6);
+    background-clip: padding-box;
+}
+
 /* ==========================================================================
    Panels, Forms, & Inputs
    ========================================================================== */
