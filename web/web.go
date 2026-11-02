@@ -47,19 +47,18 @@ type logCache struct {
 	cacheExpiry time.Duration
 }
 
-var logCacheManager *logCache
+var (
+	logCacheManager *logCache
+	jwtSecret       []byte
+)
 
 func init() {
 	logCacheManager = &logCache{
 		cacheExpiry: 1 * time.Second,
 		offsets:     make(map[string]int64),
 	}
-}
-
-var jwtSecret []byte
-
-func init() {
-	// 每次启动时生成随机的 JWT 密钥。这意味着重启服务端后，所有已登录的 Web 客户端需重新登录，安全性极高
+	// 每次启动时生成随机的 JWT 密钥。这意味着重启服务端后，所有已登录的
+	// Web 客户端需重新登录，安全性极高。
 	jwtSecret = make([]byte, 32)
 	rand.Read(jwtSecret)
 }
@@ -120,7 +119,9 @@ func (lc *logCache) getLogIncrementalCached(clientID string, logPath string) ([]
 
 	lc.mu.Lock()
 	lc.offsets[clientID] = info.Size()
-	lc.lastFetch = time.Now()
+	// 注意：不要更新 lastFetch。lastFetch 只服务于 getLogContentCached 的整段
+	// 缓存；增量读取每次轮询（2s/客户端）都会到这里，若顺手刷新 lastFetch，
+	// 会把"整段内容"缓存判定成刚取过，导致整段读取拿到过期数据。
 	lc.mu.Unlock()
 
 	return buf, nil
@@ -452,13 +453,14 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 			proxy := myssh.NewSshTProxy()
 			proxy.LoadGlobalConfig(string(globalConfigJson))
 
-			proxyConfigJson, err := BuildProxyConfigJSON(req.NodeID)
+			proxyConfig, err := BuildProxyConfig(req.NodeID)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build proxy config: " + err.Error()})
 				return
 			}
+			proxyConfigJson, _ := json.Marshal(proxyConfig)
 
-			if proxy.Start(proxyConfigJson) == 0 {
+			if proxy.Start(string(proxyConfigJson)) == 0 {
 				proxyRunning = true
 				proxyRunningNode = req.NodeID
 				c.JSON(http.StatusOK, gin.H{"message": "Proxy started"})

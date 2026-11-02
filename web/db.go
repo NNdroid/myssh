@@ -415,7 +415,9 @@ func UpdateSettings(s Settings) error {
 	return err
 }
 
-func (p *Profile) ToProxyConfig(s *Settings) (string, error) {
+// buildProxyConfig 组装 ProxyConfig（含隧道类型归一化与 DNS 服务器拆分）。
+// 返回结构体而非 JSON，使 /start 能先装配、后统一序列化，与 BuildGlobalConfig 对称。
+func (p *Profile) buildProxyConfig(s *Settings) *myssh.ProxyConfig {
 	tunnelType := p.TunnelType
 	if tunnelType == "" {
 		tunnelType = "raw"
@@ -445,7 +447,7 @@ func (p *Profile) ToProxyConfig(s *Settings) (string, error) {
 		}
 	}
 
-	config := myssh.ProxyConfig{
+	return &myssh.ProxyConfig{
 		LocalAddr:                    s.LocalAddr,
 		SshAddr:                      p.SshAddr,
 		User:                         p.User,
@@ -514,9 +516,23 @@ func (p *Profile) ToProxyConfig(s *Settings) (string, error) {
 		UdpCustomMaxPkt:      p.UdpCustomMaxPkt,
 		UdpCustomMtuProbe:    p.UdpCustomMtuProbe,
 	}
+}
 
-	b, err := json.Marshal(config)
+func (p *Profile) ToProxyConfig(s *Settings) (string, error) {
+	b, err := json.Marshal(p.buildProxyConfig(s))
 	return string(b), err
+}
+
+func BuildProxyConfig(profileID string) (*myssh.ProxyConfig, error) {
+	p, err := GetProfile(profileID)
+	if err != nil {
+		return nil, err
+	}
+	s, err := GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	return p.buildProxyConfig(s), nil
 }
 
 func BuildProxyConfigJSON(profileID string) (string, error) {
