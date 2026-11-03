@@ -92,8 +92,12 @@ func (p *SshTProxy) WgWait() {
 }
 
 // InitCrashOutput redirects fatal runtime crashes to logPath.
-func (p *SshTProxy) InitCrashOutput(logPath string) {
-	_ = InitCrashOutput(logPath)
+// Returns 0 on success, -1 when the crash file cannot be opened.
+func (p *SshTProxy) InitCrashOutput(logPath string) int {
+	if err := InitCrashOutput(logPath); err != nil {
+		return -1
+	}
+	return 0
 }
 
 // TriggerTestCrash triggers a simulated panic in a protected goroutine for testing UI popup.
@@ -113,4 +117,176 @@ func (p *SshTProxy) SetLogLevel(levelStr string) {
 // server_version 为 RFC 4253 版本标识行，banner 为认证阶段服务端提示文本（可能为空）。
 func (p *SshTProxy) GetSSHHandshakeInfo(addr string) string {
 	return getSSHHandshakeInfoJSON(addr)
+}
+
+// ─── 状态 / 生命周期 ────────────────────────────────────────────────────────
+
+// GetState returns the last engine state as JSON:
+// {"state":"connected","detail":"host:port"}. Unlike the callback, this is safe
+// to call at any time — e.g. after an Activity re-registers its callback.
+func (p *SshTProxy) GetState() string {
+	return engineStateJSON()
+}
+
+// IsRunning reports whether the engine is starting, connecting, connected, or
+// reconnecting.
+func (p *SshTProxy) IsRunning() bool {
+	return engineIsRunning()
+}
+
+// GetLastError returns {"code":..,"message":..} for the most recent failure, or
+// "" when the current start cycle has no error. Use it after Start returns a
+// negative code to recover the reason even if no callback was registered yet.
+func (p *SshTProxy) GetLastError() string {
+	return engineLastErrorJSON()
+}
+
+// NotifyNetworkChanged forces an immediate reconnect after the underlying
+// Android network changed (Wi-Fi ↔ cellular). Without it the engine only
+// notices a dead link on the next keepalive (18s tick + 8s timeout).
+func (p *SshTProxy) NotifyNetworkChanged() {
+	notifyNetworkChanged()
+}
+
+// ClearEngineCallback releases the host callback reference. Call it from
+// Activity.onDestroy to avoid leaking an Activity-scoped callback.
+func (p *SshTProxy) ClearEngineCallback() {
+	clearEngineCallback()
+}
+
+// StartResultCallback receives the result of StartAsync.
+type StartResultCallback interface {
+	OnStartResult(code int, errorJson string)
+}
+
+// StartAsync runs Start on a background goroutine so the caller (typically the
+// Android main thread) is not blocked by teardown of a previous engine.
+func (p *SshTProxy) StartAsync(configJson string, cb StartResultCallback) {
+	if cb == nil {
+		return
+	}
+	SafeGo("StartAsync", func() {
+		code := startSshTProxy(configJson)
+		cb.OnStartResult(code, engineLastErrorJSON())
+	})
+}
+
+// StopAsync runs Stop on a background goroutine.
+func (p *SshTProxy) StopAsync() {
+	SafeGo("StopAsync", stopSshTProxy)
+}
+
+// ─── 异步探测（阻塞调用不适合 Android 主线程）──────────────────────────────
+
+// PingResultCallback receives the JSON array returned by PingNodes.
+type PingResultCallback interface {
+	OnPingResult(resultsJson string)
+}
+
+// SpeedTestResultCallback receives the JSON object returned by SpeedTest.
+type SpeedTestResultCallback interface {
+	OnSpeedTestResult(resultJson string)
+}
+
+// PingNodesAsync 在后台执行批量测延迟；返回 1 表示已开始，0 表示参数无效。
+// 结果始终通过 cb 投递，不会阻塞调用线程。
+func (p *SshTProxy) PingNodesAsync(profilesJson, targetUrl string, timeoutMs int, cb PingResultCallback) int {
+	if cb == nil {
+		return 0
+	}
+	SafeGo("PingNodesAsync", func() {
+		cb.OnPingResult(pingNodes(profilesJson, targetUrl, timeoutMs))
+	})
+	return 1
+}
+
+// SpeedTestAsync 在后台执行上下行测速；返回 1 表示已开始，0 表示参数无效。
+func (p *SshTProxy) SpeedTestAsync(configJson, downUrl, upUrl string, upBytes int64, timeoutMs int, cb SpeedTestResultCallback) int {
+	if cb == nil {
+		return 0
+	}
+	SafeGo("SpeedTestAsync", func() {
+		cb.OnSpeedTestResult(speedTest(configJson, downUrl, upUrl, upBytes, timeoutMs))
+	})
+	return 1
+}
+
+// CancelPing cancels the batch started by PingNodes/PingNodesAsync.
+func (p *SshTProxy) CancelPing() {
+	CancelPing()
+}
+
+// ─── 统计 ──────────────────────────────────────────────────────────────────
+
+// GetTrafficStats returns the current traffic snapshot.
+func (p *SshTProxy) GetTrafficStats() *TrafficStats {
+	return GetTrafficStats()
+}
+
+// GetSysStats returns the current process resource snapshot.
+func (p *SshTProxy) GetSysStats() *SysStats {
+	return GetSysStats()
+}
+
+// GetActiveConnectionsJSON returns the active connection list as JSON.
+func (p *SshTProxy) GetActiveConnectionsJSON() string {
+	return GetActiveConnectionsJSON()
+}
+
+// GetDomainActivityJSON returns the per-domain activity ranking as JSON.
+func (p *SshTProxy) GetDomainActivityJSON() string {
+	return GetDomainActivityJSON()
+}
+
+// RegisterTrafficCallback installs the 1 Hz traffic callback.
+func (p *SshTProxy) RegisterTrafficCallback(cb TrafficCallback) {
+	RegisterTrafficCallback(cb)
+}
+
+// RegisterSysInfoCallback installs the resource callback (sampled every 5s).
+func (p *SshTProxy) RegisterSysInfoCallback(cb SysInfoCallback) {
+	RegisterSysInfoCallback(cb)
+}
+
+// ClearTrafficCallback releases the traffic callback reference.
+func (p *SshTProxy) ClearTrafficCallback() {
+	RegisterTrafficCallback(nil)
+}
+
+// ClearSysInfoCallback releases the sysinfo callback reference.
+func (p *SshTProxy) ClearSysInfoCallback() {
+	RegisterSysInfoCallback(nil)
+}
+
+// GetDroppedEventCount reports callback events dropped because the host could
+// not keep up (the dispatch queue is bounded at 512).
+func (p *SshTProxy) GetDroppedEventCount() int64 {
+	return engineEventsDroppedCount()
+}
+
+// ─── 诊断 ──────────────────────────────────────────────────────────────────
+
+// GetGeoSiteTagsJSON returns the GeoSite tag list as JSON.
+func (p *SshTProxy) GetGeoSiteTagsJSON() string {
+	return GetGeoSiteTagsJSON()
+}
+
+// GetGeoIPTagsJSON returns the GeoIP tag list as JSON.
+func (p *SshTProxy) GetGeoIPTagsJSON() string {
+	return GetGeoIPTagsJSON()
+}
+
+// FetchCertInfo probes the target's certificate (TLS or QUIC).
+func (p *SshTProxy) FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface string) (*CertInfo, error) {
+	return FetchCertInfo(target, useQUIC, serverName, bindInterface)
+}
+
+// GetTLSCertFingerprint returns the leaf certificate SHA-256 fingerprint.
+func (p *SshTProxy) GetTLSCertFingerprint(target string, serverName string, bindInterface string) (string, error) {
+	return GetTLSCertFingerprint(target, serverName, bindInterface)
+}
+
+// GetSSHFingerprint returns the SSH host key SHA-256 fingerprint.
+func (p *SshTProxy) GetSSHFingerprint(sshAddr string, bindInterface string) (string, error) {
+	return GetSSHFingerprint(sshAddr, bindInterface)
 }

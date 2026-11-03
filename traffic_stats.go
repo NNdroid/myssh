@@ -461,12 +461,18 @@ func GetActiveConnectionsJSON() string {
 
 // GetDomainActivityJSON 返回域名活跃度排行的 JSON 字符串。
 func GetDomainActivityJSON() string {
+	// 只在锁内做一次切片拷贝：json.Marshal 会遍历并反射整个榜单，
+	// 持锁序列化会把每秒一次的 ranker 挡在写锁外面。
 	globalDomainStatsManager.rankMu.RLock()
-	defer globalDomainStatsManager.rankMu.RUnlock()
 	if len(globalDomainStatsManager.rankedList) == 0 {
+		globalDomainStatsManager.rankMu.RUnlock()
 		return "[]"
 	}
-	data, err := json.Marshal(globalDomainStatsManager.rankedList)
+	snapshot := make([]DomainActivity, len(globalDomainStatsManager.rankedList))
+	copy(snapshot, globalDomainStatsManager.rankedList)
+	globalDomainStatsManager.rankMu.RUnlock()
+
+	data, err := json.Marshal(snapshot)
 	if err != nil {
 		zlog.Errorf("%s [Stats] ❌ Failed to serialize domain activity ranking: %v", TAG, err)
 		return "[]"
@@ -570,6 +576,11 @@ func init() {
 		defer ticker.Stop()
 
 		lastSampleTime := time.Now()
+		// 系统信息（runtime.ReadMemStats 会 STW 一小段）降频到 5 秒一次，
+		// 流量速率仍需 1 Hz 才能让 UI 曲线平滑。
+		const sysInfoInterval = 5 * time.Second
+		// 回退一个周期，让首个 tick 就能立刻投递一次（否则 UI 前 5s 没有资源数据）。
+		lastSysSample := time.Now().Add(-sysInfoInterval)
 		for range ticker.C {
 			now := time.Now()
 			elapsed := now.Sub(lastSampleTime)
@@ -604,7 +615,8 @@ func init() {
 			if tcb != nil {
 				tcb.OnTrafficUpdate(int64(txRate), int64(rxRate), int64(tTx), int64(tRx), actConns, totConns)
 			}
-			if scb != nil {
+			if scb != nil && now.Sub(lastSysSample) >= sysInfoInterval {
+				lastSysSample = now
 				sys := GetSysStats()
 				scb.OnSysInfoUpdate(sys.CpuPercent, sys.MemAllocMB, sys.MemSysMB, sys.Goroutines)
 			}

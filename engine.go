@@ -237,6 +237,32 @@ func stopSshTProxy() {
 	stopEngine()
 }
 
+// notifyNetworkChanged 让引擎立刻放弃当前 SSH 会话，交给 AutoSSH 循环在新
+// 底层网络上重建。Android 在 Wi-Fi/蜂窝切换、丢网恢复后调用。
+//
+// 不调用的话，只能等 keepalive 的 18s 周期 + 8s 响应超时（最坏 26s）才
+// 发现链路已死，期间所有经隧道的连接都会挂住。
+//
+// 同时丢弃 DNS 上游连接池/DoH 空闲连接：旧 socket 仍绑定在已失效的底层
+// 网络上，继续复用只会让切换后的首批查询超时。
+func notifyNetworkChanged() {
+	if lds := localDnsServer.Load(); lds != nil {
+		lds.dropUpstreamPools()
+	}
+
+	mu.Lock()
+	client := sshClient
+	mu.Unlock()
+
+	if client == nil {
+		zlog.Infof("%s [AutoSSH] 🌐 Network changed before an SSH session was established; nothing to reset", TAG)
+		return
+	}
+	zlog.Warnf("%s [AutoSSH] 🌐 Network changed, dropping the current SSH session for an immediate reconnect", TAG)
+	// AutoSSH 的 client.Wait() 会立即返回，随后走正常的重连路径。
+	client.Close()
+}
+
 func stopEngine() {
 	// 持锁只做「取快照 + 置空」，把 DNS Stop / SOCKS Shutdown / 遍历关闭
 	// 连接等 I/O 全部移到锁外。旧实现全程持 mu：期间所有新建 TCP 连接都

@@ -5,6 +5,7 @@ package myssh
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -24,7 +25,8 @@ var (
 	// SetLogReceiver 里各起一个消费者，重复绑定（UI 重进/换 Activity）会
 	// 叠加多个 goroutine 争抢同一 channel，同一条日志被多次投递。
 	logConsumerOnce sync.Once
-	logChan                            = make(chan logItem, 1000)
+	logChan         = make(chan logItem, 1000)
+	logDropped      atomic.Uint64
 	zlog            *zap.SugaredLogger = zap.NewNop().Sugar()
 	atomicLogLevel                     = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
@@ -103,6 +105,19 @@ func drainLogChan() {
 	}
 }
 
+// ClearLogReceiver 释放宿主引用（Activity.onDestroy 时调用），避免 Go 全局
+// 持有已销毁 Activity 的 LogReceiver。
+func ClearLogReceiver() {
+	globalReceiverMu.Lock()
+	globalReceiver = nil
+	globalReceiverMu.Unlock()
+}
+
+// logDroppedCount 返回因接收端跟不上而丢弃的日志条数。
+func logDroppedCount() int64 {
+	return int64(logDropped.Load())
+}
+
 type stunCore struct {
 	zapcore.LevelEnabler
 	encoder zapcore.Encoder
@@ -154,7 +169,8 @@ func (c *stunCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		msg:   buf.String(),
 	}:
 	default:
-		// 缓冲已满，丢弃本条日志
+		// 缓冲已满，丢弃本条日志（计数可由宿主用 GetDroppedLogCount 观测）。
+		logDropped.Add(1)
 	}
 	buf.Free()
 	return nil

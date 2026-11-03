@@ -14,6 +14,11 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m,
 		goleak.IgnoreCurrent(),
+		// 引擎回调派发器是进程级单例（由 engineDispatchOnce 保证只启动一次），
+		// 设计上就不退出。它在首次 emit 时才懒启动，因此不在 IgnoreCurrent 的
+		// 基线里；且它阻塞在 Cond.Wait 时栈顶是 sync.runtime_notifyListWait，
+		// 只能用 IgnoreAnyFunction 全栈匹配。
+		goleak.IgnoreAnyFunction("myssh.dispatchEngineEvents"),
 		goleak.IgnoreTopFunction("github.com/quic-go/quic-go.(*Transport).listen"),
 		goleak.IgnoreTopFunction("github.com/quic-go/quic-go.(*Transport).runSendQueue"),
 		goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),

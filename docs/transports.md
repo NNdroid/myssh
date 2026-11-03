@@ -123,7 +123,7 @@
 ### 4.6 `quic`（udp，固定 TLS，SSH-over-QUIC）
 - 读：`proxy_addr`、`server_name`、`verify_certificate_finger_print`、`server_certificate_finger_print`
 - ALPN：**固定** `h3`（不可配，不可并入 raw）
-- TLS 用 crypto/tls + `MakePeerCertVerifier`（**注意：非 uTLS**，quic-go v0.60 无 ClientHello 替换钩子）
+- TLS 用 crypto/tls + `MakePeerCertVerifier`（**注意：非 uTLS**，quic-go v0.62 无 ClientHello 替换钩子）
 
 ### 4.7 `xhttp`（custom，可切换 TLS）
 - 读：`alpn`、`custom_host`、`custom_path`（默认 `/stream`）、`proxy_addr`、`proxy_auth_required`、`proxy_auth_token`、`server_name`、`ssh_addr`、`tunnel_tls_enabled`、`xhttp_chunk_size_kb`、`xhttp_stream_mode`

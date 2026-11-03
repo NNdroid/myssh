@@ -75,6 +75,36 @@ func (l *LocalDnsServer) getPool(poolsMap *sync.Map, poolKey string) *dnsConnPoo
 	return val.(*dnsConnPool)
 }
 
+// dropUpstreamPools 关闭并丢弃所有上游 TCP/DoT 连接池与空闲 DoH 连接。
+// 底层网络切换后，旧 socket 仍绑定在失效的接口上，继续复用只会让首批
+// DNS 查询超时；下一次 getPool 会按需重建。
+func (l *LocalDnsServer) dropUpstreamPools() {
+	for _, pools := range []*sync.Map{&l.tcpConnPools, &l.dotConnPools} {
+		pools.Range(func(key, _ interface{}) bool {
+			// 用 LoadAndDelete 拿到真正被摘掉的那个池：若在 Range 与 Delete
+			// 之间 getPool 刚好新建了一个池，直接 Delete(key) 会把新池丢掉
+			// 而没关它的连接，留下走不到又被 GC 的连接。
+			if removed, ok := pools.LoadAndDelete(key); ok {
+				if p, ok := removed.(*dnsConnPool); ok {
+					p.closeAll()
+				}
+			}
+			return true
+		})
+	}
+
+	l.dohMu.Lock()
+	if l.directDoH != nil {
+		l.directDoH.CloseIdleConnections()
+		l.directDoH = nil
+	}
+	if l.proxiedDoH != nil {
+		l.proxiedDoH.CloseIdleConnections()
+		l.proxiedDoH = nil
+	}
+	l.dohMu.Unlock()
+}
+
 // dialTracked 建 dial 上游连接（直连或经 SSH 隧道），并纳入流量统计。
 func (l *LocalDnsServer) dialTracked(network, addr string, isDirect bool, sshClient *ssh.Client, prefix string) (net.Conn, error) {
 	var rawConn net.Conn

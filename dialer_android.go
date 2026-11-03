@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 type SocketProtector interface {
@@ -28,11 +29,41 @@ func RegisterProtector(p SocketProtector) {
 	zlog.Infof("[Protect-Init] ✅ SocketProtector registered (Go layer)")
 }
 
+// clearProtector 释放宿主引用（Activity.onDestroy 时调用）。
+func clearProtector() {
+	protectorMutex.Lock()
+	globalProtector = nil
+	protectorMutex.Unlock()
+}
+
 // getProtector 读取当前已注册的 Protector
 func getProtector() SocketProtector {
 	protectorMutex.RLock()
 	defer protectorMutex.RUnlock()
 	return globalProtector
+}
+
+// protectorNilLogInterval 是「Protector 未注册」告警的最小间隔。
+const protectorNilLogInterval = 10 * time.Second
+
+var (
+	protectorNilLogAt atomic.Int64  // 上次告警的 unix nano，用于无锁限流
+	protectorNilCount atomic.Uint64 // 累计未受保护的 socket 数，附在告警里给宿主看
+)
+
+// logProtectorNil 限流记录「Protector 未注册」。
+// 该分支在每个新建连接上都会命中，直接打日志会在满速建连时刷爆日志缓冲。
+func logProtectorNil(fd uintptr) {
+	total := protectorNilCount.Add(1)
+	now := time.Now().UnixNano()
+	last := protectorNilLogAt.Load()
+	if now-last < int64(protectorNilLogInterval) {
+		return
+	}
+	if !protectorNilLogAt.CompareAndSwap(last, now) {
+		return
+	}
+	zlog.Errorf("[Protect] ⚠️ SocketProtector is not registered; socket fd=%d left unprotected (VPN traffic may loop back, %d unprotected sockets so far)", fd, total)
 }
 
 // androidProtectControl 返回执行 VpnService 保护流程的 Control 回调。
@@ -62,7 +93,9 @@ func androidProtectControl() func(network, address string, c syscall.RawConn) er
 					zlog.Debugf("[Protect-%d] ✅ Success: ProtectSocket(fd=%d) protected", reqID, fd)
 				}
 			} else {
-				//zlog.Errorf("[Protect-%d] ⚠️ Severe Warning: getProtector() returned nil! VPN is not initialized, which will cause a traffic infinite loop!", reqID)
+				// Protector 未注册时 socket 不会被 VpnService 豁免，隧道流量会被
+				// 自己的 VPN 抓回来形成回环。每个连接都会走到这里，必须限流。
+				logProtectorNil(fd)
 			}
 		})
 
