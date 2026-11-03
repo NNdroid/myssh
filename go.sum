@@ -6,8 +6,8 @@ github.com/NNdroid/h2tunnel v1.0.20260425-0.20261027083428-321bd6d5b375 h1:/Zg+y
 github.com/NNdroid/h2tunnel v1.0.20260425-0.20261027083428-321bd6d5b375/go.mod h1:9vr2VOFEAgdp93yHRx1B8VFyAnIa8nqqLoixMzKFZks=
 github.com/NNdroid/icmp_custom v0.0.0-20261026100612-ab77fcb5f8b0 h1:ZaZCb8mH8kaRbwtVIQy3cjTyM0zkUCPdrgGggd7Bzos=
 github.com/NNdroid/icmp_custom v0.0.0-20261026100612-ab77fcb5f8b0/go.mod h1:xdgneWkf61J8HvtbvPagW68JMm/hXgutL9MSLAFIduk=
-github.com/NNdroid/udp_custom v0.0.0-20261101011256-e5400d9a3893 h1:eoN1h5kPEXjOkmcYshCVRD3ecntPhNrMoGpjHQaPzNk=
-github.com/NNdroid/udp_custom v0.0.0-20261101011256-e5400d9a3893/go.mod h1:m8JbhI9j0R/SN20qkR+PzRRX9N37tGnHj+zCdwWYAas=
+github.com/NNdroid/udp_custom v0.0.0-20261103224834-4c5d25d0bad1 h1:lnXO7Hl8SXLnEGV15V+hloPie+FkqlghHo+LxJVCpBY=
+github.com/NNdroid/udp_custom v0.0.0-20261103224834-4c5d25d0bad1/go.mod h1:m8JbhI9j0R/SN20qkR+PzRRX9N37tGnHj+zCdwWYAas=
 github.com/NNdroid/xhttptunnel v1.0.20260613-0.20261101032629-4390d811be24 h1:embbVG0A7WKMMuiwqWlFxliRTaNMd0gjUfXWp5TWVjk=
 github.com/NNdroid/xhttptunnel v1.0.20260613-0.20261101032629-4390d811be24/go.mod h1:uHKgt2tb529k1Dl+vIb5cQDozjqc3nSLaAXWYN8myI8=
 github.com/andybalholm/brotli v1.2.7 h1:UgafRPGMam5ySHfRkhthMqOFA6IFoeF3D7mWIDLjG5A=
