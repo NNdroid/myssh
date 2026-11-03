@@ -71,14 +71,17 @@ func (f *fakeEngineCallback) waitFor(t *testing.T, want string) {
 // emitState 必须立刻返回。旧实现是同步直调，AutoSSH 循环发 StateReconnecting
 // 时若宿主在 OnState 里调 Stop()，Stop 等 <-engineDone 会直接死锁。
 func TestEmitStateDoesNotBlockOnSlowHostCallback(t *testing.T) {
-	entered := make(chan struct{})
+	// 必须带缓冲：无缓冲 channel 配 select+default 时，只要此刻没有接收方
+	// 等待，发送就会走 default 被丢掉，测试会假死（-race 下必现）。
+	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
+	// 无条件放行：断言失败走 t.Fatal 时也必须解开派发器，否则它会永久卡在
+	// OnState 里，把整包后续测试全部饿死。
+	defer close(release)
+
 	cb := newFakeEngineCallback()
 	cb.onState = func(string, string) {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
+		entered <- struct{}{}
 		<-release
 	}
 	registerEngineCallback(cb)
@@ -101,7 +104,6 @@ func TestEmitStateDoesNotBlockOnSlowHostCallback(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("callback was never delivered")
 	}
-	close(release)
 }
 
 // TestCallbackReenterEmitDoesNotDeadlock 钉住重入：宿主在 OnState 里再次
