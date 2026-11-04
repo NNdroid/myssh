@@ -19,11 +19,29 @@ func validatePerformanceConfig(cfg ProxyConfig) error {
 	return nil
 }
 
+// validateSocks5AuthConfig 校验本地 SOCKS5 认证配置必须成对出现。
+// 只填一个（user xor pass）属于配置错误：txthinking/socks5 只在 user/pass
+// 同时非空时才启用 MethodUsernamePassword，单边非空会被静默降级为免认证，
+// 与配置者意图相反 —— 宁可拒绝启动。错误文案含 "must be "，
+// isPermanentConfigError 会将其归类为永久配置错误，AutoSSH 不做无意义重试。
+func validateSocks5AuthConfig(cfg ProxyConfig) error {
+	if (cfg.Socks5AuthUser == "") != (cfg.Socks5AuthPass == "") {
+		return fmt.Errorf("socks5_auth_user and socks5_auth_pass must be set together (both empty = no auth)")
+	}
+	return nil
+}
+
 type ProxyConfig struct {
 	TcpBufferKB          int    `json:"tcp_buffer_kb"`           // 0: OS defaults; positive: per-direction socket buffer KiB.
 	UdpMaxSessions       int    `json:"udp_max_sessions"`        // 0: 1024 concurrent direct + UDPGW sessions.
 	UdpIdleTimeoutSec    int    `json:"udp_idle_timeout_sec"`    // 0: 60 seconds without application traffic.
 	LocalAddr            string `json:"local_addr"`              // 本地 SOCKS5/HTTP 监听地址 host:port
+	// 本地 SOCKS5 入站的 RFC 1929 用户名/密码认证（保护回环端口不被设备上其它 App 白嫖）。
+	// 两者必须成对设置：都非空 => 强制 MethodUsernamePassword；都为空 => MethodNone 免认证（旧行为）。
+	// 只填一个属于配置错误，startSshTProxy 直接拒绝启动。注意这是本地入站认证，
+	// 与出站隧道的 ProxyAuthUser/ProxyAuthPass（Basic/Bearer）无关。
+	Socks5AuthUser       string `json:"socks5_auth_user"`        // 本地 SOCKS5 认证用户名；空 = 不启用
+	Socks5AuthPass       string `json:"socks5_auth_pass"`        // 本地 SOCKS5 认证密码；空 = 不启用
 	SshAddr              string `json:"ssh_addr"`                // SSH 服务端地址 host:port（隧道最终要打通的目标）
 	User                 string `json:"user"`                    // SSH 登录用户名
 	AuthType             string `json:"auth_type"`               // SSH 认证方式："password" 用 Pass；其它按公钥（PrivateKey）

@@ -67,6 +67,15 @@ func startSshTProxy(configJson string) int {
 		emitState(StateError, err.Error())
 		return -1
 	}
+	// 本地 SOCKS5 认证必须成对配置：库只有在 user/pass 同时非空时才启用
+	// MethodUsernamePassword，只填一个会被静默忽略成免认证 —— 与配置者意图相
+	// 反，宁可拒绝启动（原因与永久错误归类见 validateSocks5AuthConfig）。
+	if err := validateSocks5AuthConfig(cfg); err != nil {
+		zlog.Errorf("%s [Core] ❌ Invalid config: %v", TAG, err)
+		emitError(-1, err.Error())
+		emitState(StateError, err.Error())
+		return -1
+	}
 	mu.Lock()
 	ctx, engineCancel = context.WithCancel(context.Background())
 	engineCtxHolder.Store(&ctx)
@@ -88,13 +97,18 @@ func startSshTProxy(configJson string) int {
 		}
 	}
 
-	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", "", "", 0, 60)
+	srv, err := socks5.NewClassicServer(cfg.LocalAddr, "", cfg.Socks5AuthUser, cfg.Socks5AuthPass, 0, 60)
 	if err != nil {
 		stopEngine()
 		zlog.Errorf("%s [SOCKS5] ❌ Failed to create SOCKS5 server instance: %v", TAG, err)
 		emitError(-4, err.Error())
 		emitState(StateError, err.Error())
 		return -4
+	}
+	if cfg.Socks5AuthUser != "" && cfg.Socks5AuthPass != "" {
+		zlog.Infof("%s [SOCKS5] 🔒 Inbound auth enabled (RFC 1929, user=%s)", TAG, cfg.Socks5AuthUser)
+	} else {
+		zlog.Infof("%s [SOCKS5] ⚠️ Inbound auth disabled (no socks5_auth_user/pass)", TAG)
 	}
 
 	mu.Lock()
