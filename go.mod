@@ -7,7 +7,7 @@ require (
 	github.com/NNdroid/h2tunnel v1.0.20260425-0.20261027083428-321bd6d5b375
 	github.com/NNdroid/icmp_custom v0.0.0-20261026100612-ab77fcb5f8b0
 	github.com/NNdroid/udp_custom v0.0.0-20261103224834-4c5d25d0bad1
-	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20261101032629-4390d811be24
+	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20261104082149-89bc045f7b5d
 	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
