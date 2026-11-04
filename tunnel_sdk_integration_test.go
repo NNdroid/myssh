@@ -136,6 +136,10 @@ func TestXHTTPCSDKAdapterEndToEnd(t *testing.T) {
 		ProxyAuthToken:    "sdk-token",
 		Alpn:              "h1",
 		XhttpChunkSizeKB:  64,
+		// Tuning knobs must be accepted by the SDK on the happy path too.
+		XhttpPadding:      "off",
+		XhttpWindowSizeMB: 16,
+		XhttpMaxConns:     8,
 	}, false)
 	if err != nil {
 		t.Fatal(err)

@@ -42,7 +42,7 @@
 | `proxy_addr` | string | 代理/隧道服务端 endpoint（自拨类据此构造 URL；tcp/udp 复用型由 `dialer` 预拨到此地址）。 |
 | `proxy_auth_required` | bool | 是否启用代理层鉴权。 |
 | `proxy_auth_user` / `proxy_auth_pass` | string | Basic 鉴权（`websocket`/`http`）。 |
-| `proxy_auth_token` | string | Bearer/PSK token（`h2` 家族、`xhttp`）。`proxy_auth_required=true` 且此项为空时报错。 |
+| `proxy_auth_token` | string | Bearer/PSK token（`h2` 家族、`xhttp`）。`h2` 家族需 `proxy_auth_required=true` 且此项为空时报错；**`xhttp` 无条件必填**（SDK 无 open mode），见 §4.7。 |
 | `custom_host` | string | 覆盖请求 `Host` 头（伪装/CDN 前置）。 |
 | `custom_path` | string | 覆盖请求路径（默认端点路径见各类型）。 |
 | `server_name` | string | TLS SNI（Server Name Indication）。留空则各实现按 host 处理。 |
@@ -126,11 +126,16 @@
 - TLS 用 crypto/tls + `MakePeerCertVerifier`（**注意：非 uTLS**，quic-go v0.62 无 ClientHello 替换钩子）
 
 ### 4.7 `xhttp`（custom，可切换 TLS）
-- 读：`alpn`、`custom_host`、`custom_path`（默认 `/stream`）、`proxy_addr`、`proxy_auth_required`、`proxy_auth_token`、`server_name`、`ssh_addr`、`tunnel_tls_enabled`、`xhttp_chunk_size_kb`、`xhttp_stream_mode`
+- 读：`alpn`、`custom_host`、`custom_path`（默认 `/stream`）、`proxy_addr`、`proxy_auth_token`、`server_name`、`ssh_addr`、`tunnel_tls_enabled`、`xhttp_chunk_size_kb`、`xhttp_stream_mode`、`xhttp_padding`、`xhttp_window_size_mb`、`xhttp_max_conns`
+- ⚠️ SDK 已取消 open mode：`xhttp` **始终**需要 `proxy_auth_token` 作为 PSK，**忽略 `proxy_auth_required`**（该字段仍控制其他隧道的 Basic/Bearer）。空 token 在建连前直接报错。
 - 指纹：经 SDK `verifyFingerprint` pinning（同 §2）；TLS 且 `verify=true` 空指纹 → 建连前 fail-closed 报错
 - `xhttp_chunk_size_kb`：上行分块大小（KB），`0`→默认 256；**建议 16–900**；myssh 硬拒 `<0` 与 `>900`
 - `xhttp_stream_mode`：下行传输，`""`/`auto`（默认，流式优先、轮询回退）、`stream`、`poll`；非法值报错
+- `xhttp_padding`：帧填充规则，语法 `"400-600"`、`"23:120-200,400:400-600"`、`"off"`、`"auto"`/`"default"`；空值=SDK 内置策略。这是 SDK 的**进程级**策略，myssh 每次 `Start` 用 `SetPadding` 重新声明（不用 `ClientConfig.Padding`，那会把规则永久钉死，切换配置时会报错）。同一进程里所有 xhttp 配置（含 `PingNodes` / `SpeedTest` 的 profile）应保持一致，否则后建连的那份会覆盖全局策略
+- `xhttp_window_size_mb`：可靠发送窗口（MiB），`0`→SDK 默认 8，显式范围 `1–64`；越界由 SDK 在 `NewClient` 拒绝
+- `xhttp_max_conns`：并发会话上限，`<=0`→SDK 默认 2000
 - `alpn`：唯一真正消费 `alpn` 字段的类型（逗号分隔取首个归一）
+- 注意 `padding_min_bytes` **仅作用于 h2 家族**，与 xhttp 的填充无关；xhttp 未暴露 Brutal（Android 无 tcp_brutal 内核模块，且 h3/QUIC 下 SDK 会跳过）
 
 ### 4.8 `kcptun`（udp，无 TLS；kcptun 协议 KCP→Snappy→SMUX→SSH）
 - 读：`proxy_addr`、`ssh_addr`、`kcp_password`、`kcp_crypt`、`kcp_mode`、`kcp_data_shards`、`kcp_parity_shards`、`kcp_sndwnd`、`kcp_rcvwnd`、`kcp_mtu`、`kcp_nocomp`、`kcp_smuxver`、`kcp_keepalive`

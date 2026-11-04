@@ -97,8 +97,11 @@ type ProxyConfig struct {
 	IcmpCustomIdRange    string `json:"icmp_custom_id_range"`    // echo identifier pool, e.g. "1000-1999"
 
 	// XHTTP tunnel (xhttp/xhttpc) config
-	XhttpChunkSizeKB int    `json:"xhttp_chunk_size_kb"` // upstream request body in KB; default 256, range 16-900
-	XhttpStreamMode  string `json:"xhttp_stream_mode"`   // downlink transport: ""/"auto" (default: streaming with polling fallback), "stream", "poll"
+	XhttpChunkSizeKB  int    `json:"xhttp_chunk_size_kb"`  // upstream request body in KB; default 256, range 16-900
+	XhttpStreamMode   string `json:"xhttp_stream_mode"`    // downlink transport: ""/"auto" (default: streaming with polling fallback), "stream", "poll"
+	XhttpPadding      string `json:"xhttp_padding"`        // frame padding rule, e.g. "400-600", "23:120-200,400:400-600", "off"; empty = SDK default. Process-wide SDK policy, re-declared on every Start.
+	XhttpWindowSizeMB int    `json:"xhttp_window_size_mb"` // reliable send window in MiB; 0 = SDK default (8), explicit range 1-64
+	XhttpMaxConns     int    `json:"xhttp_max_conns"`      // concurrent session cap; <=0 = SDK default (2000)
 
 	// Resume/2 空闲心跳间隔（毫秒）。0 表示使用默认 25000ms。
 	// 在 CDN/反代 idle 阈值之前主动发 KEEPALIVE 帧保活主流，避免空闲流被掐断。

@@ -52,6 +52,8 @@ The engine embeds the public client APIs from `h2tunnel`, `xhttptunnel`,
 - `bind_interface`: outbound interface binding; empty means unbound.
 - `proxy_auth_token` (Bearer/PSK: `h2` family, `xhttp`) and
   `proxy_auth_user` / `proxy_auth_pass` (Basic: `websocket` / `http`).
+  `xhttp` **always** requires `proxy_auth_token` as its PSK and ignores
+  `proxy_auth_required` — the xhttptunnel SDK no longer has an open mode.
 
 ### Resource limits
 
@@ -69,8 +71,11 @@ The engine embeds the public client APIs from `h2tunnel`, `xhttptunnel`,
   `custom_path`, `custom_host`, `server_name`, `heartbeat_interval_ms`,
   `padding_min_bytes`; `masque` also reads `masque_alpn` (`auto` / `h3` / `h2`).
 - **`xhttp`**: the common HTTP fields plus `alpn` (`auto` / `h3` / `h2` / `h1`),
-  `xhttp_chunk_size_kb` (0 → 256, 16–900), and `xhttp_stream_mode`
-  (`auto` / `stream` / `poll`).
+  `xhttp_chunk_size_kb` (0 → 256, 16–900), `xhttp_stream_mode`
+  (`auto` / `stream` / `poll`), `xhttp_padding` (frame-padding rule such as
+  `400-600` or `off`; empty = SDK default), `xhttp_window_size_mb`
+  (0 → 8 MiB, explicit 1–64), and `xhttp_max_conns` (0 → 2000).
+  `padding_min_bytes` applies to the `h2` family only, not to `xhttp`.
 - **`kcptun`**: `kcp_password`, `kcp_crypt`, `kcp_mode`, `kcp_data_shards`,
   `kcp_parity_shards`, `kcp_sndwnd`, `kcp_rcvwnd`, `kcp_mtu`, `kcp_nocomp`,
   `kcp_smuxver`, `kcp_keepalive`.

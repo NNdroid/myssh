@@ -39,6 +39,74 @@ func TestXHTTPStreamModeValidation(t *testing.T) {
 	}
 }
 
+// TestXhttpTuningJSONTags pins the JSON keys the Android host writes when
+// passing the xhttp tuning options through Start(configJson).
+func TestXhttpTuningJSONTags(t *testing.T) {
+	b, err := json.Marshal(ProxyConfig{
+		XhttpPadding:      "400-600",
+		XhttpWindowSizeMB: 16,
+		XhttpMaxConns:     64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"xhttp_padding":"400-600"`,
+		`"xhttp_window_size_mb":16`,
+		`"xhttp_max_conns":64`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("missing %s in %s", want, b)
+		}
+	}
+}
+
+// TestDialXHTTPSDKRequiresPSKWithoutAuthFlag: the SDK removed open mode, so a
+// PSK is mandatory for xhttp even when proxy_auth_required is false. The check
+// happens before any dial, so an empty token must fail deterministically.
+func TestDialXHTTPSDKRequiresPSKWithoutAuthFlag(t *testing.T) {
+	cfg := ProxyConfig{
+		TunnelType:        "xhttp",
+		ProxyAddr:         "127.0.0.1:8080",
+		SshAddr:           "127.0.0.1:22",
+		ProxyAuthRequired: false,
+	}
+	_, err := dialXHTTPSDK(context.Background(), cfg, false)
+	if err == nil || !strings.Contains(err.Error(), "proxy_auth_token") {
+		t.Fatalf("expected a PSK-required error, got %v", err)
+	}
+}
+
+// TestDialXHTTPSDKTuningRejectedBeforeDial proves the new fields reach the
+// SDK: an invalid padding rule and an out-of-range window are both rejected
+// before any network I/O, with the field name in the error.
+func TestDialXHTTPSDKTuningRejectedBeforeDial(t *testing.T) {
+	base := ProxyConfig{
+		TunnelType:     "xhttp",
+		ProxyAddr:      "127.0.0.1:8080",
+		SshAddr:        "127.0.0.1:22",
+		ProxyAuthToken: "test-psk",
+	}
+	cases := []struct {
+		name   string
+		mutate func(*ProxyConfig)
+		want   string
+	}{
+		{"padding", func(c *ProxyConfig) { c.XhttpPadding = "not-a-padding-rule" }, "xhttp_padding"},
+		{"window", func(c *ProxyConfig) { c.XhttpWindowSizeMB = 65 }, "window_size_mb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.mutate(&cfg)
+			_, err := dialXHTTPSDK(context.Background(), cfg, false)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // TestXhttpStreamModeJSONTag 防止 JSON 标签被意外改动（DB/API round-trip 依赖它）。
 func TestXhttpStreamModeJSONTag(t *testing.T) {
 	b, err := json.Marshal(ProxyConfig{XhttpStreamMode: "poll"})

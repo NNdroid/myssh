@@ -36,12 +36,14 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 	if tlsEnabled && cfg.VerifyCertificateFingerprint && strings.TrimSpace(cfg.ServerCertificateFingerprint) == "" {
 		return nil, errors.New("verify_certificate_finger_print is enabled but server_certificate_finger_print is empty")
 	}
-	psk := ""
-	if cfg.ProxyAuthRequired {
-		psk = strings.TrimSpace(cfg.ProxyAuthToken)
-		if psk == "" {
-			return nil, errors.New("proxy_auth_token is required when proxy_auth_required is true")
-		}
+	// The SDK dropped open/unauthenticated mode: NewClient rejects an empty
+	// PSK. xhttp therefore always uses proxy_auth_token and ignores
+	// proxy_auth_required (which still controls Basic/Bearer auth on the other
+	// transports). Accepting a token even when the flag is false avoids
+	// breaking existing configs that set the token but not the flag.
+	psk := strings.TrimSpace(cfg.ProxyAuthToken)
+	if psk == "" {
+		return nil, errors.New("xhttp requires proxy_auth_token (PSK); the xhttptunnel SDK no longer supports unauthenticated mode")
 	}
 	// 下行传输模式：空/auto（默认）由 SDK 自适应（流式优先、轮询回退），
 	// 也可强制 stream 或 poll。
@@ -50,18 +52,27 @@ func dialXHTTPSDK(ctx context.Context, cfg ProxyConfig, tlsEnabled bool) (net.Co
 		return nil, err
 	}
 	serverURL := strings.TrimRight(endpoint, "/") + path
+	// Padding is a process-wide SDK policy. Passing it through
+	// ClientConfig.Padding would pin one rule for the lifetime of the process
+	// (a later Start with a different rule is rejected forever), so re-declare
+	// it here instead. An empty spec selects the SDK's built-in default.
+	if err := xhttptunnel.SetPadding(strings.TrimSpace(cfg.XhttpPadding)); err != nil {
+		return nil, fmt.Errorf("invalid xhttp_padding: %w", err)
+	}
 	client, err := xhttptunnel.NewClient(xhttptunnel.ClientConfig{
-		ServerURL:   serverURL,
-		PSK:         psk,
-		StreamMode:  streamMode,
-		SNI:         strings.TrimSpace(cfg.ServerName),
-		Host:        strings.TrimSpace(cfg.CustomHost),
-		ALPN:        normalizeXHTTPALPN(cfg.Alpn),
-		Fingerprint: sdkCertificateFingerprint(cfg),
-		DialContext: sdkTCPDialer(cfg),
-		QUICDial:    sdkQUICDialer(cfg),
-		ChunkSizeKB: cfg.XhttpChunkSizeKB,
-		Logger:      sdkZap("xhttp"),
+		ServerURL:    serverURL,
+		PSK:          psk,
+		StreamMode:   streamMode,
+		SNI:          strings.TrimSpace(cfg.ServerName),
+		Host:         strings.TrimSpace(cfg.CustomHost),
+		ALPN:         normalizeXHTTPALPN(cfg.Alpn),
+		Fingerprint:  sdkCertificateFingerprint(cfg),
+		DialContext:  sdkTCPDialer(cfg),
+		QUICDial:     sdkQUICDialer(cfg),
+		ChunkSizeKB:  cfg.XhttpChunkSizeKB,
+		WindowSizeMB: cfg.XhttpWindowSizeMB,
+		MaxConns:     cfg.XhttpMaxConns,
+		Logger:       sdkZap("xhttp"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create xhttptunnel client: %w", err)
