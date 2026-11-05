@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,8 +83,17 @@ func applyTCPConfig(conn net.Conn, cfg ProxyConfig) {
 }
 
 // dialSocket is the unified entry point for creating all underlying sockets.
-// It handles timeouts and interface binding.
-func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (net.Conn, error) {
+// It handles timeouts, interface binding and IP4P resolution. The second return
+// value is the effective address: for an IP4P target it is the decoded
+// IPv4:port, otherwise the original address.
+//
+// UDP sockets are deliberately created UNCONNECTED. quic-go and kcp-go speak
+// net.PacketConn: they call ReadFrom/WriteTo with an explicit peer. A connected
+// UDP socket (what net.Dialer.DialContext returns) rejects those calls with
+// "use of WriteTo with pre-connected connection", so the QUIC/KCP tunnels and
+// the QUIC certificate probe cannot send a single packet. An unconnected
+// *net.UDPConn still satisfies both net.Conn and net.PacketConn.
+func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (net.Conn, string, error) {
 	zlog.Debugf("%s [Dialer] 🎬 Starting dial (network=%s, address=%s)", TAG, network, address)
 
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
@@ -115,7 +125,7 @@ func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (
 			address,
 			err,
 		)
-		return nil, err
+		return nil, "", err
 	}
 
 	if ip4p {
@@ -137,20 +147,53 @@ func dialSocket(ctx context.Context, cfg ProxyConfig, network, address string) (
 	markDialer := wrapSocketMark(safeDialer)
 	matchDialerNetwork(markDialer, network)
 
+	if strings.HasPrefix(network, "udp") {
+		conn, err := listenPacketUDP(ctx, markDialer, network)
+		if err != nil {
+			zlog.Errorf("%s [Socket] ❌ Underlying UDP socket creation failed: %v", TAG, err)
+			return nil, "", err
+		}
+		zlog.Infof("%s [Socket] ✅ Unconnected UDP socket ready for peer %s", TAG, address)
+		return conn, address, nil
+	}
+
 	zlog.Debugf("%s [Dialer] 📞 Executing DialContext...", TAG)
 	conn, err := markDialer.DialContext(ctx, network, address)
 	if err != nil {
 		zlog.Errorf("%s [Socket] ❌ Underlying %s connection failed: %v", TAG, strings.ToUpper(network), err)
-		return nil, err
+		return nil, "", err
 	}
 	zlog.Infof("%s [Socket] ✅ Underlying %s connection established successfully: %s", TAG, strings.ToUpper(network), address)
 
+	return conn, address, nil
+}
+
+// listenPacketUDP creates an unconnected UDP socket while reusing the exact
+// same Control chain as the dialer (SO_BINDTODEVICE / VpnService.protect /
+// SO_MARK) and the same LocalAddr chosen by bindDevice. Control is invoked on
+// the socket right after creation, before any packet leaves, so protect/mark
+// remain effective.
+func listenPacketUDP(ctx context.Context, dialer *net.Dialer, network string) (net.Conn, error) {
+	local := ""
+	if dialer.LocalAddr != nil {
+		local = dialer.LocalAddr.String()
+	}
+	lc := &net.ListenConfig{Control: dialer.Control}
+	pc, err := lc.ListenPacket(ctx, network, local)
+	if err != nil {
+		return nil, err
+	}
+	conn, ok := pc.(net.Conn)
+	if !ok {
+		_ = pc.Close()
+		return nil, fmt.Errorf("UDP PacketConn %T does not implement net.Conn", pc)
+	}
 	return conn, nil
 }
 
 // dialTCP is a wrapper for creating a TCP socket.
 func dialTCP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, error) {
-	tcpConn, err := dialSocket(ctx, cfg, "tcp", target)
+	tcpConn, _, err := dialSocket(ctx, cfg, "tcp", target)
 	if err != nil {
 		return nil, err
 	}
@@ -158,9 +201,25 @@ func dialTCP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, err
 	return tcpConn, nil
 }
 
-// dialUDP is a wrapper for creating a UDP socket.
-func dialUDP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, error) {
+// dialUDP is a wrapper for creating an unconnected UDP socket. The returned
+// string is the IP4P-resolved peer address, which the tunnel handler must use
+// instead of re-resolving the original (possibly IP4P-encoded) proxy_addr.
+func dialUDP(ctx context.Context, cfg ProxyConfig, target string) (net.Conn, string, error) {
 	return dialSocket(ctx, cfg, "udp", target)
+}
+
+// resolveIP4PTarget expands an IP4P literal or an IP4P AAAA record into the
+// real IPv4:port. SDK tunnels own their dialers and therefore never pass through
+// dialSocket; they call this helper to get the same IP4P behavior.
+//
+// cfg.BindInterface 按 dialSocket 预拨号解析的同一规则生效：bindDevice 挂的是
+// socket 级 Control（对 Resolver 本身无效），这里保持与其一致——解析仍走系统
+// 解析器，真正受接口绑定的拨号发生在各自的 protected dialer 里。
+func resolveIP4PTarget(ctx context.Context, cfg ProxyConfig, network, address string) (string, error) {
+	dialer := &net.Dialer{}
+	bindDevice(dialer, cfg.BindInterface)
+	resolved, _, err := resolveIP4PDialAddress(ctx, dialer, network, address)
+	return resolved, err
 }
 
 // ctxCloseConn 在引擎 ctx 取消时关闭底层连接，同时保证连接被正常关闭后
@@ -240,7 +299,14 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	case "tcp":
 		baseConn, err = dialTCP(ctx, cfg, target)
 	case "udp":
-		baseConn, err = dialUDP(ctx, cfg, target)
+		var resolved string
+		baseConn, resolved, err = dialUDP(ctx, cfg, target)
+		if err == nil && resolved != "" {
+			// QUIC/KCP handlers derive their remote address from cfg.ProxyAddr.
+			// For an IP4P target that would be the 2001:: literal (and port 0),
+			// so hand them the decoded IPv4:port actually used by the socket.
+			cfg.ProxyAddr = resolved
+		}
 	case "custom":
 		zlog.Infof("%s [Tunnel] ⚡ Underlying dialing taken over by protocol (on-demand lazy loading)", TAG)
 		baseConn = nil
@@ -359,7 +425,7 @@ func resolveIP4PDialAddress(
 	}
 
 	//
-	// 2. Hostname: explicitly query AAAA.
+	// 2. Hostname: explicitly query AAAA (short-TTL cached, see lookupIP6Cached).
 	//
 	// Use the Dialer's resolver when configured, otherwise use Go's default
 	// resolver. This keeps behavior consistent with net.Dialer as much as
@@ -369,7 +435,7 @@ func resolveIP4PDialAddress(
 		resolver = net.DefaultResolver
 	}
 
-	ips, err := resolver.LookupIP(ctx, "ip6", host)
+	ips, err := lookupIP6Cached(ctx, resolver, host)
 	if err != nil {
 		// IMPORTANT:
 		// Failure to obtain AAAA does NOT mean dialing must fail.
@@ -379,6 +445,9 @@ func resolveIP4PDialAddress(
 		return address, false, nil
 	}
 
+	// 先收集全部 IP4P 记录再取最小者：同一主机的多条 IP4P AAAA（各编码着不同
+	// 端口）在 LookupIP 里的返回顺序不保证稳定，排序后选取才能跨查询保持确定性。
+	var ip4pEndpoints []string
 	for _, ip := range ips {
 		ipv4, port, ok := decodeIP4PIP(ip)
 		if !ok {
@@ -392,12 +461,64 @@ func resolveIP4PDialAddress(
 			)
 		}
 
-		return net.JoinHostPort(
+		ip4pEndpoints = append(ip4pEndpoints, net.JoinHostPort(
 			ipv4.String(),
 			strconv.Itoa(int(port)),
-		), true, nil
+		))
+	}
+
+	if len(ip4pEndpoints) > 0 {
+		slices.Sort(ip4pEndpoints)
+		return ip4pEndpoints[0], true, nil
 	}
 
 	// No IP4P AAAA found.
 	return address, false, nil
+}
+
+// IP4P AAAA 探测查询的短 TTL 缓存。SDK 拨号器每次建连都会做一次 IP4P 探测，
+// 缓存 30s 内的结果，把主机名节点热路径上翻倍的 DNS 流量消掉一跳
+// （DialContext 自身的解析是 net.Dialer 内建行为，不在本缓存职责内）。
+const (
+	ip4pAAAACacheTTL   = 30 * time.Second
+	ip4pAAAACacheLimit = 1024
+)
+
+type ip4pAAAAEntry struct {
+	ips       []net.IP
+	expiresAt time.Time
+}
+
+var (
+	ip4pAAAACacheMu sync.RWMutex
+	ip4pAAAACache   = make(map[string]ip4pAAAAEntry)
+)
+
+// lookupIP6Cached 是 resolver.LookupIP(ctx, "ip6", host) 的缓存版。
+// 只缓存成功结果：查询失败保持"逐次重试、失败不阻塞正常拨号"的语义；
+// 缓存按主机名全局共享（当前所有调用方均使用系统解析器，无按 dialer 区分的需求）。
+func lookupIP6Cached(ctx context.Context, resolver *net.Resolver, host string) ([]net.IP, error) {
+	now := time.Now()
+	ip4pAAAACacheMu.RLock()
+	e, ok := ip4pAAAACache[host]
+	ip4pAAAACacheMu.RUnlock()
+	if ok && now.Before(e.expiresAt) {
+		return e.ips, nil
+	}
+
+	ips, err := resolver.LookupIP(ctx, "ip6", host)
+	if err != nil {
+		return nil, err
+	}
+
+	ip4pAAAACacheMu.Lock()
+	if len(ip4pAAAACache) >= ip4pAAAACacheLimit {
+		// 键是用户配置的节点主机名，正常远达不到上限；到顶说明有异常写入源，
+		// 整体重建防止无界增长。逐条 LRU 淘汰的成本在这里不划算。
+		ip4pAAAACache = make(map[string]ip4pAAAAEntry)
+	}
+	ip4pAAAACache[host] = ip4pAAAAEntry{ips: ips, expiresAt: now.Add(ip4pAAAACacheTTL)}
+	ip4pAAAACacheMu.Unlock()
+
+	return ips, nil
 }

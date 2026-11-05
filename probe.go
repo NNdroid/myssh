@@ -87,6 +87,16 @@ func FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface
 	addr := ensureHostPort(target, "443")
 	host, _, _ := net.SplitHostPort(addr)
 
+	// IP4P 字面量（2001::<port>:<ipv4>）不是真实对端地址。证书校验要按解出的
+	// IPv4 做，否则 Go 会把这个 IPv6 字面量当 IP SAN 去比，结果必然是「未验证」。
+	// 域名形态的 IP4P（AAAA 记录）本来就用域名校验，不受影响。
+	verifyName := host
+	if ip := net.ParseIP(host); ip != nil {
+		if v4, _, ok := decodeIP4PIP(ip); ok {
+			verifyName = v4.String()
+		}
+	}
+
 	var peerCerts []*x509.Certificate
 	var protocol string
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -99,7 +109,7 @@ func FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface
 		protocol = "QUIC"
 		// 走 dialUDP 而非裸 Dialer：IP4P 形态的 proxy_addr 必须在这里解开
 		// （见 probeTLSCert 的同款注释），否则 QUIC 探测同样连不上。
-		baseConn, err := dialUDP(ctx, probeConfig(bindInterface), addr)
+		baseConn, resolvedAddr, err := dialUDP(ctx, probeConfig(bindInterface), addr)
 		if err != nil {
 			return nil, err
 		}
@@ -108,9 +118,14 @@ func FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface
 			baseConn.Close()
 			return nil, fmt.Errorf("expected *net.UDPConn, got %T", baseConn)
 		}
-		udpAddr, err := net.ResolveUDPAddr("udp", addr)
+		// quic.DialEarly does NOT take ownership of a caller-supplied PacketConn;
+		// without this the probe leaves one UDP socket behind on every success.
+		defer udpConn.Close()
+
+		// Use the IP4P-resolved address. Re-resolving the original target here
+		// would produce 2001::...:0 and send QUIC Initials into a black hole.
+		udpAddr, err := net.ResolveUDPAddr("udp", resolvedAddr)
 		if err != nil {
-			udpConn.Close()
 			return nil, err
 		}
 		tlsConfig := &tls.Config{
@@ -120,7 +135,6 @@ func FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface
 		}
 		conn, err := quic.DialEarly(ctx, udpConn, udpAddr, tlsConfig, nil)
 		if err != nil {
-			udpConn.Close()
 			return nil, err
 		}
 		defer conn.CloseWithError(0, "")
@@ -145,7 +159,7 @@ func FetchCertInfo(target string, useQUIC bool, serverName string, bindInterface
 	}
 
 	cert := peerCerts[0]
-	_, verifyErr := cert.Verify(x509.VerifyOptions{DNSName: host})
+	_, verifyErr := cert.Verify(x509.VerifyOptions{DNSName: verifyName})
 
 	return &CertInfo{
 		Subject:    cert.Subject.CommonName,

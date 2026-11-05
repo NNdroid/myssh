@@ -97,6 +97,13 @@ func dialUDPCustomSDK(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 	if serverAddr == "" {
 		return nil, errors.New("proxy_addr is required")
 	}
+	// 自拨型隧道不经过 dialSocket，IP4P 必须在这里单独解开，否则 SDK 会
+	// 把 2001:: 字面量和占位端口 0 当成真实目标。
+	resolvedAddr, err := resolveIP4PTarget(ctx, cfg, "udp", serverAddr)
+	if err != nil {
+		return nil, err
+	}
+	serverAddr = resolvedAddr
 	if strings.TrimSpace(cfg.SshAddr) == "" {
 		return nil, errors.New("ssh_addr is required")
 	}

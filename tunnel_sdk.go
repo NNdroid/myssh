@@ -93,7 +93,14 @@ func sdkProxyEndpoint(cfg ProxyConfig, scheme, defaultPath string) (string, stri
 
 func sdkTCPDialer(cfg ProxyConfig) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		conn, err := newProtectedDialer(cfg, 10*time.Second).DialContext(ctx, network, address)
+		// SDK tunnels own their dialers and bypass dialSocket, so IP4P must be
+		// expanded here too. Keep the original hostname in the endpoint URL:
+		// Host header and TLS SNI are unrelated to the dial address.
+		target, err := resolveIP4PTarget(ctx, cfg, network, address)
+		if err != nil {
+			return nil, err
+		}
+		conn, err := newProtectedDialer(cfg, 10*time.Second).DialContext(ctx, network, target)
 		if err == nil {
 			applyTCPConfig(conn, cfg)
 		}
@@ -103,7 +110,11 @@ func sdkTCPDialer(cfg ProxyConfig) func(context.Context, string, string) (net.Co
 
 func sdkQUICDialer(cfg ProxyConfig) func(context.Context, string, *tls.Config, *quic.Config) (*quic.Conn, error) {
 	return func(ctx context.Context, address string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
-		remote, err := net.ResolveUDPAddr("udp", address)
+		target, err := resolveIP4PTarget(ctx, cfg, "udp", address)
+		if err != nil {
+			return nil, err
+		}
+		remote, err := net.ResolveUDPAddr("udp", target)
 		if err != nil {
 			return nil, err
 		}
