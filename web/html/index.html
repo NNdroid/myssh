@@ -436,6 +436,18 @@
                                 <option value="poll" data-i18n="opt_xhttp_stream_poll">Polling only</option>
                             </select>
                         </div>
+                        <div class="form-group" data-visibility-key="xhttpSDKFields">
+                            <label data-i18n="label_xhttp_padding">XHTTP Padding</label>
+                            <input type="text" name="xhttpPadding" class="form-control" value="" placeholder="400-600 / off">
+                        </div>
+                        <div class="form-group" data-visibility-key="xhttpSDKFields">
+                            <label data-i18n="label_xhttp_window_size">XHTTP Window Size (MiB)</label>
+                            <input type="number" name="xhttpWindowSizeMB" class="form-control" value="0" min="0" max="64">
+                        </div>
+                        <div class="form-group" data-visibility-key="xhttpSDKFields">
+                            <label data-i18n="label_xhttp_max_conns">XHTTP Max Conns</label>
+                            <input type="number" name="xhttpMaxConns" class="form-control" value="0" min="0">
+                        </div>
                         <div class="form-group" data-visibility-key="alpn">
                             <label data-i18n="label_alpn">ALPN</label>
                             <select name="alpn" class="form-control">
