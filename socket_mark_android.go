@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // socketMarkClient 与 root 侧的 `sockmark` 辅助进程通信，请求为隧道 socket 打 SO_MARK。
@@ -206,10 +207,10 @@ func (c *socketMarkClient) probeRoundTrip(fd uintptr) error {
 		c.closeLocked()
 		return fmt.Errorf("writing PING failed (pipe broken): %w", err)
 	}
-	line, err := c.stdout.ReadString('\n')
+	line, err := c.readAckLine()
 	if err != nil {
 		c.closeLocked()
-		return fmt.Errorf("reading the PING response failed (helper may have crashed, or su did not really escalate): %w", err)
+		return fmt.Errorf("reading the PING response failed (helper may have crashed, hung, or su did not really escalate): %w", err)
 	}
 	if got := strings.TrimSpace(line); !strings.HasPrefix(got, "PONG") {
 		return fmt.Errorf("unexpected PING response: %q", got)
@@ -220,7 +221,7 @@ func (c *socketMarkClient) probeRoundTrip(fd uintptr) error {
 		c.closeLocked()
 		return fmt.Errorf("writing MARK failed: %w", err)
 	}
-	line, err = c.stdout.ReadString('\n')
+	line, err = c.readAckLine()
 	if err != nil {
 		c.closeLocked()
 		return fmt.Errorf("reading the MARK response failed: %w", err)
@@ -241,7 +242,7 @@ func (c *socketMarkClient) readBackMark(fd uintptr) (int64, error) {
 	if _, err := fmt.Fprintf(c.stdin, "GET %d\n", fd); err != nil {
 		return 0, err
 	}
-	line, err := c.stdout.ReadString('\n')
+	line, err := c.readAckLine()
 	if err != nil {
 		return 0, err
 	}
@@ -374,6 +375,38 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// markAckTimeout 是等待 helper 单行回应的时限。helper 经 su 拉起，权限确认框
+// 悬而未决、helper 死锁都会让 ReadString 永久阻塞——而 request 全程持 c.mu，
+// 锁又被每次出站拨号的 Control 回调排队，一处卡住等于所有拨号冻结。
+// os/exec 的管道 fd 不支持 SetDeadline，只能用「goroutine 读 + 超时杀进程」。
+const markAckTimeout = 5 * time.Second
+
+// readAckLine 从 helper 读一行回应，markAckTimeout 内无响应则杀掉 helper 并
+// 报错。被遗弃的读 goroutine 会在进程被杀、管道关闭后拿到错误退出；res 缓冲
+// 为 1，发送不会阻塞，无泄漏。
+func (c *socketMarkClient) readAckLine() (string, error) {
+	type ackResult struct {
+		line string
+		err  error
+	}
+	stdout := c.stdout
+	res := make(chan ackResult, 1)
+	go func() {
+		line, err := stdout.ReadString('\n')
+		res <- ackResult{line: line, err: err}
+	}()
+
+	select {
+	case r := <-res:
+		return r.line, r.err
+	case <-time.After(markAckTimeout):
+		// 整条管道作废：杀掉 helper 让阻塞中的 ReadString 返回，下次
+		// ensureLocked 重新拉起。closeLocked 要求持有 c.mu——调用方都在锁内。
+		c.closeLocked()
+		return "", fmt.Errorf("helper ack timeout after %v (su dialog pending? helper hung?); helper killed for respawn", markAckTimeout)
+	}
+}
+
 // request 发一条 MARK 请求并等 ACK。整段在锁内串行执行 ——
 // 协议是行式请求/响应，并发交错会把 ACK 读串。
 func (c *socketMarkClient) request(fd uintptr) error {
@@ -389,9 +422,8 @@ func (c *socketMarkClient) request(fd uintptr) error {
 		return fmt.Errorf("write MARK request: %w", err)
 	}
 
-	line, err := c.stdout.ReadString('\n')
+	line, err := c.readAckLine()
 	if err != nil {
-		c.closeLocked()
 		return fmt.Errorf("read MARK ack: %w", err)
 	}
 	line = strings.TrimSpace(line)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,11 @@ type SshProxyHandler struct {
 	UdpgwVersion string
 }
 
+// TCPHandle 处理 SOCKS5 TCP 请求。生产路径上 CONNECT 一律由装饰器
+// egressAwareSocksHandler.TCPHandle 接管（handleUnifiedTCPConnect，见
+// unified_outbound.go）；本方法只保留 UDP ASSOCIATE 的控制连接保活逻辑，
+// 供装饰器对其余命令透传。旧的 CONNECT 实现已删除——那是没有 happy-eyeballs
+// 与域名恢复的过时版本，留着只会与统一实现漂移。
 func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
 	if h.context().Err() != nil {
 		return context.Canceled
@@ -79,80 +85,6 @@ func (h *SshProxyHandler) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.
 			return err
 		}
 		io.Copy(io.Discard, c)
-		return nil
-	}
-
-	if r.Cmd == socks5.CmdConnect {
-		taskTrack()
-		defer taskRelease()
-
-		connKey := c.RemoteAddr().String() + "->" + r.Address()
-		tcpConnMap.Store(connKey, c)
-		defer tcpConnMap.CompareAndDelete(connKey, c)
-
-		mu.Lock()
-		client := sshClient
-		mu.Unlock()
-
-		if client == nil {
-			if Debug {
-				zlog.Debugf("%s [SOCKS5-TCP] ⚠️ Tunnel is reconnecting, rejecting connection: %s", TAG, r.Address())
-			}
-			rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-			rep.WriteTo(c)
-			return fmt.Errorf("ssh client is currently reconnecting")
-		}
-
-		target := r.Address()
-		host, port, err := net.SplitHostPort(target)
-		if err != nil {
-			host = target
-		}
-
-		var isDirect bool
-		var dialHost string
-		if gr := globalRouter.Load(); gr != nil {
-			res := gr.ShouldDirect(host)
-			isDirect = res.IsDirect
-			dialHost = res.DialHost
-		} else {
-			isDirect = false
-			dialHost = host
-		}
-
-		var remote net.Conn
-		var dialErr error
-
-		if isDirect {
-			dialTarget := net.JoinHostPort(dialHost, port)
-			remote, dialErr = dialProtected(h.context(), h.cfg, "tcp", dialTarget, 5*time.Second)
-			if dialErr == nil {
-				applyTCPConfig(remote, h.cfg)
-			}
-		} else {
-			dialCtx, cancel := context.WithTimeout(h.context(), 10*time.Second)
-			remote, dialErr = client.DialContext(dialCtx, "tcp", target)
-			cancel()
-		}
-
-		if dialErr != nil {
-			rep := socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-			_, _ = rep.WriteTo(c)
-			return dialErr
-		}
-
-		// --- Wrap the outbound connection ---
-		remote = WrapConn(remote, target)
-		// ------------------------------------
-
-		defer remote.Close()
-		rep := socks5.NewReply(socks5.RepSuccess, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-		if _, err := rep.WriteTo(c); err != nil {
-			return err
-		}
-
-		relayBidirectional(h.context(), c, remote, isDirect)
-
 		return nil
 	}
 
@@ -266,12 +198,6 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 		isDirect = false
 	}
 
-	cloneSlice := func(b []byte) []byte {
-		c := make([]byte, len(b))
-		copy(c, b)
-		return c
-	}
-
 	// ==========================================
 	// 直连流量，建立本地 UDP NAT 会话
 	// ==========================================
@@ -318,17 +244,19 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				}
 				taskTrack()
 				// 复制地址切片，防止 datagram 复用导致数据竞争
-				dstAddrCopy := cloneSlice(d.DstAddr)
-				dstPortCopy := cloneSlice(d.DstPort)
+				dstAddrCopy := slices.Clone(d.DstAddr)
+				dstPortCopy := slices.Clone(d.DstPort)
 				go func(conn net.Conn, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte, clientAddr *net.UDPAddr) {
 					defer taskRelease()
 					defer conn.Close()
 					defer udpNatMap.CompareAndDelete(key, conn)
 
-					bufPtr := relayBufPool.Get().(*[]byte)
-					// 读满整个缓冲，MTU 内一次读完不浪费
+					// 下行读缓冲用 9KB 专用池：会话存续期间缓冲被阻塞的 Read
+					// 长期占住，64KB 池会把每会话常驻内存放大 7 倍（上限见
+					// socks_server.go udpDownlinkBufSize 注释）。
+					bufPtr := udpDownlinkBufPool.Get().(*[]byte)
 					buf := (*bufPtr)[:cap(*bufPtr)]
-					defer relayBufPool.Put(bufPtr)
+					defer udpDownlinkBufPool.Put(bufPtr)
 
 					for {
 						n, err := conn.Read(buf)
@@ -442,16 +370,17 @@ func (h *SshProxyHandler) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *sock
 				zlog.Debugf("%s [ROUTER-Proxy] 🟢 Created new proxy session (UDPGW) -> Client: %s | Tunnel target: %s", TAG, sessionKey, targetAddrStr)
 			}
 			taskTrack()
-			dstAddrCopy := cloneSlice(d.DstAddr)
-			dstPortCopy := cloneSlice(d.DstPort)
+			dstAddrCopy := slices.Clone(d.DstAddr)
+			dstPortCopy := slices.Clone(d.DstPort)
 			go func(conn net.Conn, clientAddr *net.UDPAddr, key string, dstAtyp byte, dstAddr []byte, dstPortBytes []byte) {
 				defer taskRelease()
 				defer conn.Close()
 				defer udpgwMap.CompareAndDelete(key, conn)
 
-				bufPtr := relayBufPool.Get().(*[]byte)
+				// 同直连路径：9KB 专用池，理由见 udpDownlinkBufSize 注释。
+				bufPtr := udpDownlinkBufPool.Get().(*[]byte)
 				buf := (*bufPtr)[:cap(*bufPtr)]
-				defer relayBufPool.Put(bufPtr)
+				defer udpDownlinkBufPool.Put(bufPtr)
 
 				for {
 					n, rerr := conn.Read(buf)

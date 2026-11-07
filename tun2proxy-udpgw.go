@@ -269,21 +269,9 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 	defer relayBufPool.Put(bufPtr)
 
 	for {
-		var lenBuf [2]byte
-		if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
-			select {
-			case <-c.closed:
-				return 0, io.EOF
-			default:
-			}
-			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet length: %v", TAG, err)
+		pLen, err := readUdpgwFrame(c.Conn, c.closed, bodyBuf, binary.BigEndian)
+		if err != nil {
 			return 0, err
-		}
-		pLen := binary.BigEndian.Uint16(lenBuf[:])
-
-		if int(pLen) > len(bodyBuf) {
-			zlog.Errorf("%s [UDPGW-Read] ❌ Packet too large, truncated", TAG)
-			return 0, fmt.Errorf("packet too large: %d", pLen)
 		}
 
 		if pLen == 0 {
@@ -291,15 +279,6 @@ func (c *UdpgwConn) Read(b []byte) (int, error) {
 		}
 
 		body := bodyBuf[:pLen]
-		if _, err := io.ReadFull(c.Conn, body); err != nil {
-			select {
-			case <-c.closed:
-				return 0, io.EOF
-			default:
-			}
-			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet payload: %v", TAG, err)
-			return 0, err
-		}
 		// 收到任何包（数据、心跳、Error）都刷新活跃时间，供超时判定
 		c.lastActive.Store(time.Now().Unix())
 

@@ -561,12 +561,9 @@ func (h *egressAwareSocksHandler) handleUnifiedTCPConnect(c *net.TCPConn, r *soc
 	mu.Lock()
 	client := sshClient
 	mu.Unlock()
-	if !route.isDirect && client == nil {
-		rep := socks5.NewReply(socks5.RepServerFailure, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})
-		_, _ = rep.WriteTo(c)
-		return fmt.Errorf("ssh client is currently reconnecting")
-	}
 
+	// sshClient 未就绪的拒绝逻辑在 unifiedTCPDial 内（对任何调用方都成立，
+	// 也避免对 nil client 解引用）；这里拿到 dialErr 后统一写 HostUnreachable 回包。
 	remote, winner, dialErr := unifiedTCPDial(h.context(), h.cfg, client, effectiveHost, port, route, originalHost)
 	if dialErr != nil {
 		rep := socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0, 0, 0, 0}, []byte{0, 0})

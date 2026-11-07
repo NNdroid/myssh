@@ -252,7 +252,11 @@ func (l *LocalDnsServer) lookupDNS(requestMsg *dns.Msg) ([]byte, *dns.Msg, strin
 			if finalErr == nil && reply != nil {
 				break
 			}
-			time.Sleep(300 * time.Millisecond)
+			// 退避只发生在还有下一次尝试时：末次失败后再睡 300ms 纯属白等，
+			// 拖慢的是 DNS 服务每请求 goroutine 的回收。
+			if attempt < 3 {
+				time.Sleep(300 * time.Millisecond)
+			}
 		}
 
 		if finalErr != nil || reply == nil {
@@ -431,8 +435,18 @@ func (l *LocalDnsServer) resolveTCP(req *dns.Msg, addr string, isDirect bool, ss
 }
 
 func (l *LocalDnsServer) resolveDoH(req *dns.Msg, url string, isDirect bool, sshClient *ssh.Client) (*dns.Msg, error) {
-	msgBytes, _ := req.Pack()
-	httpReq, _ := http.NewRequest("POST", url, bytes.NewReader(msgBytes))
+	// 错误必须显式处理：url 来自用户配置，畸形时 NewRequest 返回 (nil, err)。
+	// 旧实现把两个错误都吞掉，client.Do(nil) 直接 panic——ServeDNS 路径有
+	// miekg 的 recover 兜底，但 lookupDNS 还会被 resolveAllOutboundIPs 的
+	// goroutine 与 SOCKS5 UDP worker 调用，那两条路径没有 recover，进程整个退出。
+	msgBytes, err := req.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("pack dns request failed: %v", err)
+	}
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(msgBytes))
+	if err != nil {
+		return nil, fmt.Errorf("invalid DoH url %q: %v", url, err)
+	}
 	httpReq.Header.Set("Content-Type", "application/dns-message")
 	httpReq.Header.Set("Accept", "application/dns-message")
 

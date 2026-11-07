@@ -77,6 +77,12 @@ func InitLogger(logPath string, logLevelStr string) int {
 		}
 		fileCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(file), atomicLogLevel)
 		cores = append(cores, fileCore)
+		// 登记新文件句柄：InitLogger 可被重复调用（web /log-clear），旧实现
+		// 从不关上一代文件，fd 随调用次数泄漏（见 logger_shared.go swapLogFile）。
+		swapLogFile(file)
+	} else {
+		// 新 logger 不写文件，同样要把上一代文件关掉。
+		swapLogFile(nil)
 	}
 
 	// 组合 core

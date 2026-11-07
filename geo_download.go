@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -160,12 +161,13 @@ const downloadMaxAttempts = 2
 
 // ruleDownloadTransport is the shared transport for rule-file fetches.
 //
-// Only the response-header phase has a deadline. The payload is ~26 MB and on
-// a mobile or congested link the whole transfer can run well past the few
+// Only the response-header phase has a deadline here. The payload is ~26 MB and
+// on a mobile or congested link the whole transfer can run well past the few
 // seconds a desktop broadband connection takes; a blanket Client.Timeout would
 // cut it off mid-stream, which surfaces as "download failed, keep the old file"
-// and silently freezes rules. The header phase still has a bound, so a dead
-// connection cannot hang in the handshake forever.
+// and silently freezes rules. The body phase is bounded instead by the
+// inactivity watchdog in downloadOnce, which only requires the stream to keep
+// making progress.
 //
 // The transport is cloned from http.DefaultTransport rather than built from a
 // bare struct: a bare &http.Transport{} inherits no DialContext timeout, which
@@ -176,6 +178,30 @@ var ruleDownloadTransport = func() *http.Transport {
 	t.ResponseHeaderTimeout = 30 * time.Second
 	return t
 }()
+
+// ruleDownloadInactivityTimeout 判死响应体阶段的「无进展」：每次成功读到字节
+// 都会重置计时，整体不设上限——慢速但活跃的链接可以一直下。CDN 收到 200 后
+// 停止发送、中间盒半断开这类停滞会在本时限内报错退出。
+//
+// 为什么必须有它：downloadOnce 被 loadGlobalConfig/RepairRuleFile（引擎启动
+// 路径）与 web /start 同步调用，io.Copy 若永久阻塞，整个启动/管理面随之冻结。
+// 极端竞态下（读完成与计时器触发同一瞬间）可能误杀一次下载——结果是保留旧
+// 文件、下个周期重试，无害。
+const ruleDownloadInactivityTimeout = 30 * time.Second
+
+// progressBody 在每次成功读到数据时重置看门狗计时器。
+type progressBody struct {
+	io.ReadCloser
+	watchdog *time.Timer
+}
+
+func (b *progressBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.watchdog.Reset(ruleDownloadInactivityTimeout)
+	}
+	return n, err
+}
 
 // downloadFile contains the core download logic: download to a temporary file
 // first, verify it, and only then overwrite the original file.
@@ -230,7 +256,20 @@ func downloadFile(url string, sumURL string, destPath string) error {
 // sidecar was reachable.
 func downloadOnce(url string, expected string, destPath string) error {
 	client := &http.Client{Transport: ruleDownloadTransport} // no overall timeout; see ruleDownloadTransport
-	resp, err := client.Get(url)
+
+	// 看门狗 ctx：响应体停滞超过 ruleDownloadInactivityTimeout 时取消请求，
+	// 让阻塞在 body 上的 io.Copy 报错返回而不是永久挂起（详见
+	// ruleDownloadInactivityTimeout 注释）。
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+	watchdog := time.AfterFunc(ruleDownloadInactivityTimeout, cancelCtx)
+	defer watchdog.Stop()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build request failed: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP GET request failed: %w", err)
 	}
@@ -256,8 +295,11 @@ func downloadOnce(url string, expected string, destPath string) error {
 	//
 	// TeeReader folds the digest in on the same pass, so a 16 MB rule file is
 	// read once instead of being re-read from disk just to hash it.
+	// progressBody feeds the watchdog: every delivered byte postpones the
+	// stall verdict, so slow-but-alive transfers are never cut off.
 	hasher := sha256.New()
-	written, err := io.Copy(out, io.TeeReader(resp.Body, hasher))
+	body := &progressBody{ReadCloser: resp.Body, watchdog: watchdog}
+	written, err := io.Copy(out, io.TeeReader(body, hasher))
 
 	// Flush to stable storage. Best effort: the rename is what makes the new
 	// file atomic for readers, the sync only guards against power loss.
@@ -348,8 +390,14 @@ func fetchExpectedSHA256(sumURL string) string {
 		return ""
 	}
 	// The sidecar is tens of bytes; give it its own short-lived client so its
-	// failure can never eat into the payload's download budget.
-	client := &http.Client{Transport: ruleDownloadTransport} // no overall timeout; see ruleDownloadTransport
+	// failure can never eat into the payload's download budget. Unlike the
+	// payload fetch it gets a blanket timeout: there is no legitimate reason
+	// for a digest fetch to run long, and a stalled sidecar must not hang the
+	// startup path either.
+	client := &http.Client{
+		Transport: ruleDownloadTransport,
+		Timeout:   15 * time.Second,
+	}
 	resp, err := client.Get(sumURL)
 	if err != nil {
 		zlog.Warnf("%s [GeoRules] sha256 sidecar unreachable (%s): %v", TAG, sumURL, err)

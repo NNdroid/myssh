@@ -220,6 +220,10 @@ func InitLogger(logPath string, logLevelStr string) int {
 	zap.ReplaceGlobals(logger)
 	zlog = logger.Sugar()
 
+	// 记录新文件并关闭上一代句柄：宿主每次引擎 Start 都会重开 logger，
+	// 不关旧文件的话 fd 随启停次数泄漏（见 logger_shared.go swapLogFile）。
+	swapLogFile(file)
+
 	zlog.Infof("[Logger] Log system initialization completed (LogReceiver mode)")
 	return 0
 }

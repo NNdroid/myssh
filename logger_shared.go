@@ -11,7 +11,9 @@
 package myssh
 
 import (
+	"os"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap/zapcore"
 )
@@ -22,6 +24,30 @@ import (
 func SyncLogger() {
 	if zlog != nil {
 		_ = zlog.Sync()
+	}
+}
+
+// activeLogFile 记录当前 file core 持有的日志文件。InitLogger 可被宿主重复
+// 调用（Android 每次引擎 Start、web 每次 /log-clear），旧实现只换 logger、
+// 从不关旧文件——fd 随调用次数泄漏。
+var (
+	logFileMu     sync.Mutex
+	activeLogFile *os.File
+)
+
+// swapLogFile 在 zlog 替换后调用：记录新文件并关闭上一代文件。传 nil 表示
+// 新 logger 不写文件（桌面端 logPath 为空），同样要关掉旧文件。
+//
+// 关闭瞬间，极少数已捕获旧 zlog 引用的在途写会得到一次写失败——可接受：
+// 重开 logger 的场景（引擎启停、清日志）本就意味着旧日志流终结，新写入
+// 在替换完成后立即落到新文件上。
+func swapLogFile(f *os.File) {
+	logFileMu.Lock()
+	prev := activeLogFile
+	activeLogFile = f
+	logFileMu.Unlock()
+	if prev != nil {
+		_ = prev.Close()
 	}
 }
 

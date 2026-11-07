@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/miekg/dns"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -78,10 +79,11 @@ func dialBadvpnUdpgw(ctx context.Context, sshClient *ssh.Client, udpgwServerAddr
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, resolveErr := net.DefaultResolver.LookupIP(ctx, "ip", host)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
+		// 与 tun2proxy 路径保持一致：先查本地分流 DNS 缓存，未命中再走
+		// ResolveOne。此前这里直查 net.DefaultResolver——VPN 模式下系统
+		// DNS 指向 tun 自身，既可能绕过劫持/分流，也可能把查询打回自己
+		// 形成回环，还丢掉了缓存收益。
+		ips := GetCachedIPs(host)
 		for _, candidate := range ips {
 			if candidate.To4() != nil {
 				ip = candidate
@@ -90,6 +92,12 @@ func dialBadvpnUdpgw(ctx context.Context, sshClient *ssh.Client, udpgwServerAddr
 		}
 		if ip == nil && len(ips) > 0 {
 			ip = ips[0]
+		}
+		if ip == nil {
+			ip = ResolveOne(host, dns.TypeA)
+		}
+		if ip == nil {
+			ip = ResolveOne(host, dns.TypeAAAA)
 		}
 		if ip == nil {
 			return nil, fmt.Errorf("no IP address for %s", host)
@@ -289,34 +297,11 @@ func (c *BadvpnUdpgwConn) Read(b []byte) (int, error) {
 	defer relayBufPool.Put(bufPtr)
 
 	for {
-		var lenBuf [2]byte
-		// 先读 2 bytes 帧长前缀
-		if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
-			// 若已主动 closed，静默返回 EOF，不当作错误
-			select {
-			case <-c.closed:
-				return 0, io.EOF
-			default:
-			}
-			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read length prefix: %v", TAG, err)
+		pLen, err := readUdpgwFrame(c.Conn, c.closed, bodyBuf, binary.LittleEndian)
+		if err != nil {
 			return 0, err
 		}
-
-		pLen := int(binary.LittleEndian.Uint16(lenBuf[:]))
-
-		// 帧长合法性检查（防异常包导致 OOM）
-		if pLen > 0xFFFF || pLen > len(bodyBuf) {
-			err := fmt.Errorf("invalid packet length: %d", pLen)
-			zlog.Errorf("%s [UDPGW-Read] ❌ Intercepted malformed packet: %v", TAG, err)
-			return 0, err
-		}
-
-		// 读取包体
 		body := bodyBuf[:pLen]
-		if _, err := io.ReadFull(c.Conn, body); err != nil {
-			zlog.Errorf("%s [UDPGW-Read] ❌ Failed to read packet payload (Expected length: %d): %v", TAG, pLen, err)
-			return 0, err
-		}
 		// 刷新活跃时间（收到 server 回包），供超时判定使用
 		c.lastActive.Store(time.Now().Unix())
 

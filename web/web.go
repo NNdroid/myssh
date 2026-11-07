@@ -30,14 +30,30 @@ import (
 var webFS embed.FS
 
 var (
-	webServer        *http.Server
+	webServer *http.Server
+	// webServerMu 保护 webServer：Start/Stop 可由宿主在不同线程调用，
+	// 无锁读写是数据竞争。
+	webServerMu sync.Mutex
+
 	proxyRunning     bool
 	proxyRunningNode string // Now a string to hold UUID
-	proxyMu          sync.Mutex
-	wg               sync.WaitGroup
+	// proxyMu 只保护上面两个状态字段的短临界区（/status、dashboard 等
+	// 高频读端点），绝不跨越 Start/Stop 这类长阻塞操作。
+	proxyMu sync.Mutex
+	// proxyOpMu 串行化 /start 与 /stop 两个操作本体：Start 里有 SSH 拨号、
+	// 规则修复甚至 geo 下载，可能长时间阻塞。旧实现让 /start 全程持 proxyMu，
+	// 一旦卡住 /stop、/status、dashboard 全部跟着挂起。启停互斥由本锁保证，
+	// 状态可见性由 proxyMu 保证。
+	proxyOpMu sync.Mutex
+
+	wg sync.WaitGroup
 )
 
 const TAG = "[WebApp]"
+
+// logOffsetMaxKeys 是增量读取偏移表的键数上限（键为任意客户端可控的
+// ?client= 参数），防长驻进程被撑爆内存。
+const logOffsetMaxKeys = 256
 
 type logCache struct {
 	mu          sync.RWMutex
@@ -119,6 +135,12 @@ func (lc *logCache) getLogIncrementalCached(clientID string, logPath string) ([]
 
 	lc.mu.Lock()
 	lc.offsets[clientID] = info.Size()
+	// offsets 以 client 查询参数为键，任意调用方可注入无限新键把 map 撑大。
+	// 越过上限时整体重置：代价只是各客户端下一次增量轮询从头读一遍日志，
+	// 无正确性影响（读取路径对 lastOffset > 文件大小已有回退）。
+	if len(lc.offsets) > logOffsetMaxKeys {
+		lc.offsets = map[string]int64{clientID: info.Size()}
+	}
 	// 注意：不要更新 lastFetch。lastFetch 只服务于 getLogContentCached 的整段
 	// 缓存；增量读取每次轮询（2s/客户端）都会到这里，若顺手刷新 lastFetch，
 	// 会把"整段内容"缓存判定成刚取过，导致整段读取拿到过期数据。
@@ -160,10 +182,13 @@ func resolveRuleFilePath(workDir string, path *string) {
 }
 
 func StartWebServer(bind string, port int, logPath string, workDir string, webUser, webPass string) {
+	webServerMu.Lock()
 	if webServer != nil {
+		webServerMu.Unlock()
 		zap.L().Sugar().Infof("%s [WebServer] Web admin panel is already running, please do not start again", TAG)
 		return
 	}
+	webServerMu.Unlock()
 
 	// Ensure workDir exists
 	if err := os.MkdirAll(workDir, 0755); err != nil {
@@ -289,7 +314,10 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 			sysStats := myssh.GetSysStats()
 			domainActivityJSON := myssh.GetDomainActivityJSON()
 			var topDomains []myssh.DomainActivity
-			json.Unmarshal([]byte(domainActivityJSON), &topDomains)
+			if err := json.Unmarshal([]byte(domainActivityJSON), &topDomains); err != nil {
+				// 静默吞掉会让前端拿到 top_domains: null 而无任何排查线索。
+				zap.L().Sugar().Warnf("%s [WebServer] Failed to parse domain activity: %v (raw: %s)", TAG, err, domainActivityJSON)
+			}
 
 			proxyMu.Lock()
 			currentRunning := proxyRunning
@@ -420,13 +448,18 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 
 		// --- Proxy Control ---
 		apiV1.POST("/start", func(c *gin.Context) {
-			proxyMu.Lock()
-			defer proxyMu.Unlock()
+			// 只串行化启停操作本身（SSH 拨号/规则修复可能长时间阻塞），
+			// /status、dashboard 等高频读端点只碰 proxyMu，不会被拖住。
+			proxyOpMu.Lock()
+			defer proxyOpMu.Unlock()
 
+			proxyMu.Lock()
 			if proxyRunning {
+				proxyMu.Unlock()
 				c.JSON(http.StatusConflict, gin.H{"error": "Proxy is already running"})
 				return
 			}
+			proxyMu.Unlock()
 
 			var req struct {
 				NodeID string `json:"node_id"`
@@ -461,8 +494,10 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 			proxyConfigJson, _ := json.Marshal(proxyConfig)
 
 			if proxy.Start(string(proxyConfigJson)) == 0 {
+				proxyMu.Lock()
 				proxyRunning = true
 				proxyRunningNode = req.NodeID
+				proxyMu.Unlock()
 				c.JSON(http.StatusOK, gin.H{"message": "Proxy started"})
 
 				// TOFU pin 回写：未开启指纹校验且尚未 pin 的 profile，在首次
@@ -484,17 +519,21 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 					}
 				}()
 			} else {
+				proxyMu.Lock()
 				proxyRunning = false
+				proxyMu.Unlock()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start proxy"})
 			}
 		})
 		apiV1.POST("/stop", func(c *gin.Context) {
-			proxyMu.Lock()
-			defer proxyMu.Unlock()
+			proxyOpMu.Lock()
+			defer proxyOpMu.Unlock()
 
 			myssh.NewSshTProxy().Stop()
+			proxyMu.Lock()
 			proxyRunning = false
 			proxyRunningNode = ""
+			proxyMu.Unlock()
 			c.JSON(http.StatusOK, gin.H{"message": "Proxy stopped"})
 		})
 		apiV1.GET("/status", func(c *gin.Context) {
@@ -576,33 +615,40 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 
 	addr := fmt.Sprintf("%s:%d", bind, port)
 
+	webServerMu.Lock()
 	webServer = &http.Server{
 		Addr:    addr,
 		Handler: router,
 	}
+	srv := webServer
+	webServerMu.Unlock()
 
 	zap.L().Sugar().Infof("%s [WebServer] 🌐 Web admin panel started: http://%s/", TAG, addr)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			zap.L().Sugar().Infof("%s [WebServer] Web service exited abnormally: %v", TAG, err)
 		}
 	}()
 }
 
 func StopWebServer() {
-	if webServer != nil {
+	webServerMu.Lock()
+	srv := webServer
+	webServer = nil
+	webServerMu.Unlock()
+
+	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		if err := webServer.Shutdown(ctx); err != nil {
+		if err := srv.Shutdown(ctx); err != nil {
 			zap.L().Sugar().Infof("%s [WebServer] ❌ Web service shutdown exception: %v", TAG, err)
 		} else {
 			zap.L().Sugar().Infof("%s [WebServer] 🛑 Web admin panel safely stopped", TAG)
 		}
-		webServer = nil
 	}
 }
 

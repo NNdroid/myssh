@@ -3,6 +3,7 @@ package myssh
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"hash/maphash"
 	"net"
 	"sync"
@@ -15,6 +16,21 @@ import (
 // Bound work before allocating packet buffers or starting packet handlers.
 const udpWorkers = 16
 const udpQueueDepth = 32
+
+// udpDownlinkBufSize 是 UDP 会话下行 goroutine 的读缓冲。9KB 覆盖巨型帧以内
+// 的全部现实数据报：QUIC 已被 UDP 443 拦截、DNS EDNS0 常见 ≤4KB、SOCKS5 的
+// 65507 上限在公网路径上实际不可达。该缓冲在会话存续期间被下行 goroutine
+// 长期占住（阻塞在 Read 上不回池），用 64KB 池时默认 1024 会话上限最坏常驻
+// ~67MB，降到 9KB 后为 ~9MB。
+const udpDownlinkBufSize = 9 * 1024
+
+// udpDownlinkBufPool 是下行读缓冲的复用池：会话高频建立/销毁时避免反复分配。
+var udpDownlinkBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, udpDownlinkBufSize)
+		return &buf
+	},
+}
 
 var udpQueueDrops atomic.Uint64
 var preparedSocks sync.Map // *socks5.Server -> *socksRuntime
@@ -102,7 +118,8 @@ func serveSocks(ctx context.Context, s *socks5.Server, h socksRequestHandler) er
 		go func(q <-chan udpJob) {
 			defer wg.Done()
 			for job := range q {
-				if ctx.Err() == nil && job.datagram.Frag == 0 {
+				// Frag != 0 已在 reader 侧过滤，这里只需看引擎是否已停。
+				if ctx.Err() == nil {
 					_ = h.UDPHandle(s, job.addr, job.datagram)
 				}
 				putPacketBuffer(job.buffer)
@@ -167,11 +184,28 @@ func serveSocks(ctx context.Context, s *socks5.Server, h socksRequestHandler) er
 	for {
 		c, err := r.listener.AcceptTCP()
 		if err != nil {
-			cancel()
-			stopSocksServer(s)
-			wg.Wait()
-			tcpWG.Wait()
-			return err
+			// 只有 listener 被主动关闭才算正常退出。fd 临时耗尽（EMFILE，
+			// UDP 会话风暴下现实存在）等瞬态错误如果直接 return，会杀掉
+			// 整个 SOCKS 服务——SSH 隧道还活着、UI 显示已连接，但所有
+			// 代理请求失败且永不恢复。退避后继续 accept。
+			if errors.Is(err, net.ErrClosed) {
+				cancel()
+				stopSocksServer(s)
+				wg.Wait()
+				tcpWG.Wait()
+				return err
+			}
+			zlog.Warnf("%s [SOCKS5] ⚠️ Accept failed (%v), retrying in 500ms", TAG, err)
+			select {
+			case <-ctx.Done():
+				cancel()
+				stopSocksServer(s)
+				wg.Wait()
+				tcpWG.Wait()
+				return err
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
 		}
 		r.mu.Lock()
 		if r.closed.Load() {

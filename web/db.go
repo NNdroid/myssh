@@ -19,8 +19,10 @@ import (
 )
 
 var (
-	db   *sql.DB
-	dbMu sync.Mutex
+	db *sql.DB
+	// dbMu 串行化写操作并保护 db 句柄本身；读操作用 RLock 允许并发，
+	// 避免 GetProfiles 这类全表扫描把其它读端点也排队挡住。
+	dbMu sync.RWMutex
 )
 
 func generateUUID() string {
@@ -267,8 +269,8 @@ func InitDB(dbPath string) error {
 }
 
 func GetProfiles() ([]Profile, error) {
-	dbMu.Lock()
-	defer dbMu.Unlock()
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 
 	rows, err := db.Query("SELECT id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, xhttpPadding, xhttpWindowSizeMB, xhttpMaxConns, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker, masqueAlpn, paddingMinBytes, udpCustomMaxPkt, udpCustomMtuProbe, tcpBufferKB, udpMaxSessions, udpIdleTimeoutSec FROM profiles")
 	if err != nil {
@@ -291,8 +293,8 @@ func GetProfiles() ([]Profile, error) {
 }
 
 func GetProfile(id string) (*Profile, error) {
-	dbMu.Lock()
-	defer dbMu.Unlock()
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 
 	var p Profile
 	var tlsNull sql.NullBool
@@ -339,8 +341,8 @@ func DeleteProfile(id string) error {
 }
 
 func GetSettings() (*Settings, error) {
-	dbMu.Lock()
-	defer dbMu.Unlock()
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 
 	var s Settings
 	var directSiteTags, directIPTags string
