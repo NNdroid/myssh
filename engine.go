@@ -241,6 +241,10 @@ func startSshTProxy(configJson string) int {
 		}
 	}()
 
+	// IP4P 端点（NATMap 重打洞后 AAAA 里的端口）变化时主动重建隧道，
+	// 不必等 keepalive 发现静默断链。非 IP4P / 字面量节点内部会自行退出。
+	startIP4PWatchdog(ctx, cfg)
+
 	return 0
 }
 
@@ -263,17 +267,22 @@ func notifyNetworkChanged() {
 	if lds := localDnsServer.Load(); lds != nil {
 		lds.dropUpstreamPools()
 	}
+	dropCurrentSSHSession("🌐 Network changed")
+}
 
+// dropCurrentSSHSession 让 AutoSSH 立刻放弃当前会话并重连。网络切换与
+// IP4P 端点变化共用这一条路径：两者都不可能给已建立的 socket 换四元组，
+// 唯一办法是让 client.Wait() 立即返回，由重连时的 IP4P 解析接上新端点。
+func dropCurrentSSHSession(reason string) {
 	mu.Lock()
 	client := sshClient
 	mu.Unlock()
 
 	if client == nil {
-		zlog.Infof("%s [AutoSSH] 🌐 Network changed before an SSH session was established; nothing to reset", TAG)
+		zlog.Infof("%s [AutoSSH] %s before an SSH session was established; nothing to reset", TAG, reason)
 		return
 	}
-	zlog.Warnf("%s [AutoSSH] 🌐 Network changed, dropping the current SSH session for an immediate reconnect", TAG)
-	// AutoSSH 的 client.Wait() 会立即返回，随后走正常的重连路径。
+	zlog.Warnf("%s [AutoSSH] %s, dropping the current SSH session for an immediate reconnect", TAG, reason)
 	client.Close()
 }
 
@@ -297,6 +306,9 @@ func stopEngine() {
 	if cancel != nil {
 		cancel()
 	}
+	// 换节点重启时不能沿用上一个节点域名的 AAAA 结果（含 watchdog 刚刷新的
+	// IP4P 端点），否则新引擎的头 30s 会拨到旧端点。
+	clearIP4PAAAACache()
 
 	zlog.Infof("%s [Core] Stopping resources...", TAG)
 	emitState(StateStopped, "")

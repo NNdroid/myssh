@@ -42,13 +42,12 @@ func quicCacheKeyOf(cfg ProxyConfig) quicCacheKey {
 var quicConnCache sync.Map
 
 // closeQuicConnCache closes all cached QUIC connections.
-// The engine must call this when stopping: otherwise the QUIC connections and their
-// underlying UDP sockets stay alive and keep sending KeepAlive packets, and after
-// stop->start the stale connections would be wrongly reused.
+// 引擎停止时必须调用；此外 IP4P 端点变化（key 含解析后的 IPv4:port）也要调用，
+// 否则旧 key 永远不会被命中，连接会继续发 KeepAlive 并占着 UDP socket 累积。
 func closeQuicConnCache() {
 	quicConnCache.Range(func(key, value interface{}) bool {
 		if conn, ok := value.(*quic.Conn); ok {
-			_ = conn.CloseWithError(0, "engine stopped")
+			_ = conn.CloseWithError(0, "engine stopped or endpoint changed")
 		}
 		quicConnCache.Delete(key)
 		return true

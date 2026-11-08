@@ -445,35 +445,40 @@ func resolveIP4PDialAddress(
 		return address, false, nil
 	}
 
-	// 先收集全部 IP4P 记录再取最小者：同一主机的多条 IP4P AAAA（各编码着不同
-	// 端口）在 LookupIP 里的返回顺序不保证稳定，排序后选取才能跨查询保持确定性。
-	var ip4pEndpoints []string
-	for _, ip := range ips {
-		ipv4, port, ok := decodeIP4PIP(ip)
-		if !ok {
-			continue
-		}
-
+	endpoints := ip4pEndpointsFromIPs(ips)
+	if len(endpoints) > 0 {
 		if network == "tcp6" || network == "udp6" {
 			return "", false, fmt.Errorf(
 				"IP4P resolves to IPv4 and cannot be used with network %q",
 				network,
 			)
 		}
-
-		ip4pEndpoints = append(ip4pEndpoints, net.JoinHostPort(
-			ipv4.String(),
-			strconv.Itoa(int(port)),
-		))
-	}
-
-	if len(ip4pEndpoints) > 0 {
-		slices.Sort(ip4pEndpoints)
-		return ip4pEndpoints[0], true, nil
+		// 排序后取最小者：同一主机的多条 IP4P AAAA（各编码着不同端口）在
+		// LookupIP 里的返回顺序不保证稳定，跨查询必须保持确定性，否则
+		// watchdog 会把「顺序抖动」误判成端点变化而反复强制重连。
+		return endpoints[0], true, nil
 	}
 
 	// No IP4P AAAA found.
 	return address, false, nil
+}
+
+// ip4pEndpointsFromIPs 把 AAAA 结果里的 IP4P 记录解成 IPv4:port 并排序，
+// 供拨号路径与 watchdog 共用同一套选取规则（不能各算各的，否则比较会漂移）。
+func ip4pEndpointsFromIPs(ips []net.IP) []string {
+	var endpoints []string
+	for _, ip := range ips {
+		ipv4, port, ok := decodeIP4PIP(ip)
+		if !ok {
+			continue
+		}
+		endpoints = append(endpoints, net.JoinHostPort(
+			ipv4.String(),
+			strconv.Itoa(int(port)),
+		))
+	}
+	slices.Sort(endpoints)
+	return endpoints
 }
 
 // IP4P AAAA 探测查询的短 TTL 缓存。SDK 拨号器每次建连都会做一次 IP4P 探测，
@@ -511,14 +516,31 @@ func lookupIP6Cached(ctx context.Context, resolver *net.Resolver, host string) (
 		return nil, err
 	}
 
+	storeIP6Cache(host, ips)
+	return ips, nil
+}
+
+// storeIP6Cache 把一次 fresh AAAA 查询写入短 TTL 缓存。watchdog 每次检测到
+// 新结果时也调用它，保证 AutoSSH 重连时 lookupIP6Cached 命中的是新端点，
+// 而不是等旧的 30s 缓存过期后还得再碰一次上游 DNS 的 TTL。
+func storeIP6Cache(host string, ips []net.IP) {
 	ip4pAAAACacheMu.Lock()
 	if len(ip4pAAAACache) >= ip4pAAAACacheLimit {
 		// 键是用户配置的节点主机名，正常远达不到上限；到顶说明有异常写入源，
 		// 整体重建防止无界增长。逐条 LRU 淘汰的成本在这里不划算。
 		ip4pAAAACache = make(map[string]ip4pAAAAEntry)
 	}
-	ip4pAAAACache[host] = ip4pAAAAEntry{ips: ips, expiresAt: now.Add(ip4pAAAACacheTTL)}
+	ip4pAAAACache[host] = ip4pAAAAEntry{
+		ips:       slices.Clone(ips),
+		expiresAt: time.Now().Add(ip4pAAAACacheTTL),
+	}
 	ip4pAAAACacheMu.Unlock()
+}
 
-	return ips, nil
+// clearIP4PAAAACache 在引擎停止时清空，避免 stop→start 换节点后旧主机名
+// 的 AAAA 结果仍被复用一个 TTL 周期。
+func clearIP4PAAAACache() {
+	ip4pAAAACacheMu.Lock()
+	ip4pAAAACache = make(map[string]ip4pAAAAEntry)
+	ip4pAAAACacheMu.Unlock()
 }
