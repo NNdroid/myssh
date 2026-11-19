@@ -4,7 +4,7 @@ go 1.26.10
 
 require (
 	github.com/NNdroid/dns_custom v0.0.0-20261118221151-7752094f1c9b
-	github.com/NNdroid/h2tunnel v1.0.20260425-0.20261107050126-c4c29288b7e6
+	github.com/NNdroid/h2tunnel v1.0.20260425-0.20261119223015-ede4377c66d3
 	github.com/NNdroid/icmp_custom v0.0.0-20261107061948-c6fc68544ac1
 	github.com/NNdroid/udp_custom v0.0.0-20261118234033-1a2fd5e331ba
 	github.com/NNdroid/xhttptunnel v1.0.20260613-0.20261118221746-b044570353b7
