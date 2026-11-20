@@ -164,9 +164,9 @@ func TestTunnelEventSeverity(t *testing.T) {
 // 且两路的文本内容与降级前完全一致（不影响宿主解析与既有告警关键字）。
 func TestEmitTunnelEventLocalCloseIsNotError(t *testing.T) {
 	core, obs := zaptestobserver.New(zapcore.InfoLevel)
-	prev := zlog
-	zlog = zap.New(core).Sugar()
-	defer func() { zlog = prev }()
+	prev := zlog.p.Load()
+	zlog.Store(zap.New(core).Sugar())
+	defer func() { zlog.Store(prev) }()
 
 	emitTunnelEvent(TunnelEvent{
 		Type: TunnelEventDied, Source: "xhttp",

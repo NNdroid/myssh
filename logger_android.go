@@ -27,17 +27,15 @@ var (
 	logConsumerOnce sync.Once
 	logChan         = make(chan logItem, 1000)
 	logDropped      atomic.Uint64
-	zlog            *zap.SugaredLogger = zap.NewNop().Sugar()
-	atomicLogLevel                     = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	// zlog 本体声明见 logger_shared.go（atomic.Pointer 包装，未初始化时为 Nop）。
+	atomicLogLevel = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
 
 // SetLogLevel dynamically updates Go engine log level in real-time
 func SetLogLevel(logLevelStr string) {
 	level := parseLogLevel(logLevelStr)
 	atomicLogLevel.SetLevel(level)
-	if zlog != nil {
-		zlog.Infof("[Logger] Dynamic log level updated to: %s", level.String())
-	}
+	zlog.Infof("[Logger] Dynamic log level updated to: %s", level.String())
 }
 
 // GetLogLevel returns the current log level as a lowercase string (e.g. "debug", "info").
@@ -218,7 +216,7 @@ func InitLogger(logPath string, logLevelStr string) int {
 	combinedCore := zapcore.NewTee(fileCore, androidCoreInstance)
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zap.ReplaceGlobals(logger)
-	zlog = logger.Sugar()
+	zlog.Store(logger.Sugar())
 
 	// 记录新文件并关闭上一代句柄：宿主每次引擎 Start 都会重开 logger，
 	// 不关旧文件的话 fd 随启停次数泄漏（见 logger_shared.go swapLogFile）。

@@ -1,6 +1,7 @@
 package myssh
 
 import (
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -28,6 +29,27 @@ func TestValidateSocks5AuthConfig(t *testing.T) {
 	assert.True(t, isPermanentConfigError(err), "单边凭据应归类为永久配置错误，AutoSSH 不重试")
 	err = validateSocks5AuthConfig(ProxyConfig{Socks5AuthPass: "p"})
 	assert.ErrorContains(t, err, "must be set together")
+}
+
+// TestIsPermanentConfigError 宁漏勿滥的分界：确定性配置错误必须命中（终止
+// 重连），TLS/SSH 层的瞬断与远端响应错误绝不能命中——旧实现的泛化 "invalid "
+// 子串曾把 invalid record MAC 类瞬断判成永久错误，AutoSSH 直接放弃重连。
+func TestIsPermanentConfigError(t *testing.T) {
+	initLoggerIfNeed()
+
+	// 永久类：确定性配置错误
+	assert.True(t, isPermanentConfigError(errors.New("unsupported tunnel type: grpc")))
+	assert.True(t, isPermanentConfigError(errors.New("ssh_addr is required")))
+	assert.True(t, isPermanentConfigError(errors.New("ssh err: unable to parse private key: no key found")))
+	assert.True(t, isPermanentConfigError(errors.New("invalid DoH url \"a://b\": ...")))
+	assert.True(t, isPermanentConfigError(errors.New("invalid ipv6_egress_mode \"x\": expected auto")))
+
+	// 瞬时类：重连可能成功，绝不判永久
+	assert.False(t, isPermanentConfigError(errors.New("ssh: handshake failed: cipher: message authentication failed: invalid record MAC")))
+	assert.False(t, isPermanentConfigError(errors.New("invalid protocol: 500 Internal Server Error")))
+	assert.False(t, isPermanentConfigError(errors.New("dial tcp 1.2.3.4:22: i/o timeout")))
+	assert.False(t, isPermanentConfigError(errors.New("connection reset by peer")))
+	assert.False(t, isPermanentConfigError(nil))
 }
 
 // negotiate 走一遍完整协商：发方法请求 → 读方法应答 →（若被要求）发 RFC 1929

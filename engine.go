@@ -15,21 +15,31 @@ import (
 // keepalive 监视与资源清理。共享状态定义见 proxy.go。
 
 // isPermanentConfigError 判定拨号错误是否为配置类永久错误（类型不存在、
-// 必填字段缺失、参数非法）——这类错误重连永远不会成功，AutoSSH 应终止
-// 而不是无限循环重试刷日志。
+// 必填字段缺失、参数非法、密钥无法解析）——这类错误重连永远不会成功，
+// AutoSSH 应终止而不是无限循环重试刷日志。
+//
+// 策略是宁漏勿滥：误判的代价是隧道被永久放弃（表现为"偶发永久掉线"且无
+// 自愈），漏判的代价只是每 3 秒重试刷日志。因此这里只收录本仓库各配置
+// 校验点的具体文案，绝不收录 "invalid " 这类泛化子串——旧实现的 "invalid "
+// 会把 TLS/SSH 层的瞬断（如 invalid record MAC）与 tunnel_http 对远端响应
+// 解析失败的 "invalid protocol"（远端行为，可重试）一并判成永久错误。
+// 长期方向是源头改 sentinel error + errors.Is，文案匹配只是过渡兜底。
 func isPermanentConfigError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	for _, marker := range []string{
-		"unsupported tunnel type",
-		" is required",
-		"must be ",
-		"must contain ",
-		"requires a ",
-		"not valid for",
-		"invalid ",
+		"unsupported tunnel type",        // dialTunnel 注册表未命中
+		" is required",                   // tunnel_*.go 必填字段校验
+		"must be ",                       // config.go 参数范围校验
+		"must contain ",                  // tunnel_udp_custom 参数校验
+		"requires a ",                    // tunnel_sdk / QUIC / KCP 类型校验
+		"not valid for",                  // 外部库的配置类错误
+		"invalid DoH url",                // dns.go DoH 上游地址解析
+		"invalid ipv6_egress_mode",       // ipv6_egress.go 模式校验
+		"invalid icmp_custom_public_key", // tunnel_icmp_custom 密钥解析
+		"unable to parse private key",    // ssh_client.go 密钥解析（确定性失败，旧实现漏判导致无限重试）
 	} {
 		if strings.Contains(msg, marker) {
 			return true

@@ -1,7 +1,6 @@
 package myssh
 
 import (
-	"go.uber.org/zap"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,8 +27,6 @@ func TestLoadGlobalConfigFromJson(t *testing.T) {
 	assert.Equal(t, "geoip.dat", globalConfig.Load().GeoIPFilePath, "Should set default GeoIPFilePath")
 }
 
-func initLoggerIfNeed() {
-	if zlog == nil {
-		zlog = zap.NewNop().Sugar()
-	}
-}
+// initLoggerIfNeed 兼容保留：zlog 现为 atomic 包装、包级默认即 Nop，
+// 无需再手动初始化；调用点众多，保留空函数避免改动面扩大。
+func initLoggerIfNeed() {}

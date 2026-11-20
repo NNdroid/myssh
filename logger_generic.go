@@ -10,18 +10,16 @@ import (
 )
 
 var (
-	// 全局 SugarLogger，未调用 InitLogger 前默认为 Nop，避免空指针 Panic
-	zlog           *zap.SugaredLogger = zap.NewNop().Sugar()
-	atomicLogLevel                    = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	// atomicLogLevel 控制全局日志级别；zlog 本体声明见 logger_shared.go
+	// （atomic.Pointer 包装，未初始化时为 Nop）。
+	atomicLogLevel = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 )
 
 // SetLogLevel dynamically updates generic log level in real-time
 func SetLogLevel(logLevelStr string) {
 	level := parseLogLevel(logLevelStr)
 	atomicLogLevel.SetLevel(level)
-	if zlog != nil {
-		zlog.Infof("[Logger] Generic log level updated to: %s", level.String())
-	}
+	zlog.Infof("[Logger] Generic log level updated to: %s", level.String())
 }
 
 // GetLogLevel returns the current log level as a lowercase string (e.g. "debug", "info").
@@ -91,7 +89,7 @@ func InitLogger(logPath string, logLevelStr string) int {
 	// 构造全局 logger，替换 zap 全局实例
 	logger := zap.New(combinedCore, zap.AddCaller())
 	zap.ReplaceGlobals(logger)
-	zlog = logger.Sugar()
+	zlog.Store(logger.Sugar())
 
 	zlog.Infof("[Logger] Generic log system initialization completed | Level: %s | File: %s", atomicLogLevel.Level().String(), logPath)
 

@@ -280,15 +280,18 @@ func downloadOnce(url string, expected string, destPath string) error {
 		return fmt.Errorf("request failed with status code: %d", resp.StatusCode)
 	}
 
-	// Define the temporary file path
-	tempPath := destPath + ".tmp"
-	zlog.Debugf("Creating temporary file: %s", tempPath)
-
-	// Create the temporary file
-	out, err := os.Create(tempPath)
+	// 临时文件必须落在同一目录：os.Rename 的原子性依赖同一文件系统。名字必须
+	// 唯一：DownloadRuleFiles 的调用方可并发到达（web 启动下载与
+	// LoadGlobalConfig→RepairRuleFile 互不持锁），共用固定 .tmp 路径时，
+	// 一路在校验通过后、rename 前的另一路 os.Create 会截断重写该文件，
+	// rename 落盘的就是别人未通过校验的字节——唯一名让每路只认自己的临时文件。
+	base := filepath.Base(destPath)
+	out, err := os.CreateTemp(filepath.Dir(destPath), base+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
+	tempPath := out.Name()
+	zlog.Debugf("Creating temporary file: %s", tempPath)
 
 	// Use io.Copy to write the response stream to the file.
 	// This avoids loading the entire file into memory.

@@ -14,17 +14,48 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
+// sugaredHolder 以 atomic.Pointer 持有全局 SugaredLogger。InitLogger 可被宿主
+// 重复调用（Android 每次引擎 Start、web 每次 /log-clear），旧实现把裸全局指针
+// 直接改写，而全包所有日志热路径无锁并发读它——对指针的无同步写读构成
+// data race（logger_android.go 曾修过同类问题，但漏了 zlog 本身）。
+// 方法集与 *zap.SugaredLogger 在本仓库实际用到的方法一致，调用点无需改动。
+type sugaredHolder struct {
+	p atomic.Pointer[zap.SugaredLogger]
+}
+
+// newNopSugaredHolder 返回一个已装入 Nop logger 的 holder，作为包级默认值：
+// 未调用 InitLogger 前所有日志进 Nop，避免空指针 panic。atomic.Pointer 含
+// noCopy，holder 一律以指针传递。
+func newNopSugaredHolder() *sugaredHolder {
+	var h sugaredHolder
+	h.p.Store(zap.NewNop().Sugar())
+	return &h
+}
+
+func (h *sugaredHolder) Store(l *zap.SugaredLogger) { h.p.Store(l) }
+
+func (h *sugaredHolder) Debugf(format string, args ...any) { h.p.Load().Debugf(format, args...) }
+func (h *sugaredHolder) Infof(format string, args ...any)  { h.p.Load().Infof(format, args...) }
+func (h *sugaredHolder) Warnf(format string, args ...any)  { h.p.Load().Warnf(format, args...) }
+func (h *sugaredHolder) Errorf(format string, args ...any) { h.p.Load().Errorf(format, args...) }
+func (h *sugaredHolder) Info(args ...any)                  { h.p.Load().Info(args...) }
+func (h *sugaredHolder) Warn(args ...any)                  { h.p.Load().Warn(args...) }
+func (h *sugaredHolder) Error(args ...any)                 { h.p.Load().Error(args...) }
+func (h *sugaredHolder) Sync() error                       { return h.p.Load().Sync() }
+
+// zlog 是全局日志器；默认 Nop，由 InitLogger 以原子替换的方式更新。
+var zlog = newNopSugaredHolder()
+
 // SyncLogger 在程序退出前把缓冲区日志刷盘（对文件 core 触发 fsync）。
-// 平台中立：两个平台都将 zlog 初始化为 *zap.SugaredLogger（未初始化时为 Nop），
-// 因此这里只需判空后 Sync 即可，无需分平台实现。
+// zlog 恒可用（未初始化时为 Nop），无需判空。
 func SyncLogger() {
-	if zlog != nil {
-		_ = zlog.Sync()
-	}
+	_ = zlog.Sync()
 }
 
 // activeLogFile 记录当前 file core 持有的日志文件。InitLogger 可被宿主重复

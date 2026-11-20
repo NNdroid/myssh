@@ -210,6 +210,13 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
+	// 不信任任何代理头：gin 默认信任 0.0.0.0/0，ClientIP() 会取 X-Forwarded-For
+	// 最左值，登录限流（按 IP 分桶）可被攻击者每次请求换一个伪造 XFF 头绕过。
+	// 置 nil 后 ClientIP() 恒为真实 TCP 对端地址。若部署在可信反代之后需要还原
+	// 真实客户端 IP，请显式配置可信网段而非回退到默认值。
+	if err := router.SetTrustedProxies(nil); err != nil {
+		zap.L().Sugar().Warnf("%s [WebServer] SetTrustedProxies failed: %v", TAG, err)
+	}
 
 	// 安全响应头：CSP 收紧到同源（index.html 无内联脚本/样式，script.js 的
 	// 动态样式全部走 CSSOM，不受 style-src 限制），防点击劫持与 MIME 嗅探。

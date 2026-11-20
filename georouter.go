@@ -59,6 +59,38 @@ type GeoRouter struct {
 // 一次只删过期项的清理（非全清，保留热点，无命中率抖动）。
 const routeCacheCleanThreshold = 5000
 
+// routeCacheHardMax 是三张判定缓存（domainCache/routeIPCache/ipDecisionCache）
+// 的硬上限。阈值触发的清理只删「当时已过期」的条目：对抗性输入（10 分钟 TTL
+// 窗口内灌入超过 5000 个不同目标——tproxy/socks5 数据面的目标字符串外部可控）
+// 会让每轮清理空手而归，sync.Map 无界增长直至撑爆内存。越过硬上限后按迭代序
+// 淘汰到上限以内：TTL 内条目彼此等价，淘汰哪个无关紧要，有界才是关键。
+// 硬上限取阈值两倍，正常流量（热点 < 阈值，清理有效）永远够不到。
+const routeCacheHardMax = 2 * routeCacheCleanThreshold
+
+// evictToCap 在 m 超过硬上限时按迭代序淘汰到上限以内。sync.Map 无 Size，先
+// 统计总量，超限再删掉前 excess 个条目。仅在后台清理里被调用（写入计数越过
+// 阈值才触发），代价可忽略。
+func evictToCap(m *sync.Map, hardMax int) {
+	size := 0
+	m.Range(func(_, _ interface{}) bool {
+		size++
+		return true
+	})
+	excess := size - hardMax
+	if excess <= 0 {
+		return
+	}
+	n := 0
+	m.Range(func(k, _ interface{}) bool {
+		if n >= excess {
+			return false
+		}
+		m.Delete(k)
+		n++
+		return true
+	})
+}
+
 // domainCacheTTL 是域名判定缓存的存活期。过期条目在读取时惰性失效并
 // 重算，保证规则语义最终一致。
 const domainCacheTTL = 10 * time.Minute
@@ -341,7 +373,8 @@ func (r *GeoRouter) ipDecision(host string, addr netip.Addr) RouteResult {
 	return RouteResult{IsDirect: direct, DialHost: host}
 }
 
-// cleanExpiredIPDecisionCache 后台清理过期条目，只删不加。
+// cleanExpiredIPDecisionCache 后台清理过期条目，只删不加；超硬上限时按迭代序
+// 淘汰（见 routeCacheHardMax）。
 func (r *GeoRouter) cleanExpiredIPDecisionCache() {
 	now := time.Now()
 	r.ipDecisionCache.Range(func(k, v interface{}) bool {
@@ -350,6 +383,7 @@ func (r *GeoRouter) cleanExpiredIPDecisionCache() {
 		}
 		return true
 	})
+	evictToCap(&r.ipDecisionCache, routeCacheHardMax)
 }
 
 // MatchDomain 匹配域名 - 先查缓存
@@ -386,7 +420,8 @@ func (r *GeoRouter) MatchDomain(domain string) bool {
 	return matched
 }
 
-// cleanExpiredDomainCache 删除 domainCache 中已过期的条目。
+// cleanExpiredDomainCache 删除 domainCache 中已过期的条目；超硬上限时按迭代序
+// 淘汰（见 routeCacheHardMax）。
 func (r *GeoRouter) cleanExpiredDomainCache() {
 	now := time.Now()
 	r.domainCache.Range(func(key, value interface{}) bool {
@@ -395,9 +430,11 @@ func (r *GeoRouter) cleanExpiredDomainCache() {
 		}
 		return true
 	})
+	evictToCap(&r.domainCache, routeCacheHardMax)
 }
 
-// cleanExpiredRouteIPCache 删除 routeIPCache 中已过期的条目。
+// cleanExpiredRouteIPCache 删除 routeIPCache 中已过期的条目；超硬上限时按迭代
+// 序淘汰（见 routeCacheHardMax）。
 func (r *GeoRouter) cleanExpiredRouteIPCache() {
 	now := time.Now()
 	r.routeIPCache.Range(func(key, value interface{}) bool {
@@ -406,6 +443,7 @@ func (r *GeoRouter) cleanExpiredRouteIPCache() {
 		}
 		return true
 	})
+	evictToCap(&r.routeIPCache, routeCacheHardMax)
 }
 
 // ResetCacheAndStats 重置 L1 各级缓存与统计

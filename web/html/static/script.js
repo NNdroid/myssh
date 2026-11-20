@@ -657,6 +657,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData(form);
             const nodeData = Object.fromEntries(formData.entries());
             form.querySelectorAll('input[type="checkbox"]').forEach(cb => nodeData[cb.name] = cb.checked);
+            // 表单不含以下字段，但 PUT /nodes 是全字段覆盖更新：编辑保存时必须从
+            // 内存中的节点数据带回原值，否则会被静默清零（disableStatusCheck 置
+            // false、KCP FEC 分片归 0）。新建节点无原值，维持缺省行为。
+            for (const key of ['disableStatusCheck', 'kcpDataShards', 'kcpParityShards']) {
+                if (!(key in nodeData) && state.currentNodeId) {
+                    const existing = state.nodes.find(n => n.id === state.currentNodeId);
+                    if (existing && existing[key] !== undefined) nodeData[key] = existing[key];
+                }
+            }
             for (const key of ['tcpBufferKB', 'udpMaxSessions', 'udpIdleTimeoutSec', 'udpCustomPaths', 'udpCustomSockets', 'udpCustomSendWindow', 'udpCustomMaxPkt', 'paddingMinBytes', 'xhttpChunkSizeKB', 'xhttpWindowSizeMB', 'xhttpMaxConns', 'heartbeatIntervalMs', 'icmpCustomMaxPayload', 'icmpCustomPaceMS', 'kcpDataShards', 'kcpParityShards', 'kcpSndWnd', 'kcpRcvWnd', 'kcpMtu', 'kcpSmuxVer', 'kcpKeepAlive']) {
                 nodeData[key] = Number.parseInt(nodeData[key] || '0', 10) || 0;
             }

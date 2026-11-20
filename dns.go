@@ -266,7 +266,11 @@ func (l *LocalDnsServer) lookupDNS(requestMsg *dns.Msg) ([]byte, *dns.Msg, strin
 			return nil, finalErr
 		}
 
-		if reply.Rcode == dns.RcodeSuccess || reply.Rcode == dns.RcodeNameError {
+		// TC=1 的应答不缓存：无 EDNS0 的内部查询命中 512 字节限制时上游会返回
+		// 截断应答（Rcode 仍是 Success）。缓存它的话，客户端随后改走 TCP 重试，
+		// 却在同一 TTL 内反复拿到同一条带 TC 位的字节，大应答域名在缓存期内
+		// 持续解析失败；不缓存则每次都原样重试上游，由客户端协议形态自行恢复。
+		if (reply.Rcode == dns.RcodeSuccess || reply.Rcode == dns.RcodeNameError) && !reply.Truncated {
 			l.cacheMu.Lock()
 			entry := dnsCacheEntry{
 				expiresAt: time.Now().Add(time.Duration(l.calculateOptimalTTL(reply)) * time.Second),
@@ -353,6 +357,25 @@ func (l *LocalDnsServer) HandleDNSRequestPacked(requestMsg *dns.Msg) ([]byte, er
 
 // ==================== 上游解析（均经 dialTracked） ====================
 
+// validateUpstreamReply 校验手工交换路径收回的应答确实属于本次请求。
+//
+// 直连 UDP 走 miekg 的 ExchangeWithConn，内部会循环丢弃 ID 不匹配的响应；
+// 而隧道 UDP / TCP / DoT / DoH 四条手工路径读回第一个包就直接返回——不校验
+// 的话，被注入或串线的应答会以请求方的名义进入缓存（最长 1h TTL），形成
+// 持久化投毒。域名比较按 RFC 4343 大小写不敏感语义（EqualFold）。
+func validateUpstreamReply(req, reply *dns.Msg) error {
+	if reply.Id != req.Id {
+		return fmt.Errorf("dns reply id mismatch: got %d, want %d", reply.Id, req.Id)
+	}
+	if len(req.Question) != 1 || len(reply.Question) != 1 ||
+		!strings.EqualFold(req.Question[0].Name, reply.Question[0].Name) ||
+		req.Question[0].Qtype != reply.Question[0].Qtype ||
+		req.Question[0].Qclass != reply.Question[0].Qclass {
+		return fmt.Errorf("dns reply question mismatch: got %v, want %v", reply.Question, req.Question)
+	}
+	return nil
+}
+
 // resolveUDP 走 UDP 上游解析（经 dialTracked）。
 func (l *LocalDnsServer) resolveUDP(req *dns.Msg, addr string, isDirect bool, sshClient *ssh.Client) (*dns.Msg, error) {
 	addr = strings.TrimPrefix(addr, "udp://")
@@ -399,6 +422,9 @@ func (l *LocalDnsServer) resolveUDP(req *dns.Msg, addr string, isDirect bool, ss
 	if err := reply.Unpack(buffer[:n]); err != nil {
 		return nil, fmt.Errorf("unpack dns response failed: %v", err)
 	}
+	if verr := validateUpstreamReply(req, reply); verr != nil {
+		return nil, verr
+	}
 
 	return reply, nil
 }
@@ -424,6 +450,13 @@ func (l *LocalDnsServer) resolveTCP(req *dns.Msg, addr string, isDirect bool, ss
 
 	reply, err := tcpConn.ReadMsg()
 	if err == nil {
+		// 应答与请求不匹配：连接可能已串线（上一次查询的迟到应答或注入），
+		// 绝不能归还连接池，按失败关闭处理。
+		if verr := validateUpstreamReply(req, reply); verr != nil {
+			tcpConn.Close()
+			zlog.Warnf("%s [DNS-TCP] ⚠️ %v", TAG, verr)
+			return nil, verr
+		}
 		// 使用带 poolKey 的归还
 		l.putTcpConnToPool(tcpConn, poolKey)
 		zlog.Debugf("%s [DNS-TCP] ✅ Resolution completed | Latency: %dms", TAG, time.Since(start).Milliseconds())
@@ -463,10 +496,21 @@ func (l *LocalDnsServer) resolveDoH(req *dns.Msg, url string, isDirect bool, ssh
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DoH status: %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	// 响应体大小由对端决定：给个上限防被劫持/配置错误的端点在 5s 超时窗口内
+	// 推送任意大的 200 响应撑爆内存（64KB 远超任何合法 DNS over HTTPS 报文）。
+	// ReadAll 的错误不再吞掉——短读只靠 Unpack 报错会让根因失真。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, fmt.Errorf("read DoH response failed: %w", err)
+	}
 	reply := new(dns.Msg)
-	err = reply.Unpack(body)
-	return reply, err
+	if err = reply.Unpack(body); err != nil {
+		return nil, err
+	}
+	if verr := validateUpstreamReply(req, reply); verr != nil {
+		return nil, verr
+	}
+	return reply, nil
 }
 
 func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, sshClient *ssh.Client, forceNew bool) (*dns.Msg, error) {
@@ -491,6 +535,13 @@ func (l *LocalDnsServer) resolveDoT(req *dns.Msg, addr string, isDirect bool, ss
 
 	reply, err := dotConn.ReadMsg()
 	if err == nil {
+		// 应答与请求不匹配：连接可能已串线（上一次查询的迟到应答或注入），
+		// 绝不能归还连接池，按失败关闭处理。
+		if verr := validateUpstreamReply(req, reply); verr != nil {
+			dotConn.Close()
+			zlog.Warnf("%s [DNS-DoT] ⚠️ %v", TAG, verr)
+			return nil, verr
+		}
 		// 使用带 poolKey 的归还
 		l.putDoTConnToPool(dotConn, poolKey)
 		zlog.Debugf("%s [DNS-DoT] ✅ Resolution completed | Latency: %dms", TAG, time.Since(start).Milliseconds())

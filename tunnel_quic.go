@@ -71,7 +71,9 @@ func (q *quicNetConn) Close() error {
 }
 
 func init() {
-	RegisterTunnel("quic", "udp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
+	// QUIC 连接进进程级缓存跨会话复用，底层 socket 生命周期挂引擎 ctx
+	// （见 dialTunnel 对 SharedSocket 的处理）。
+	RegisterSharedSocketTunnel("quic", "udp", func(parentCtx context.Context, cfg ProxyConfig, baseConn net.Conn) (net.Conn, error) {
 
 		zlog.Infof("%s [Tunnel] 2. Preparing QUIC (UDP) handshake, Target: %s, Spoofed SNI: %s", TAG, cfg.ProxyAddr, cfg.ServerName)
 
@@ -153,8 +155,18 @@ func init() {
 			return nil, err
 		}
 
-		// 握手成功后，把连接放入 QUIC 缓存，供后续复用
-		quicConnCache.Store(quicCacheKeyOf(cfg), conn)
+		// 握手成功后，把连接放入 QUIC 缓存，供后续复用。
+		// LoadOrStore 而不是 Store：两个并发拨号可能同时未命中（缓存被清空或
+		// 两条死连接被先后摘走）并各自完成握手，无条件 Store 会互相覆盖——被
+		// 覆盖的那条既不在缓存、也无引用持有，KeepAlive 会让它活到引擎停止
+		// （closeQuicConnCache 够不到缓存外的条目）。落败方关闭自己那条、
+		// 复用赢家，与下方 stream 失败的按值摘走语义对齐。
+		actual, loaded := quicConnCache.LoadOrStore(quicCacheKeyOf(cfg), conn)
+		if loaded {
+			conn.CloseWithError(0, "superseded by concurrent dial")
+			conn = actual.(*quic.Conn)
+			zlog.Infof("%s [Tunnel] 🔁 Concurrent dial lost the race, reusing the cached QUIC connection", TAG)
+		}
 		zlog.Infof("%s [Tunnel] ✅ QUIC handshake successful, preparing to open Stream", TAG)
 
 		stream, err := conn.OpenStreamSync(parentCtx)

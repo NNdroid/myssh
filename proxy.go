@@ -79,6 +79,11 @@ type TunnelHandler func(ctx context.Context, cfg ProxyConfig, baseConn net.Conn)
 type TunnelProtocol struct {
 	Network string        // 底层网络: "tcp", "udp", "custom"（协议自拨）, "none"
 	Handler TunnelHandler // 隧道握手处理
+	// SharedSocket 标记 handler 会把 baseConn 放进进程级缓存供多个会话复用
+	// （目前仅 QUIC）。这类隧道的底层 socket 生命周期必须挂在引擎 ctx 上，
+	// 而不是本次拨号的 ctx：否则延迟探测（6s ctx）或首个请求结束后 socket
+	// 被关闭，缓存里的连接随之死亡，多流复用收益清零。
+	SharedSocket bool
 }
 
 var tunnelRegistry = make(map[string]TunnelProtocol)
@@ -86,9 +91,20 @@ var tunnelRegistry = make(map[string]TunnelProtocol)
 // RegisterTunnel 注册隧道实现。各 tunnel_*.go 在 init 中自注册；
 // name 为配置名（如 "h2"/"grpc"），network 为底层网络需求，handler 为握手逻辑。
 func RegisterTunnel(name string, network string, handler TunnelHandler) {
+	registerTunnel(name, network, handler, false)
+}
+
+// RegisterSharedSocketTunnel 同 RegisterTunnel，但 handler 会把底层 socket
+// 放入跨会话缓存（见 TunnelProtocol.SharedSocket）。
+func RegisterSharedSocketTunnel(name string, network string, handler TunnelHandler) {
+	registerTunnel(name, network, handler, true)
+}
+
+func registerTunnel(name string, network string, handler TunnelHandler, sharedSocket bool) {
 	tunnelRegistry[name] = TunnelProtocol{
-		Network: network,
-		Handler: handler,
+		Network:      network,
+		Handler:      handler,
+		SharedSocket: sharedSocket,
 	}
 }
 

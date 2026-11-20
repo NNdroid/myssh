@@ -222,6 +222,13 @@ func probeSSHServer(sshAddr string, bindInterface string) (*SSHServerDetails, er
 	}
 	defer conn.Close()
 
+	// ssh.NewClientConn 不接受 ctx，config.Timeout 只作用于 ssh.Dial 的 TCP 拨号段；
+	// TCP 已建后握手读取阶段若不留 deadline，僵死/恶意服务器可让本函数永久阻塞。
+	// 与拨号共用同一个 6s 预算。
+	if err := conn.SetDeadline(time.Now().Add(config.Timeout)); err != nil {
+		return nil, err
+	}
+
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
 	latencyMs := time.Since(startTime).Milliseconds()
 

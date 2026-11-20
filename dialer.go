@@ -321,7 +321,18 @@ func dialTunnel(ctx context.Context, cfg ProxyConfig) (net.Conn, error) {
 
 	// 把 baseConn 交给对应 tunnel handler 完成协议握手 (例如 HTTP/3, WebSocket, Base SSH 等场景)
 	if baseConn != nil {
-		baseConn = watchEngineCtx(ctx, baseConn)
+		// socket 生命周期按隧道声明选择：共享型（QUIC）挂引擎 ctx——缓存的
+		// 连接要跨会话复用，绑到拨号 ctx 会让探测（6s ctx）或首个请求结束
+		// 就把 socket 关掉，缓存名存实亡；非共享型维持拨号 ctx，会话结束
+		// socket 随之回收。引擎未运行（独立探测）时退回拨号 ctx，避免
+		// 「测完就丢」的连接在无人管理的 Background ctx 下滞留。
+		lifetimeCtx := ctx
+		if proto.SharedSocket {
+			if eng := currentEngineCtx(); eng != context.Background() {
+				lifetimeCtx = eng
+			}
+		}
+		baseConn = watchEngineCtx(lifetimeCtx, baseConn)
 	}
 	targetConn, err := proto.Handler(ctx, cfg, baseConn)
 	if err != nil && baseConn != nil {
