@@ -66,6 +66,43 @@ func handshakeUTLS(ctx context.Context, conn net.Conn, utlsConfig *utls.Config) 
 	return uConn, nil
 }
 
+// chromeSpecWithALPN 返回改写了 ALPNExtension 的 Chrome ClientHello spec。
+//
+// uTLS 内置 Chrome 指纹的 ALPN 是模板里硬编码的 chromeALPN（["h2","http/1.1"]），
+// 而 ApplyPreset 没有 ALPNExtension 分支、Config.NextProtos 对模板无效——要宣告
+// 不同的协议列表（如 wss 必须只宣告 "http/1.1"，否则偏好 h2 的服务端会在 TLS 层
+// 选中 h2，HTTP/1.1 Upgrade 随即失败），唯一途径就是取出 spec 就地改写。
+// 其余扩展、曲线、压缩顺序全部保持 Chrome 原样。
+func chromeSpecWithALPN(alpn []string) (*utls.ClientHelloSpec, error) {
+	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+	if err != nil {
+		return nil, err
+	}
+	if len(alpn) > 0 {
+		for _, ext := range spec.Extensions {
+			if a, ok := ext.(*utls.ALPNExtension); ok {
+				a.AlpnProtocols = alpn
+			}
+		}
+	}
+	return &spec, nil
+}
+
+// handshakeUTLSWithSpec 与 handshakeUTLS 相同，但走 HelloCustom + 显式 spec 完成握手
+// ——用于需要改写模板内扩展（见 chromeSpecWithALPN）的场景。Config.NextProtos 在
+// 此形态下同样无效，ALPN 以 spec 的 ALPNExtension 为准。错误时关闭 conn 的责任
+// 在调用方（与 handshakeUTLS 一致）。
+func handshakeUTLSWithSpec(ctx context.Context, conn net.Conn, utlsConfig *utls.Config, spec *utls.ClientHelloSpec) (*utls.UConn, error) {
+	uConn := utls.UClient(conn, utlsConfig, utls.HelloCustom)
+	if err := uConn.ApplyPreset(spec); err != nil {
+		return nil, err
+	}
+	if err := uConn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	return uConn, nil
+}
+
 // newChromeUConn 在一条已建立的 TCP 连接上完成 uTLS（Chrome 指纹）握手，
 // 供 DoT 上游与证书探测等复用——把这几处原本裸用 crypto/tls 的 ClientHello
 // 也伪装成 Chrome 指纹，避免被按“Go 客户端”画像封锁/限速。
@@ -76,8 +113,8 @@ func handshakeUTLS(ctx context.Context, conn net.Conn, utlsConfig *utls.Config) 
 // 注意：uTLS 内置 Chrome 指纹的 ALPN 是模板里硬编码的 ["h2","http/1.1"]，
 // ApplyPreset 只会用 Config.ServerName 覆盖 SNI，并不会用 Config.NextProtos
 // 覆盖 ALPN（见 u_parrots.ApplyPreset 无 ALPNExtension 分支）。因此若像
-// DoT 那样必须协商 "dot"，直接设 Config.NextProtos 无效——必须取出 Chrome
-// spec、就地改写其 ALPNExtension，再走 HelloCustom + ApplyPreset。其余扩展、
+// DoT 那样必须协商 "dot"，直接设 Config.NextProtos 无效——必须经
+// chromeSpecWithALPN 改写 spec 再走 HelloCustom + ApplyPreset。其余扩展、
 // 曲线、压缩顺序全部保持 Chrome 原样，只有协议列表随需求替换。
 //   - alpn 为空时沿用 Chrome spec 默认协议列表；
 //   - sessionCache 非 nil 时启用 TLS 1.3 会话复用，DoT 借此让上游连接池命中后省一次握手；
@@ -92,21 +129,14 @@ func newChromeUConn(ctx context.Context, conn net.Conn, serverName string, alpn 
 		conf.ClientSessionCache = sessionCache
 	}
 
-	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+	spec, err := chromeSpecWithALPN(alpn)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	if len(alpn) > 0 {
-		for _, ext := range spec.Extensions {
-			if a, ok := ext.(*utls.ALPNExtension); ok {
-				a.AlpnProtocols = alpn
-			}
-		}
-	}
 
 	uConn := utls.UClient(conn, conf, utls.HelloCustom)
-	if err := uConn.ApplyPreset(&spec); err != nil {
+	if err := uConn.ApplyPreset(spec); err != nil {
 		conn.Close()
 		return nil, err
 	}

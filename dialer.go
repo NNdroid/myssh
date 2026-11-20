@@ -20,7 +20,14 @@ func newProtectedDialer(cfg ProxyConfig, timeout time.Duration) *net.Dialer {
 		zlog.Debugf("%s [Dialer] bind interface: %s", TAG, cfg.BindInterface)
 		bindDevice(dialer, cfg.BindInterface)
 	}
-	return wrapAndroidProtect(dialer)
+	// Control 链必须与 dialSocket 对齐：protect 解决 VPN 模式回环，mark 解决
+	// tproxy 模式回环（protect 在内、mark 在外）。此前漏掉 mark：tproxy 部署
+	// 下，凡走本路径的出站 socket——SOCKS5 直连 UDP NAT（socks5.go）、
+	// unified_outbound 直连、DNS 直连上游、IPv6 出口探测、dns_custom/sdk 隧道的
+	// 底层连接——都会被 TPROXY 抓回本地 socks5，再次分类为 direct 后再拨，
+	// 无限回环。mark 未启用（VPN 模式 / 非 tproxy）时 markSocketFD 是快速
+	// 空操作，无副作用；其它平台 wrapSocketMark 为恒等实现。
+	return wrapSocketMark(wrapAndroidProtect(dialer))
 }
 
 func dialProtected(ctx context.Context, cfg ProxyConfig, network, address string, timeout time.Duration) (net.Conn, error) {

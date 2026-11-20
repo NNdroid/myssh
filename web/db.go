@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -23,6 +26,8 @@ var (
 	// dbMu 串行化写操作并保护 db 句柄本身；读操作用 RLock 允许并发，
 	// 避免 GetProfiles 这类全表扫描把其它读端点也排队挡住。
 	dbMu sync.RWMutex
+	// encKey 是敏感列的 AES-256-GCM 密钥，InitDB 时从 key 文件加载或首次生成。
+	encKey []byte
 )
 
 func generateUUID() string {
@@ -30,6 +35,168 @@ func generateUUID() string {
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%12x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// ==================== 敏感字段加密（AES-256-GCM） ====================
+//
+// SSH 密码、私钥、各类 PSK 等凭据此前全部明文入库——拿到 db 文件即拿到全部
+// 凭据。现在落库前统一加密：AES-256-GCM，密钥存放在与 db 同目录的 .key 文件
+// （首次运行生成，0600）。
+//
+// 存储格式为 "enc:v1:<base64(nonce|ciphertext)>"：读取时据此识别密文；无前缀
+// 的值按历史**明文**原样放行——旧库无须一次性迁移，明文在下一次保存时自然被
+// 加密覆盖。解析失败（key 文件丢失/不匹配）时返回空串并告警：宁可表现为"连接
+// 缺凭据"这个显性故障，也不把密文当明文写进运行配置。
+//
+// 边界声明：这是"静态密钥同目录存放"的钝化方案，防的是 db 文件被拷走/误传时
+// 凭据直接裸奔；密钥与 db 同机共存挡不住拿到整台机器的攻击者。真正的威胁模型
+// 收益是导出/备份/同步场景——没有 .key 文件的 db 备份不再是凭据库。
+
+// encFieldPrefix 标记密文值。明文密码恰好以此开头的概率可忽略，且明文永远不会
+// 被主动加上该前缀写入。
+const encFieldPrefix = "enc:v1:"
+
+// loadOrCreateEncKey 加载静态密钥；文件不存在时生成 32 字节新密钥并落盘。
+// key 文件损坏（存在但内容非法）时返回错误而不是静默重建——DB 里可能已有
+// 用旧密钥加密的数据，换新密钥会让它们全部解不开，这个决定必须由人来做。
+func loadOrCreateEncKey(dbPath string) error {
+	keyPath := strings.TrimSuffix(dbPath, filepath.Ext(dbPath)) + ".key"
+	if data, err := os.ReadFile(keyPath); err == nil {
+		key, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+		if derr != nil || len(key) != 32 {
+			return fmt.Errorf("key file %s is corrupt (len=%d): regenerate it only if the db has no encrypted rows", keyPath, len(key))
+		}
+		encKey = key
+		return nil
+	}
+
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+		return err
+	}
+	// Windows 上 Chmod 无意义，失败忽略（与 db 文件同一策略）。
+	_ = os.Chmod(keyPath, 0o600)
+	encKey = key
+	zap.L().Sugar().Infof("[DB] 🔑 Generated new credential encryption key: %s", keyPath)
+	return nil
+}
+
+func encryptField(plain string) string {
+	if plain == "" || encKey == nil || strings.HasPrefix(plain, encFieldPrefix) {
+		return plain
+	}
+	gcm, err := newGCM()
+	if err != nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ credential encryption unavailable, storing plaintext: %v", err)
+		return plain
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ nonce generation failed, storing plaintext: %v", err)
+		return plain
+	}
+	ct := gcm.Seal(nonce, nonce, []byte(plain), nil)
+	return encFieldPrefix + base64.StdEncoding.EncodeToString(ct)
+}
+
+func decryptField(val string) string {
+	if !strings.HasPrefix(val, encFieldPrefix) {
+		return val // 空值或历史明文
+	}
+	if encKey == nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ encrypted credential found but no key loaded; returning empty")
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(val, encFieldPrefix))
+	if err != nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ credential ciphertext malformed; returning empty: %v", err)
+		return ""
+	}
+	gcm, err := newGCM()
+	if err != nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ credential decryption unavailable; returning empty: %v", err)
+		return ""
+	}
+	if len(raw) < gcm.NonceSize() {
+		zap.L().Sugar().Warnf("[DB] ⚠️ credential ciphertext too short; returning empty")
+		return ""
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	if err != nil {
+		zap.L().Sugar().Warnf("[DB] ⚠️ credential decryption failed (key file lost or mismatched?); returning empty")
+		return ""
+	}
+	return string(plain)
+}
+
+func newGCM() (cipher.AEAD, error) {
+	block, err := aes.NewCipher(encKey)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+// sensitiveCredentialFields 列出落库时加密、API 响应时脱敏的凭据列。
+// 公钥类字段（udpCustomPublicKey/icmpCustomPublicKey/dnsTunnelPublicKey）与
+// 指纹类字段是可公开素材，不在其中。
+var sensitiveCredentialFields = []func(*Profile) *string{
+	func(p *Profile) *string { return &p.Pass },
+	func(p *Profile) *string { return &p.PrivateKey },
+	func(p *Profile) *string { return &p.KeyPass },
+	func(p *Profile) *string { return &p.ProxyAuthToken },
+	func(p *Profile) *string { return &p.ProxyAuthPass },
+	func(p *Profile) *string { return &p.KcpPassword },
+	func(p *Profile) *string { return &p.UdpCustomPsk },
+	func(p *Profile) *string { return &p.IcmpCustomPsk },
+	func(p *Profile) *string { return &p.DnsTunnelPsk },
+}
+
+// encryptSensitiveFields 就地加密凭据字段。调用方传入的是 Profile 值拷贝
+// （AddProfile/UpdateProfile 的参数均为值传递），不影响调用方持有的原值。
+func encryptSensitiveFields(p *Profile) {
+	for _, f := range sensitiveCredentialFields {
+		*f(p) = encryptField(*f(p))
+	}
+}
+
+// decryptSensitiveFields 就地解密凭据字段（读路径）。
+func decryptSensitiveFields(p *Profile) {
+	for _, f := range sensitiveCredentialFields {
+		*f(p) = decryptField(*f(p))
+	}
+}
+
+// redactSensitiveFields 清空凭据字段，用于 API 响应脱敏：GET /nodes 不再返回
+// 明文凭据。编辑场景由 PUT 的「凭据留空 = 不变更」语义承接（见
+// mergeRedactedCredentials）；需要完整凭据的导出走 /nodes/export（JWT 保护 +
+// 前端明文确认弹窗）。
+func redactSensitiveFields(p *Profile) {
+	for _, f := range sensitiveCredentialFields {
+		*f(p) = ""
+	}
+}
+
+// credentialClearSentinel 是「显式清空某凭据」的哨兵值：留空已被占用为
+// "不变更"，清空需要可区分的协议值（前端暂未提供入口，协议先立住）。
+const credentialClearSentinel = "__clear__"
+
+// mergeRedactedCredentials 按 API 凭据语义合并更新：留空 = 沿用库中旧值
+// （GET /nodes 已脱敏，编辑回显拿不到明文，留空提交不能把凭据清掉）；
+// 哨兵值 = 显式清空。按 sensitiveCredentialFields 统一遍历，新增凭据列时
+// 不会漏掉 PUT 的合并逻辑。TOFU 回写等持有完整明文的调用方传全值，合并
+// 对其是空操作。
+func mergeRedactedCredentials(updated *Profile, existing *Profile) {
+	for _, f := range sensitiveCredentialFields {
+		if *f(updated) == credentialClearSentinel {
+			*f(updated) = ""
+		} else if *f(updated) == "" {
+			*f(updated) = *f(existing)
+		}
+	}
 }
 
 type Profile struct {
@@ -145,9 +312,13 @@ func InitDB(dbPath string) error {
 	if err != nil {
 		return err
 	}
-	// 数据库包含明文凭据：收紧文件权限（0600）；Windows 忽略失败。
+	// 数据库包含（加密后的）凭据：收紧文件权限（0600）；Windows 忽略失败。
 	if err := os.Chmod(dbPath, 0o600); err != nil {
 		zap.L().Sugar().Warnf("[DB] ⚠️ Failed to tighten db file permissions: %v", err)
+	}
+	// 敏感列加密密钥：必须在任何读写发生前就绪。
+	if err := loadOrCreateEncKey(dbPath); err != nil {
+		return fmt.Errorf("load credential encryption key: %w", err)
 	}
 
 	_, err = db.Exec(`
@@ -287,6 +458,7 @@ func GetProfiles() ([]Profile, error) {
 			return nil, err
 		}
 		p.TunnelTLSEnabled = tlsNull.Bool
+		decryptSensitiveFields(&p)
 		profiles = append(profiles, p)
 	}
 	return profiles, nil
@@ -304,6 +476,7 @@ func GetProfile(id string) (*Profile, error) {
 		return nil, err
 	}
 	p.TunnelTLSEnabled = tlsNull.Bool
+	decryptSensitiveFields(&p)
 	return &p, nil
 }
 
@@ -314,6 +487,7 @@ func AddProfile(p Profile) (string, error) {
 	if p.ID == "" {
 		p.ID = generateUUID()
 	}
+	encryptSensitiveFields(&p)
 
 	_, err := db.Exec("INSERT INTO profiles (id, name, sshAddr, user, pass, authType, privateKey, keyPass, tunnelType, proxyAddr, customHost, serverName, customPath, proxyAuthRequired, proxyAuthToken, proxyAuthUser, proxyAuthPass, httpPayload, udpgwVersion, udpgwAddr, disableStatusCheck, verifyFingerprint, serverFingerprint, verifyCertFingerprint, serverCertFingerprint, alpn, bindInterface, dnsOverride, remoteDns, localDns, routingOverride, geositeDirect, geoipDirect, totalTx, totalRx, dnsTunnelDomain, dnsTunnelServers, dnsTunnelType, kcpPassword, kcpCrypt, kcpMode, kcpSndWnd, kcpRcvWnd, kcpMtu, kcpNoComp, kcpSmuxVer, kcpKeepAlive, kcpDataShards, kcpParityShards, udpCustomPsk, udpCustomMagic, udpCustomPublicKey, udpCustomPaths, udpCustomSockets, udpCustomSendWindow, dnsTunnelPublicKey, dnsTunnelEDNS0, xhttpChunkSizeKB, xhttpStreamMode, xhttpPadding, xhttpWindowSizeMB, xhttpMaxConns, heartbeatIntervalMs, icmpCustomPsk, icmpCustomMagic, icmpCustomPublicKey, icmpCustomMtuMode, icmpCustomMaxPayload, icmpCustomPaceMS, icmpCustomIdRange, tunnelTLSEnabled, dnsTunnelPsk, dnsTunnelMarker, masqueAlpn, paddingMinBytes, udpCustomMaxPkt, udpCustomMtuProbe, tcpBufferKB, udpMaxSessions, udpIdleTimeoutSec) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		p.ID, p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpMode, p.KcpSndWnd, p.KcpRcvWnd, p.KcpMtu, p.KcpNoComp, p.KcpSmuxVer, p.KcpKeepAlive, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPsk, p.UdpCustomMagic, p.UdpCustomPublicKey, p.UdpCustomPaths, p.UdpCustomSockets, p.UdpCustomSendWindow, p.DnsTunnelPublicKey, p.DnsTunnelEDNS0, p.XhttpChunkSizeKB, p.XhttpStreamMode, p.XhttpPadding, p.XhttpWindowSizeMB, p.XhttpMaxConns, p.HeartbeatIntervalMs, p.IcmpCustomPsk, p.IcmpCustomMagic, p.IcmpCustomPublicKey, p.IcmpCustomMtuMode, p.IcmpCustomMaxPayload, p.IcmpCustomPaceMS, p.IcmpCustomIdRange, p.TunnelTLSEnabled, p.DnsTunnelPsk, p.DnsTunnelMarker, p.MasqueAlpn, p.PaddingMinBytes, p.UdpCustomMaxPkt, p.UdpCustomMtuProbe, p.TcpBufferKB, p.UdpMaxSessions, p.UdpIdleTimeoutSec)
@@ -327,6 +501,7 @@ func UpdateProfile(id string, p Profile) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
+	encryptSensitiveFields(&p)
 	_, err := db.Exec("UPDATE profiles SET name=?, sshAddr=?, user=?, pass=?, authType=?, privateKey=?, keyPass=?, tunnelType=?, proxyAddr=?, customHost=?, serverName=?, customPath=?, proxyAuthRequired=?, proxyAuthToken=?, proxyAuthUser=?, proxyAuthPass=?, httpPayload=?, udpgwVersion=?, udpgwAddr=?, disableStatusCheck=?, verifyFingerprint=?, serverFingerprint=?, verifyCertFingerprint=?, serverCertFingerprint=?, alpn=?, bindInterface=?, dnsOverride=?, remoteDns=?, localDns=?, routingOverride=?, geositeDirect=?, geoipDirect=?, totalTx=?, totalRx=?, dnsTunnelDomain=?, dnsTunnelServers=?, dnsTunnelType=?, kcpPassword=?, kcpCrypt=?, kcpMode=?, kcpSndWnd=?, kcpRcvWnd=?, kcpMtu=?, kcpNoComp=?, kcpSmuxVer=?, kcpKeepAlive=?, kcpDataShards=?, kcpParityShards=?, udpCustomPsk=?, udpCustomMagic=?, udpCustomPublicKey=?, udpCustomPaths=?, udpCustomSockets=?, udpCustomSendWindow=?, dnsTunnelPublicKey=?, dnsTunnelEDNS0=?, xhttpChunkSizeKB=?, xhttpStreamMode=?, xhttpPadding=?, xhttpWindowSizeMB=?, xhttpMaxConns=?, heartbeatIntervalMs=?, icmpCustomPsk=?, icmpCustomMagic=?, icmpCustomPublicKey=?, icmpCustomMtuMode=?, icmpCustomMaxPayload=?, icmpCustomPaceMS=?, icmpCustomIdRange=?, tunnelTLSEnabled=?, dnsTunnelPsk=?, dnsTunnelMarker=?, masqueAlpn=?, paddingMinBytes=?, udpCustomMaxPkt=?, udpCustomMtuProbe=?, tcpBufferKB=?, udpMaxSessions=?, udpIdleTimeoutSec=? WHERE id=?",
 		p.Name, p.SshAddr, p.User, p.Pass, p.AuthType, p.PrivateKey, p.KeyPass, p.TunnelType, p.ProxyAddr, p.CustomHost, p.ServerName, p.CustomPath, p.ProxyAuthRequired, p.ProxyAuthToken, p.ProxyAuthUser, p.ProxyAuthPass, p.HttpPayload, p.UdpgwVersion, p.UdpgwAddr, p.DisableStatusCheck, p.VerifyFingerprint, p.ServerFingerprint, p.VerifyCertFingerprint, p.ServerCertFingerprint, p.Alpn, p.BindInterface, p.DnsOverride, p.RemoteDns, p.LocalDns, p.RoutingOverride, p.GeositeDirect, p.GeoipDirect, p.TotalTx, p.TotalRx, p.DnsTunnelDomain, p.DnsTunnelServers, p.DnsTunnelType, p.KcpPassword, p.KcpCrypt, p.KcpMode, p.KcpSndWnd, p.KcpRcvWnd, p.KcpMtu, p.KcpNoComp, p.KcpSmuxVer, p.KcpKeepAlive, p.KcpDataShards, p.KcpParityShards, p.UdpCustomPsk, p.UdpCustomMagic, p.UdpCustomPublicKey, p.UdpCustomPaths, p.UdpCustomSockets, p.UdpCustomSendWindow, p.DnsTunnelPublicKey, p.DnsTunnelEDNS0, p.XhttpChunkSizeKB, p.XhttpStreamMode, p.XhttpPadding, p.XhttpWindowSizeMB, p.XhttpMaxConns, p.HeartbeatIntervalMs, p.IcmpCustomPsk, p.IcmpCustomMagic, p.IcmpCustomPublicKey, p.IcmpCustomMtuMode, p.IcmpCustomMaxPayload, p.IcmpCustomPaceMS, p.IcmpCustomIdRange, p.TunnelTLSEnabled, p.DnsTunnelPsk, p.DnsTunnelMarker, p.MasqueAlpn, p.PaddingMinBytes, p.UdpCustomMaxPkt, p.UdpCustomMtuProbe, p.TcpBufferKB, p.UdpMaxSessions, p.UdpIdleTimeoutSec, id)
 	return err

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,4 +213,76 @@ func TestRaceTCPDialReturnsFirstSuccessfulCandidate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "fast", winner)
 	_ = conn.Close()
+}
+
+// trackingConn 记录 Close 是否被调用，用于断言落败候选的连接被回收。
+type trackingConn struct {
+	net.Conn
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *trackingConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// TestRaceTCPDialClosesLoserConnAfterWinner 钉住竞速落败者的回收契约：赢家人选
+// 出来后，另一路已在途的拨号才完成并带回成功连接——无论走 goroutine 自身的
+// 取消检查还是主循环的 drainLosers 兜底，该连接都必须被关闭，结果必须被消费
+// （否则 fd 泄漏 + goroutine 滞留）。
+func TestRaceTCPDialClosesLoserConnAfterWinner(t *testing.T) {
+	loserReady := make(chan struct{})
+	winnerReady := make(chan struct{})
+	loserDial := make(chan struct{})
+	var loser *trackingConn
+
+	dial := func(ctx context.Context, target string) (net.Conn, error) {
+		if target == "loser" {
+			// 第一个发射的候选：拨号已挂起，等测试放行后才完成
+			<-loserDial
+			left, right := net.Pipe()
+			_ = right.Close()
+			loser = &trackingConn{Conn: left, closed: make(chan struct{})}
+			close(loserReady)
+			// 刻意不检查 ctx：模拟「检查通过后 cancel 才发生」的窄窗口
+			return loser, nil
+		}
+		<-winnerReady
+		left, right := net.Pipe()
+		_ = right.Close()
+		return left, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// loser 在前（立即发射），winner 靠 happy-eyeballs 定时器延迟发射
+		conn, winner, err := raceTCPDial(context.Background(), []string{"loser", "winner"}, dial)
+		require.NoError(t, err)
+		require.Equal(t, "winner", winner)
+		_ = conn.Close()
+	}()
+
+	// 赢家拨号就绪 → 竞速必然以 winner 收敛并返回
+	close(winnerReady)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("raceTCPDial did not return after winner dial completed")
+	}
+
+	// 主循环已返回，此刻放行落败拨号：其结果只能由 goroutine 自身的取消检查
+	// 或 drainLosers 兜底消费
+	close(loserDial)
+	select {
+	case <-loserReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loser dial never completed")
+	}
+	select {
+	case <-loser.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loser conn was never closed (fd leak)")
+	}
 }

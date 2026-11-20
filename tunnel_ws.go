@@ -100,8 +100,20 @@ func init() {
 		// wss 模式下先在 baseConn 上完成 UTLS 握手，再交给 gws 做 WebSocket 升级。
 		handshakeConn := baseConn
 		if isWSS {
-			utlsConfig := buildUTLSConfig(cfg, []string{"http/1.1"})
-			uConn, err := handshakeUTLS(parentCtx, baseConn, utlsConfig)
+			// wss 是 HTTP/1.1 Upgrade：ALPN 必须只宣告 "http/1.1"。不能走
+			// handshakeUTLS（设 Config.NextProtos）——uTLS Chrome 模板硬编码
+			// ["h2","http/1.1"] 且 ApplyPreset 无 ALPNExtension 分支，NextProtos
+			// 不会上线路；偏好 h2 的服务端（如启用 HTTP/2 优先的 CDN）会在
+			// TLS 层选中 h2，gws 的 HTTP/1.1 Upgrade 随即失败，且报错不指向根因。
+			// 改走 chromeSpecWithALPN 改写 spec + HelloCustom，指纹其余部分不变。
+			utlsConfig := buildUTLSConfig(cfg, nil)
+			spec, err := chromeSpecWithALPN([]string{"http/1.1"})
+			if err != nil {
+				baseConn.Close()
+				zlog.Errorf("%s [Tunnel] ❌ WebSocket handshake failed: %v", TAG, err)
+				return nil, err
+			}
+			uConn, err := handshakeUTLSWithSpec(parentCtx, baseConn, utlsConfig, spec)
 			if err != nil {
 				baseConn.Close()
 				zlog.Errorf("%s [Tunnel] ❌ WebSocket handshake failed: %v", TAG, err)

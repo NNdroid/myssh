@@ -354,6 +354,11 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node list: " + err.Error()})
 				return
 			}
+			// 响应脱敏：列表不再返回明文凭据（SSH 密码/私钥/PSK 等）。编辑由
+			// PUT 的「凭据留空 = 不变更」承接；完整凭据只走 /nodes/export。
+			for i := range profiles {
+				redactSensitiveFields(&profiles[i])
+			}
 			c.JSON(http.StatusOK, profiles)
 		})
 		apiV1.POST("/nodes", func(c *gin.Context) {
@@ -375,6 +380,12 @@ func StartWebServer(bind string, port int, logPath string, workDir string, webUs
 			if err := c.ShouldBindJSON(&profile); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid node data: " + err.Error()})
 				return
+			}
+			// 凭据语义（与响应脱敏配套）：留空 = 沿用库中旧值，否则一次
+			// 「编辑→保存」就会把凭据清掉；哨兵值 = 显式清空。节点不存在时
+			// GetProfile 报错，随后的 UpdateProfile 同样会失败，无需分支处理。
+			if existing, err := GetProfile(id); err == nil {
+				mergeRedactedCredentials(&profile, existing)
 			}
 			if err := UpdateProfile(id, profile); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update node: " + err.Error()})

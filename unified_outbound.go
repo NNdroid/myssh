@@ -343,9 +343,12 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 	results := make(chan tcpRaceResult, len(targets))
 	next := 0
 	active := 0
+	launched := 0
+	received := 0
 
 	launch := func(target string) {
 		active++
+		launched++
 		taskTrack()
 		go func() {
 			defer taskRelease()
@@ -356,6 +359,30 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 				err = raceCtx.Err()
 			}
 			results <- tcpRaceResult{conn: conn, target: target, err: err}
+		}()
+	}
+
+	// drainLosers 在竞速提前结束（找到赢家或调用方 ctx 取消）后启动：把仍在途
+	// 的拨号结果全部收走，落败者若带回了成功连接则统一关闭，主循环不再消费。
+	//
+	// 必要性来自一个检查兜不住的窄窗口：落败 goroutine 在「检查 raceCtx.Err()」
+	// 与「results <- 发送」之间，主循环可能恰好收到赢家并 cancel + 返回——
+	// 检查时 ctx 尚未取消、连接未被关闭，缓冲 channel 吸收这次发送后无人再读，
+	// fd 与连接就此泄漏。收走剩余结果（每路恰好发一条）是唯一可靠的兜底。
+	drainLosers := func() {
+		remaining := launched - received
+		if remaining <= 0 {
+			return
+		}
+		taskTrack()
+		go func() {
+			defer taskRelease()
+			for i := 0; i < remaining; i++ {
+				r := <-results
+				if r.conn != nil {
+					_ = r.conn.Close()
+				}
+			}
 		}()
 	}
 
@@ -393,11 +420,14 @@ func raceTCPDial(ctx context.Context, targets []string, dial tcpDialFunc) (net.C
 	for active > 0 || next < len(targets) {
 		select {
 		case <-ctx.Done():
+			drainLosers()
 			return nil, "", ctx.Err()
 		case result := <-results:
 			active--
+			received++
 			if result.err == nil && result.conn != nil {
 				cancel()
+				drainLosers()
 				return result.conn, result.target, nil
 			}
 			lastErr = result.err

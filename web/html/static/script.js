@@ -772,7 +772,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         },
         exportNodes: async () => {
-            const res = await api.get('/nodes');
+            // 必须走 /nodes/export：列表端点 /nodes 已脱敏（不含凭据），只有
+            // 专用导出端点返回完整数据。
+            const res = await api.get('/nodes/export');
             if (Array.isArray(res)) {
                 // 导出包含明文密码/私钥/PSK——先让用户明确确认
                 if (!(await asyncConfirm(i18n.t('alert_export_credentials') || 'The export contains all credentials in PLAINTEXT. Continue?'))) {

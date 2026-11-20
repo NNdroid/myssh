@@ -129,3 +129,76 @@ func TestNewChromeUConnWithSessionCache(t *testing.T) {
 		t.Errorf("session-cache handshake ALPN = %q, want %q", uConn2.ConnectionState().NegotiatedProtocol, "dot")
 	}
 }
+
+// TestChromeSpecWithALPN 钉住改写函数的两个契约：未指定 alpn 时保持 Chrome
+// 模板默认（["h2","http/1.1"]——这正是 wss 走 handshakeUTLS 时 h2 会上线路的
+// 根源），指定时只替换 ALPNExtension、其余扩展原样保留。
+func TestChromeSpecWithALPN(t *testing.T) {
+	defaultSpec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+	if err != nil {
+		t.Fatalf("build default spec: %v", err)
+	}
+	var defaultAlpn *utls.ALPNExtension
+	for _, ext := range defaultSpec.Extensions {
+		if a, ok := ext.(*utls.ALPNExtension); ok {
+			defaultAlpn = a
+		}
+	}
+	if defaultAlpn == nil {
+		t.Fatal("Chrome template carries no ALPNExtension")
+	}
+	if strings.Join(defaultAlpn.AlpnProtocols, ",") != "h2,http/1.1" {
+		t.Errorf("Chrome template ALPN = %v, want [h2 http/1.1]", defaultAlpn.AlpnProtocols)
+	}
+
+	spec, err := chromeSpecWithALPN([]string{"http/1.1"})
+	if err != nil {
+		t.Fatalf("chromeSpecWithALPN: %v", err)
+	}
+	alpnCount := 0
+	for _, ext := range spec.Extensions {
+		if a, ok := ext.(*utls.ALPNExtension); ok {
+			alpnCount++
+			if strings.Join(a.AlpnProtocols, ",") != "http/1.1" {
+				t.Errorf("rewritten spec ALPN = %v, want [http/1.1]", a.AlpnProtocols)
+			}
+		}
+	}
+	if alpnCount != 1 {
+		t.Errorf("rewritten spec ALPNExtension count = %d, want 1", alpnCount)
+	}
+	if len(spec.Extensions) != len(defaultSpec.Extensions) {
+		t.Errorf("rewritten spec must keep Chrome extension set: got %d exts, want %d", len(spec.Extensions), len(defaultSpec.Extensions))
+	}
+}
+
+// TestHandshakeUTLSWithSpecRewritesALPNOnWire 走完整握手验证改写真的上了线路：
+// 服务端按自身偏好顺序宣告 ["h2","http/1.1"]（Go 服务端按服务端顺序选择），
+// 客户端只有宣告 ["http/1.1"] 才会协商出 http/1.1；若改写未生效、客户端仍按
+// 模板宣告 h2+http/1.1，这里会协商出 h2——正是 wss 在 h2 优先 CDN 上握不上手
+// 的故障形态。
+func TestHandshakeUTLSWithSpecRewritesALPNOnWire(t *testing.T) {
+	addr := startChromeTestTLSServer(t, []string{"h2", "http/1.1"})
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	conf := &utls.Config{ServerName: "localhost", InsecureSkipVerify: true}
+	spec, err := chromeSpecWithALPN([]string{"http/1.1"})
+	if err != nil {
+		t.Fatalf("chromeSpecWithALPN: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	uConn, err := handshakeUTLSWithSpec(ctx, conn, conf, spec)
+	if err != nil {
+		t.Fatalf("handshake with rewritten spec: %v", err)
+	}
+	defer uConn.Close()
+	if uConn.ConnectionState().NegotiatedProtocol != "http/1.1" {
+		t.Errorf("negotiated ALPN = %q, want %q (spec rewrite did not reach the wire)", uConn.ConnectionState().NegotiatedProtocol, "http/1.1")
+	}
+}
